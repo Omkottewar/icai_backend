@@ -2,37 +2,64 @@ import type { Request, Response, NextFunction } from "express";
 
 /**
  * Reject mutating requests whose Origin / Referer doesn't match our own host.
- * This is the simplest CSRF defense for a same-origin SPA — no tokens to ship.
+ * Simple CSRF defense for a same-origin SPA — no tokens to ship.
  *
- * Relies on the browser sending Origin on state-changing requests, which all
- * modern browsers do. Falls back to Referer (also browser-set, not spoofable
- * by JS in a victim page).
+ * Allowed origins are built from env at startup:
+ *   APP_URLS  — comma-separated list. Entries may use `*` as a glob, e.g.
+ *               `https://icai-frontend-*-om-kottewars-projects.vercel.app`
+ *               to cover all Vercel preview deploys for one project.
+ *   APP_URL   — singular fallback (backwards compatible).
+ *   API_URL   — this server's own origin.
  *
- * Allowed origins come from APP_URL (the frontend) and API_URL (this server).
+ * In non-production, http://localhost:5173 and :4000 are auto-allowed so
+ * `npm run dev` works without env setup.
  */
+
+function buildMatchers(): Array<(origin: string) => boolean> {
+  const raw = [
+    ...(process.env.APP_URLS ?? "").split(","),
+    process.env.APP_URL,
+    process.env.API_URL,
+  ]
+    .map((s) => (s ?? "").trim())
+    .filter(Boolean);
+
+  if (process.env.NODE_ENV !== "production") {
+    raw.push("http://localhost:5173", "http://localhost:4000");
+  }
+
+  return raw.map((pattern) => {
+    if (pattern.includes("*")) {
+      // Glob → regex. Escape regex specials, then turn * into .*
+      const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp("^" + escaped.replace(/\*/g, ".*") + "$");
+      return (origin: string) => re.test(origin);
+    }
+    let exact: string;
+    try {
+      exact = new URL(pattern).origin;
+    } catch {
+      return () => false;
+    }
+    return (origin: string) => origin === exact;
+  });
+}
+
+const matchers = buildMatchers();
+
 export function sameOrigin(req: Request, res: Response, next: NextFunction) {
   // Read-only requests don't need CSRF protection — cookies aren't sent
   // cross-site for SameSite=Lax on simple GETs anyway.
   if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
 
-  const allowed = new Set(
-    [process.env.APP_URL, process.env.API_URL]
-      .filter(Boolean)
-      .map((u) => new URL(u as string).origin),
-  );
-  // Local dev sometimes lacks env vars — allow localhost defaults.
-  if (process.env.NODE_ENV !== "production") {
-    allowed.add("http://localhost:5173");
-    allowed.add("http://localhost:4000");
-  }
-
   const origin = req.get("origin");
-  if (origin && allowed.has(origin)) return next();
+  if (origin && matchers.some((m) => m(origin))) return next();
 
   const referer = req.get("referer");
   if (referer) {
     try {
-      if (allowed.has(new URL(referer).origin)) return next();
+      const refererOrigin = new URL(referer).origin;
+      if (matchers.some((m) => m(refererOrigin))) return next();
     } catch {
       /* malformed referer — fall through to reject */
     }
