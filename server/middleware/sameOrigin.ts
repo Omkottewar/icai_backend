@@ -15,8 +15,18 @@ import type { Request, Response, NextFunction } from "express";
  * `npm run dev` works without env setup.
  */
 
+// Hardcoded production frontend origins. Baked in so the backend works
+// without depending on Render env vars. Glob `*` is supported.
+const FRONTEND_ORIGINS = [
+  // Vercel preview + production deploys for icai-frontend
+  "https://icai-frontend-*-om-kottewars-projects.vercel.app",
+  "https://icai-frontend.vercel.app",
+  "https://icai-frontend-om-kottewars-projects.vercel.app",
+];
+
 function buildMatchers(): Array<(origin: string) => boolean> {
   const raw = [
+    ...FRONTEND_ORIGINS,
     ...(process.env.APP_URLS ?? "").split(","),
     process.env.APP_URL,
     process.env.API_URL,
