@@ -16,11 +16,12 @@ import { siteRouter } from "./routes/site.js";
 
 const app = express();
 
-// In production this API typically sits behind a reverse proxy (nginx, the
-// platform's edge router, etc.). Without this, req.ip resolves to the proxy's
-// own address and every request looks like it came from one IP — which would
-// trip the rate limiters for everyone at once.
-if (process.env.NODE_ENV === "production") app.set("trust proxy", 1);
+// The API sits behind a reverse proxy on every cloud host (Render, Railway,
+// Fly, nginx, etc.). Without this, req.ip resolves to the proxy's own address
+// and every request looks like it came from one IP — which trips the rate
+// limiters for everyone at once. One hop = trust the immediate proxy only,
+// safe in dev (no forwarded header) and in any single-proxy deployment.
+app.set("trust proxy", 1);
 
 // Bumped from the default 100kb so event-banner uploads (base64-encoded
 // images, capped at ~6 MB on the file endpoint) fit through the JSON parser.
