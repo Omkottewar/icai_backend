@@ -12,7 +12,11 @@ import { publicCommitteesRouter } from "./routes/committees.js";
 import { checklistsRouter } from "./routes/checklists.js";
 import { branchRouter } from "./routes/branch.js";
 import { forumRouter } from "./routes/forum.js";
+import { eventChatRouter } from "./routes/eventChat.js";
 import { siteRouter } from "./routes/site.js";
+import { announcementsRouter } from "./routes/announcements.js";
+import { employerRouter } from "./routes/employer.js";
+import { attachEventChatSocket } from "./lib/eventChatSocket.js";
 
 const app = express();
 
@@ -43,12 +47,17 @@ app.use("/api/dashboard", dashboardRouter);
 // paths like /my-registrations that would otherwise be swallowed by the
 // public router's GET /:slug.
 app.use("/api/events", registrationsRouter);
+// eventChatRouter mounts before publicEventsRouter so the literal /:id/chat
+// paths aren't swallowed by the public router's catch-all /:slug.
+app.use("/api/events", eventChatRouter);
 app.use("/api/events", publicEventsRouter);
 app.use("/api/committees", publicCommitteesRouter);
 app.use("/api/checklists", checklistsRouter);
 app.use("/api/branch", branchRouter);
 app.use("/api/forum", forumRouter);
 app.use("/api/site", siteRouter);
+app.use("/api/announcements", announcementsRouter);
+app.use("/api/employer", employerRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {
@@ -63,7 +72,10 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 });
 
 const port = Number(process.env.PORT ?? 4000);
-app.listen(port, () => {
+// Hold a reference to the http.Server so we can attach the WebSocket upgrade
+// handler. The WS endpoint shares this port — clients connect to ws(s)://host/ws/...
+const server = app.listen(port, () => {
   // eslint-disable-next-line no-console
   console.log(`API listening on http://localhost:${port}`);
 });
+attachEventChatSocket(server);

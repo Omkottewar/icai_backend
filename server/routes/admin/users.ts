@@ -277,10 +277,12 @@ usersAdminRouter.post("/:id/roles", async (req, res, next) => {
 // End-term: sets effective_to to today. Preserves history.
 usersAdminRouter.delete("/:id/roles/:assignment_id", async (req, res, next) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    // Backdate by one day so the row drops out of `effective_to >= CURRENT_DATE`
+    // filters immediately. Setting it to today would leave the assignment
+    // active for the rest of today across auth, triggers, and the admin UI.
     const [row] = await db
       .update(userRoleAssignments)
-      .set({ effective_to: today })
+      .set({ effective_to: sql`CURRENT_DATE - INTERVAL '1 day'` })
       .where(and(
         eq(userRoleAssignments.id, req.params.assignment_id),
         eq(userRoleAssignments.user_id, req.params.id),
