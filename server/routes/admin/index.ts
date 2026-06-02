@@ -9,6 +9,7 @@ import { usersAdminRouter } from "./users.js";
 import { committeesAdminRouter } from "./committees.js";
 import { siteAdminRouter } from "./site.js";
 import { announcementsAdminRouter } from "./announcements.js";
+import { jobsAdminRouter } from "./jobs.js";
 
 export const adminRouter = Router();
 
@@ -23,3 +24,4 @@ adminRouter.use("/users", usersAdminRouter);
 adminRouter.use("/committees", committeesAdminRouter);
 adminRouter.use("/site", siteAdminRouter);
 adminRouter.use("/announcements", announcementsAdminRouter);
+adminRouter.use("/jobs", jobsAdminRouter);

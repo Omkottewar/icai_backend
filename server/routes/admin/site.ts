@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "../../../db/client.js";
 import { siteContent, siteSettings } from "../../../schema/index.js";
-import { isValidSlug, isValidSettingKey } from "../../../lib/siteContentSlots.js";
+import { isValidSlug, isValidSettingKey, isValidCommitteeSlug } from "../../../lib/siteContentSlots.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 
@@ -14,7 +14,7 @@ export const siteAdminRouter = Router();
 siteAdminRouter.put("/content/:slug", async (req: AuthedRequest, res, next) => {
   try {
     const slug = need(trim(req.params.slug), "Slug");
-    if (!isValidSlug(slug)) throw new ApiError(400, `Unknown content slug: ${slug}`);
+    if (!isValidSlug(slug) && !isValidCommitteeSlug(slug)) throw new ApiError(400, `Unknown content slug: ${slug}`);
 
     const data = req.body?.data;
     if (data === undefined || data === null || typeof data !== "object" || Array.isArray(data)) {

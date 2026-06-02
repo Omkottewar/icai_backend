@@ -17,6 +17,8 @@ import { siteRouter } from "./routes/site.js";
 import { announcementsRouter } from "./routes/announcements.js";
 import { employerRouter } from "./routes/employer.js";
 import { attachEventChatSocket } from "./lib/eventChatSocket.js";
+import { publicJobsRouter } from "./routes/jobs.js";
+import { membersRouter } from "./routes/members.js";
 
 const app = express();
 
@@ -58,6 +60,8 @@ app.use("/api/forum", forumRouter);
 app.use("/api/site", siteRouter);
 app.use("/api/announcements", announcementsRouter);
 app.use("/api/employer", employerRouter);
+app.use("/api/jobs", publicJobsRouter);
+app.use("/api/members", membersRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {

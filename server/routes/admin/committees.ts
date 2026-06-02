@@ -53,6 +53,16 @@ committeesAdminRouter.get("/", async (req, res, next) => {
             AND (${userRoleAssignments}.effective_to IS NULL
                  OR ${userRoleAssignments}.effective_to >= CURRENT_DATE)
         )`.as("active_role_count"),
+        chairman_name: sql<string | null>`(
+          SELECT u.name FROM user_role_assignments ura
+          JOIN roles r ON r.id = ura.role_id
+          JOIN users u ON u.id = ura.user_id
+          WHERE ura.scope_committee_id = ${committees}.id
+            AND r.code = 'committee_chairman'
+            AND (ura.effective_to IS NULL OR ura.effective_to >= CURRENT_DATE)
+            AND u.deleted_at IS NULL
+          LIMIT 1
+        )`.as("chairman_name"),
       })
       .from(committees)
       .where(conds.length ? and(...conds) : undefined)
