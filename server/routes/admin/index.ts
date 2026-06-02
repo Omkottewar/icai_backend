@@ -8,6 +8,7 @@ import { filesAdminRouter } from "./files.js";
 import { usersAdminRouter } from "./users.js";
 import { committeesAdminRouter } from "./committees.js";
 import { siteAdminRouter } from "./site.js";
+import { jobsAdminRouter } from "./jobs.js";
 
 export const adminRouter = Router();
 
@@ -21,3 +22,4 @@ adminRouter.use("/files", filesAdminRouter);
 adminRouter.use("/users", usersAdminRouter);
 adminRouter.use("/committees", committeesAdminRouter);
 adminRouter.use("/site", siteAdminRouter);
+adminRouter.use("/jobs", jobsAdminRouter);

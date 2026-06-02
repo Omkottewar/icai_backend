@@ -84,12 +84,23 @@ export const SITE_SLOTS = {
     page:  "About",
     fields: [{ key: "body", label: "Body", kind: "markdown" }],
   },
+  about_committee_members: {
+    label: "About — Committee Members",
+    page:  "About",
+    fields: [],
+  },
 } satisfies Record<string, SlotDef>;
 
 export type SlotSlug = keyof typeof SITE_SLOTS;
 export const SLOT_SLUGS = Object.keys(SITE_SLOTS) as SlotSlug[];
 export function isValidSlug(s: string): s is SlotSlug {
   return Object.prototype.hasOwnProperty.call(SITE_SLOTS, s);
+}
+
+// Dynamic per-committee slugs for event page chairman content.
+// Pattern: event_committee_<lowercase_code>  e.g. event_committee_asc
+export function isValidCommitteeSlug(s: string): boolean {
+  return /^event_committee_[a-z0-9_]+$/.test(s);
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────

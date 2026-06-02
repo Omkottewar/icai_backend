@@ -13,6 +13,8 @@ import { checklistsRouter } from "./routes/checklists.js";
 import { branchRouter } from "./routes/branch.js";
 import { forumRouter } from "./routes/forum.js";
 import { siteRouter } from "./routes/site.js";
+import { publicJobsRouter } from "./routes/jobs.js";
+import { membersRouter } from "./routes/members.js";
 
 const app = express();
 
@@ -49,6 +51,8 @@ app.use("/api/checklists", checklistsRouter);
 app.use("/api/branch", branchRouter);
 app.use("/api/forum", forumRouter);
 app.use("/api/site", siteRouter);
+app.use("/api/jobs", publicJobsRouter);
+app.use("/api/members", membersRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {
