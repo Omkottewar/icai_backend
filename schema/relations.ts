@@ -5,12 +5,10 @@ import {
   memberProfiles, studentProfiles,
   oauthLinks,
 } from "./identity";
-import {
-  payments, paymentRefunds, invoices, paymentDisputes,
-} from "./payments";
+import { payments } from "./payments";
 import { events, eventRegistrations, cpeCredits } from "./events";
 import { firms, jobPostings } from "./firms";
-import { approvals, roomBookings } from "./ops";
+import { roomBookings } from "./ops";
 import { consultations, cabfAssistanceRequests } from "./counseling";
 
 // ─── Identity ────────────────────────────────────────────────────────────────
@@ -38,8 +36,6 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   consultationsAsClient: many(consultations, { relationName: "client" }),
   cabfRequests:        many(cabfAssistanceRequests),
   roomBookings:        many(roomBookings),
-  initiatedRefunds:    many(paymentRefunds),
-  assignedDisputes:    many(paymentDisputes),
 }));
 
 export const userRoleAssignmentsRelations = relations(userRoleAssignments, ({ one }) => ({
@@ -72,26 +68,8 @@ export const oauthLinksRelations = relations(oauthLinks, ({ one }) => ({
 
 // ─── Payments ────────────────────────────────────────────────────────────────
 
-export const paymentsRelations = relations(payments, ({ one, many }) => ({
-  payer:     one(users, { fields: [payments.payer_user_id], references: [users.id] }),
-  refunds:   many(paymentRefunds),
-  invoices:  many(invoices),
-  disputes:  many(paymentDisputes),
-}));
-
-export const paymentRefundsRelations = relations(paymentRefunds, ({ one }) => ({
-  payment:     one(payments, { fields: [paymentRefunds.payment_id],    references: [payments.id] }),
-  initiatedBy: one(users,    { fields: [paymentRefunds.initiated_by],  references: [users.id] }),
-}));
-
-export const invoicesRelations = relations(invoices, ({ one }) => ({
-  payment:    one(payments, { fields: [invoices.payment_id],    references: [payments.id] }),
-  payerUser:  one(users,    { fields: [invoices.payer_user_id], references: [users.id] }),
-}));
-
-export const paymentDisputesRelations = relations(paymentDisputes, ({ one }) => ({
-  payment:    one(payments, { fields: [paymentDisputes.payment_id],   references: [payments.id] }),
-  assignedTo: one(users,    { fields: [paymentDisputes.assigned_to],  references: [users.id] }),
+export const paymentsRelations = relations(payments, ({ one }) => ({
+  payer: one(users, { fields: [payments.payer_user_id], references: [users.id] }),
 }));
 
 // ─── Events ──────────────────────────────────────────────────────────────────
@@ -130,11 +108,6 @@ export const jobPostingsRelations = relations(jobPostings, ({ one }) => ({
 }));
 
 // ─── Ops ─────────────────────────────────────────────────────────────────────
-
-export const approvalsRelations = relations(approvals, ({ one }) => ({
-  submittedBy: one(users, { fields: [approvals.submitted_by], references: [users.id] }),
-  reviewedBy:  one(users, { fields: [approvals.reviewed_by],  references: [users.id] }),
-}));
 
 export const roomBookingsRelations = relations(roomBookings, ({ one }) => ({
   user:    one(users,    { fields: [roomBookings.user_id],    references: [users.id] }),

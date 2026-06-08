@@ -46,20 +46,20 @@ filesAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
 
     const [row] = await db.insert(files).values({
       name,
-      mimeType,
-      sizeBytes: buf.length,
-      storagePath,
+      mime_type: mimeType,
+      size_bytes: buf.length,
+      storage_path: storagePath,
       bucket,
-      uploadedBy: req.user!.id,
+      uploaded_by: req.user!.id,
     }).returning();
 
     res.status(201).json({
       id: row.id,
       bucket: row.bucket,
-      storage_path: row.storagePath,
-      url: `/uploads/${row.storagePath}`,
-      size_bytes: row.sizeBytes,
-      mime_type: row.mimeType,
+      storage_path: row.storage_path,
+      url: `/uploads/${row.storage_path}`,
+      size_bytes: row.size_bytes,
+      mime_type: row.mime_type,
       name: row.name,
     });
   } catch (err) { handleApiError(err, res, next); }
@@ -69,8 +69,8 @@ filesAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
 filesAdminRouter.delete("/:id", async (req, res, next) => {
   try {
     const [row] = await db.update(files)
-      .set({ deletedAt: new Date() })
-      .where(and(eq(files.id, req.params.id), isNull(files.deletedAt)))
+      .set({ deleted_at: new Date() })
+      .where(and(eq(files.id, req.params.id), isNull(files.deleted_at)))
       .returning();
     if (!row) throw new ApiError(404, "File not found");
     res.json({ ok: true });

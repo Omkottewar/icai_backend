@@ -1,0 +1,2 @@
+ALTER TYPE "public"."checklist_instance_action" ADD VALUE 'released' BEFORE 'assigned';--> statement-breakpoint
+ALTER TYPE "public"."checklist_instance_status" ADD VALUE 'draft' BEFORE 'awaiting_fill';

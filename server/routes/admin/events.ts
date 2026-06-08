@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { and, asc, desc, eq, ilike, isNull, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
-import { events, eventRegistrations, committees, branches, files, eventChecklists } from "../../../schema/index.js";
+import { events, eventRegistrations, committees, branches, files, eventChecklists, checklistInstances } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
 
@@ -100,10 +100,16 @@ eventsAdminRouter.get("/", async (req, res, next) => {
         created_at: events.created_at,
         checklist_id: eventChecklists.id,
         checklist_status: eventChecklists.status,
+        instance_id: checklistInstances.id,
+        instance_status: checklistInstances.status,
       })
       .from(events)
       .leftJoin(committees, eq(committees.id, events.committee_id))
       .leftJoin(eventChecklists, eq(eventChecklists.event_id, events.id))
+      .leftJoin(checklistInstances, and(
+        eq(checklistInstances.event_id, events.id),
+        isNull(checklistInstances.deleted_at),
+      ))
       .where(and(...conds))
       .orderBy(desc(events.starts_at))
       .limit(pageSize)
@@ -126,7 +132,7 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
         event: events,
         committee_name: committees.name,
         branch_name: branches.name,
-        banner_path: files.storagePath,
+        banner_path: files.storage_path,
         banner_bucket: files.bucket,
       })
       .from(events)

@@ -2,7 +2,7 @@ import { pgTable, uuid, text, timestamp, AnyPgColumn } from "drizzle-orm/pg-core
 import { forumThreadTagEnum } from "./enums";
 import { users } from "./identity";
 import { events } from "./events";
-import { committees } from "./schema.patch";
+import { committees } from "./committees";
 
 // ─── forum_threads ────────────────────────────────────────────────────────
 // Top of a discussion. Scoped to an event OR a committee (DB enforces the

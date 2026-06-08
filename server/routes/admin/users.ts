@@ -274,22 +274,45 @@ usersAdminRouter.post("/:id/roles", async (req, res, next) => {
 });
 
 // â”€â”€â”€ DELETE /api/admin/users/:id/roles/:assignment_id â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// End-term: sets effective_to to today. Preserves history.
+// End-term: removes the assignment from "currently active" filters.
+//
+//   • Past assignment (effective_from < today) → backdate effective_to to
+//     yesterday so history is preserved.
+//   • Same-day or future assignment (effective_from >= today) → DELETE.
+//     There's no meaningful history to keep (the role was never active in
+//     practice) and backdating would either violate the ura_window_valid
+//     check or leave the row "active" through the rest of today.
 usersAdminRouter.delete("/:id/roles/:assignment_id", async (req, res, next) => {
   try {
-    // Backdate by one day so the row drops out of `effective_to >= CURRENT_DATE`
-    // filters immediately. Setting it to today would leave the assignment
-    // active for the rest of today across auth, triggers, and the admin UI.
-    const [row] = await db
-      .update(userRoleAssignments)
-      .set({ effective_to: sql`CURRENT_DATE - INTERVAL '1 day'` })
-      .where(and(
-        eq(userRoleAssignments.id, req.params.assignment_id),
-        eq(userRoleAssignments.user_id, req.params.id),
-      ))
-      .returning();
-    if (!row) throw new ApiError(404, "Role assignment not found");
-    res.json({ ok: true, assignment: row });
+    const result = await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select({
+          id: userRoleAssignments.id,
+          effective_from: userRoleAssignments.effective_from,
+        })
+        .from(userRoleAssignments)
+        .where(and(
+          eq(userRoleAssignments.id, req.params.assignment_id),
+          eq(userRoleAssignments.user_id, req.params.id),
+        ))
+        .limit(1);
+      if (!existing) return null;
+
+      const today = new Date().toISOString().slice(0, 10);
+      if (existing.effective_from >= today) {
+        await tx.delete(userRoleAssignments)
+          .where(eq(userRoleAssignments.id, existing.id));
+        return { deleted: true };
+      }
+
+      const [row] = await tx.update(userRoleAssignments)
+        .set({ effective_to: sql`CURRENT_DATE - INTERVAL '1 day'` })
+        .where(eq(userRoleAssignments.id, existing.id))
+        .returning();
+      return { deleted: false, assignment: row };
+    });
+    if (!result) throw new ApiError(404, "Role assignment not found");
+    res.json({ ok: true, ...result });
   } catch (err) { handleApiError(err, res, next); }
 });
 

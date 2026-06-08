@@ -1,10 +1,13 @@
 import {
-  pgTable, uuid, text, boolean, timestamp, date, integer, jsonb,
+  pgTable, uuid, text, boolean, timestamp, date, integer, jsonb, AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import {
   userRoleEnum, userStatusEnum, localeEnum, genderEnum,
-  studentLevelEnum, copStatusEnum, employerUserRoleEnum, roleScopeEnum,
+  studentLevelEnum, articleshipStatusEnum, copStatusEnum,
+  employerUserRoleEnum, roleScopeEnum,
 } from "./enums";
+import { committees } from "./committees";
+import { files } from "./files";
 
 // ─── Branches ───────────────────────────────────────────────────────────────
 
@@ -41,7 +44,7 @@ export const users = pgTable("users", {
   primary_role:  userRoleEnum("primary_role").notNull(),  // UI hint only
   status:        userStatusEnum("status").notNull().default("active"),
   locale:        localeEnum("locale").notNull().default("en"),
-  avatar_id:     uuid("avatar_id"),                        // FK → files.id
+  avatar_id:     uuid("avatar_id").references((): AnyPgColumn => files.id, { onDelete: "set null" }),
   branch_id:     uuid("branch_id").references(() => branches.id),
   last_login_at: timestamp("last_login_at", { withTimezone: true }),
   notify_email:  boolean("notify_email").notNull().default(true),
@@ -59,7 +62,7 @@ export const userRoleAssignments = pgTable("user_role_assignments", {
   user_id:             uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   role_id:             uuid("role_id").notNull().references(() => roles.id),
   scope_branch_id:     uuid("scope_branch_id").references(() => branches.id),   // populated for branch-scoped roles
-  scope_committee_id:  uuid("scope_committee_id"),                              // FK → committees.id — for committee-scoped roles
+  scope_committee_id:  uuid("scope_committee_id").references(() => committees.id, { onDelete: "restrict" }),  // for committee-scoped roles
   effective_from:      date("effective_from").notNull(),
   effective_to:        date("effective_to"),          // NULL = currently active
   created_at:          timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -116,7 +119,7 @@ export const studentProfiles = pgTable("student_profiles", {
   user_id:              uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
   srn:                  text("srn").notNull().unique(),
   level:                studentLevelEnum("level").notNull(),
-  articleship_status:   text("articleship_status"),   // ongoing/completed/not_started
+  articleship_status:   articleshipStatusEnum("articleship_status"),  // not_started | ongoing | completed | terminated
   articleship_start:    date("articleship_start"),
   principal_member_id:  uuid("principal_member_id").references(() => users.id),
   exam_attempts:        integer("exam_attempts").notNull().default(0),

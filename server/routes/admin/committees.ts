@@ -41,7 +41,7 @@ committeesAdminRouter.get("/", async (req, res, next) => {
         name: committees.name,
         description: committees.description,
         active: committees.active,
-        created_at: committees.createdAt,
+        created_at: committees.created_at,
         events_count: sql<number>`(
           SELECT COUNT(*)::int FROM ${events}
           WHERE ${events}.committee_id = ${committees}.id

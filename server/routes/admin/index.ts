@@ -10,6 +10,7 @@ import { committeesAdminRouter } from "./committees.js";
 import { siteAdminRouter } from "./site.js";
 import { announcementsAdminRouter } from "./announcements.js";
 import { jobsAdminRouter } from "./jobs.js";
+import { notificationTemplatesAdminRouter } from "./notificationTemplates.js";
 
 export const adminRouter = Router();
 
@@ -25,3 +26,4 @@ adminRouter.use("/committees", committeesAdminRouter);
 adminRouter.use("/site", siteAdminRouter);
 adminRouter.use("/announcements", announcementsAdminRouter);
 adminRouter.use("/jobs", jobsAdminRouter);
+adminRouter.use("/notification-templates", notificationTemplatesAdminRouter);

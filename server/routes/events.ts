@@ -45,7 +45,7 @@ publicEventsRouter.get("/", async (req, res, next) => {
         fee_paise: events.fee_paise,
         capacity: events.capacity,
         registered_count: events.registered_count,
-        banner_path: files.storagePath,
+        banner_path: files.storage_path,
         program_type: events.program_type,
         highlights: events.highlights,
       })
@@ -85,7 +85,7 @@ publicEventsRouter.get("/:slug", async (req, res, next) => {
         fee_paise: events.fee_paise,
         capacity: events.capacity,
         registered_count: events.registered_count,
-        banner_path: files.storagePath,
+        banner_path: files.storage_path,
         program_type: events.program_type,
         highlights: events.highlights,
         status: events.status,

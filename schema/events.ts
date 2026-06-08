@@ -8,7 +8,8 @@ import {
 } from "./enums";
 import { users, branches } from "./identity";
 import { payments } from "./payments";
-import { committees } from "./schema.patch";
+import { committees } from "./committees";
+import { files } from "./files";
 
 // ─── Events ───────────────────────────────────────────────────────────────────
 
@@ -30,7 +31,7 @@ export const events = pgTable("events", {
   capacity:             integer("capacity"),            // NULL = unlimited
   registered_count:     integer("registered_count").notNull().default(0),  // Fix #4 — atomic seat tracking
   status:               eventStatusEnum("status").notNull().default("draft"),
-  banner_id:            uuid("banner_id"),              // FK → files.id
+  banner_id:            uuid("banner_id").references(() => files.id, { onDelete: "set null" }),
   recurrence_parent_id: uuid("recurrence_parent_id"),  // self-ref FK → events.id
   recurrence_rrule:     text("recurrence_rrule"),       // RFC 5545
   highlights:           text("highlights").array(),
@@ -55,7 +56,24 @@ export const eventRegistrations = pgTable("event_registrations", {
   deleted_at:    timestamp("deleted_at", { withTimezone: true }),
 });
 
-// ─── Event Checklists (approval workflow) ────────────────────────────────────
+// ─── Event Checklists (LEGACY — soft-deprecated 2026-06-04) ─────────────────
+//
+// The original event-approval pipeline. Replaced by the generic checklist
+// engine in schema/checklists.ts; new event approvals create a row in
+// `checklist_instances` instead. These tables stay live ONLY for in-flight
+// rows started before the swap.
+//
+// SUNSET DATE: 2026-09-04 (3 months).
+// At that point:
+//   1. Run: SELECT COUNT(*) FROM event_checklists WHERE finalized_at IS NULL;
+//      Confirm the count is 0 (every old checklist has been approved/rejected).
+//   2. Drop routes/checklists.ts, hooks/useChecklist.js, the legacy badge on
+//      DashboardPage, the legacy branch in EventsAdminPage.ChecklistButton,
+//      the legacy filter in CommitteeChecklistsCard + ApprovalsQueueCard.
+//   3. Drop the tables + their enums (event_checklist_status,
+//      event_checklist_item_kind, event_checklist_action) via a new migration.
+//
+// Until that date: leave alone. The legacy code path is fully maintained.
 // admin drafts → committee chairman fills → branch chairman reviews
 // Branch chairman approval auto-publishes the event (via DB trigger).
 
@@ -100,6 +118,6 @@ export const cpeCredits = pgTable("cpe_credits", {
   year:                integer("year").notNull(),         // calendar year of credit
   source:              text("source"),                    // branch_event / icai_self_study
   issued_at:           timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
-  certificate_file_id: uuid("certificate_file_id"),      // FK → files.id
+  certificate_file_id: uuid("certificate_file_id").references(() => files.id, { onDelete: "set null" }),
   deleted_at:          timestamp("deleted_at", { withTimezone: true }),
 });

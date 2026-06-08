@@ -68,7 +68,7 @@ siteRouter.get("/managing-committee", async (_req, res, next) => {
       user_id:      users.id,
       name:         users.name,
       email:        users.email,
-      avatar_path:  files.storagePath,
+      avatar_path:  files.storage_path,
       role_code:    roles.code,
       role_name:    roles.name,
     })

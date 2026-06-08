@@ -10,6 +10,8 @@ import { publicEventsRouter } from "./routes/events.js";
 import { registrationsRouter } from "./routes/registrations.js";
 import { publicCommitteesRouter } from "./routes/committees.js";
 import { checklistsRouter } from "./routes/checklists.js";
+import { checklistTemplatesRouter } from "./routes/checklistTemplates.js";
+import { checklistInstancesRouter } from "./routes/checklistInstances.js";
 import { branchRouter } from "./routes/branch.js";
 import { forumRouter } from "./routes/forum.js";
 import { eventChatRouter } from "./routes/eventChat.js";
@@ -19,6 +21,7 @@ import { employerRouter } from "./routes/employer.js";
 import { attachEventChatSocket } from "./lib/eventChatSocket.js";
 import { publicJobsRouter } from "./routes/jobs.js";
 import { membersRouter } from "./routes/members.js";
+import { notificationsRouter } from "./routes/notifications.js";
 
 const app = express();
 
@@ -55,6 +58,8 @@ app.use("/api/events", eventChatRouter);
 app.use("/api/events", publicEventsRouter);
 app.use("/api/committees", publicCommitteesRouter);
 app.use("/api/checklists", checklistsRouter);
+app.use("/api/checklist-templates", checklistTemplatesRouter);
+app.use("/api/checklist-instances", checklistInstancesRouter);
 app.use("/api/branch", branchRouter);
 app.use("/api/forum", forumRouter);
 app.use("/api/site", siteRouter);
@@ -62,6 +67,7 @@ app.use("/api/announcements", announcementsRouter);
 app.use("/api/employer", employerRouter);
 app.use("/api/jobs", publicJobsRouter);
 app.use("/api/members", membersRouter);
+app.use("/api/notifications", notificationsRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {

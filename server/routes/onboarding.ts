@@ -82,7 +82,12 @@ onboardingRouter.post("/", sameOrigin, requireUser, async (req: AuthedRequest, r
         const level             = ["foundation", "intermediate", "final"].includes(req.body.level)
           ? req.body.level : null;
         if (!level) throw new ApiError(400, "Please choose your CA level");
-        const articleshipStatus = trim(req.body.articleship_status) || "not_started";
+        const ARTICLESHIP = ["not_started", "ongoing", "completed", "terminated"] as const;
+        const rawStatus = trim(req.body.articleship_status);
+        const articleshipStatus: typeof ARTICLESHIP[number] =
+          (ARTICLESHIP as readonly string[]).includes(rawStatus)
+            ? rawStatus as typeof ARTICLESHIP[number]
+            : "not_started";
 
         const existing = await tx
           .select()

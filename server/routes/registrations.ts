@@ -5,6 +5,33 @@ import { events, eventRegistrations, users, payments } from "../../schema/index.
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { createRazorpayOrder, razorpayKeyId, verifyCheckoutSignature } from "../lib/razorpay.js";
+import { notifyAsync } from "../lib/notify.js";
+
+// IST formatter used in notification copy. The events themselves store UTC;
+// users expect to see local time.
+const IST = new Intl.DateTimeFormat("en-IN", {
+  timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short",
+});
+const IST_DATE = new Intl.DateTimeFormat("en-IN", {
+  timeZone: "Asia/Kolkata", dateStyle: "medium",
+});
+const IST_TIME = new Intl.DateTimeFormat("en-IN", {
+  timeZone: "Asia/Kolkata", timeStyle: "short",
+});
+
+function eventNotifyVars(event: { title: string; slug: string; venue: string | null; online_url: string | null; starts_at: Date; cpe_hours: string | number; mode: string }) {
+  const startsAt = event.starts_at instanceof Date ? event.starts_at : new Date(event.starts_at);
+  return {
+    event_title:  event.title,
+    event_slug:   event.slug,
+    event_date:   IST_DATE.format(startsAt),
+    event_time:   IST_TIME.format(startsAt),
+    event_venue:  event.venue || (event.mode === "online" ? "Online" : "TBC"),
+    cpe_hours:    event.cpe_hours,
+    calendar_link: `${process.env.APP_URL ?? ""}/#/events`,
+    joining_link_or_directions: event.online_url || event.venue || "Details will be shared closer to the date.",
+  };
+}
 
 export const registrationsRouter = Router();
 
@@ -102,6 +129,13 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
         }).where(eq(events.id, event.id));
 
         return inserted;
+      });
+
+      notifyAsync({
+        user_id: user.id,
+        template_key: "event_registered",
+        vars: eventNotifyVars(event),
+        link_url: `/#/events`,
       });
 
       return res.status(201).json({ paid: false, registration: row });
@@ -243,8 +277,19 @@ registrationsRouter.post("/:slug/verify-payment", requireUser, async (req: Authe
         updated_at: new Date(),
       }).where(eq(events.id, event.id));
 
-      return { payment: updatedPayment, registration };
+      return { payment: updatedPayment, registration, event };
     });
+
+    // Skip when the transaction took the idempotent path (no fresh registration)
+    // — the user already received a confirmation on the first successful verify.
+    if (result.event) {
+      notifyAsync({
+        user_id: user.id,
+        template_key: "event_registered",
+        vars: eventNotifyVars(result.event),
+        link_url: `/#/events`,
+      });
+    }
 
     res.status(201).json({ paid: true, registration: result.registration });
   } catch (err) { handleApiError(err, res, next); }

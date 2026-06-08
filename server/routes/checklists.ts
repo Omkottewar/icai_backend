@@ -246,8 +246,11 @@ checklistsRouter.patch("/:id/items/:itemId", async (req: AuthedRequest, res, nex
       .returning();
     if (!updated) throw new ApiError(404, "Item not found");
 
-    // Touch the parent so updated_at advances (fires trigger).
-    await db.update(eventChecklists).set({}).where(eq(eventChecklists.id, id));
+    // Touch the parent so updated_at advances (fires trigger). Drizzle
+    // refuses an empty set() — give it an explicit field.
+    await db.update(eventChecklists)
+      .set({ updated_at: new Date() })
+      .where(eq(eventChecklists.id, id));
 
     res.json(updated);
   } catch (err) { handleApiError(err, res, next); }

@@ -11,7 +11,7 @@ import { payments } from "./payments";
 
 export const consultations = pgTable("consultations", {
   id:               uuid("id").primaryKey().defaultRandom(),
-  counselor_id:     uuid("counselor_id").notNull(),  // FK → counselor_profiles.id
+  counselor_id:     uuid("counselor_id").notNull().references(() => users.id, { onDelete: "restrict" }),
   client_user_id:   uuid("client_user_id").notNull().references(() => users.id),
   kind:             consultationKindEnum("kind").notNull(),
   slot_start:       timestamp("slot_start", { withTimezone: true }).notNull(),

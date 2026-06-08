@@ -20,6 +20,20 @@ export const eventChecklistActionEnum = pgEnum("event_checklist_action", [
   "created", "sent_to_committee", "submitted_for_review", "approved", "rejected",
 ]);
 
+// ─── Generic checklist engine (templates + instances) ─────────────────────
+export const checklistQuestionTypeEnum = pgEnum("checklist_question_type", [
+  "short_text", "long_text", "number", "money", "date", "datetime",
+  "radio", "dropdown", "yes_no", "checkbox", "rating", "file", "section_heading",
+]);
+
+export const checklistInstanceStatusEnum = pgEnum("checklist_instance_status", [
+  "draft", "awaiting_fill", "awaiting_review", "approved", "rejected",
+]);
+
+export const checklistInstanceActionEnum = pgEnum("checklist_instance_action", [
+  "created", "released", "assigned", "submitted", "approved", "rejected", "reopened",
+]);
+
 export const forumThreadTagEnum = pgEnum("forum_thread_tag", [
   "doubt", "suggestion", "announcement", "discussion", "resource_request",
 ]);
@@ -38,31 +52,16 @@ export const studentLevelEnum = pgEnum("student_level", [
   "foundation", "intermediate", "final",
 ]);
 
+export const articleshipStatusEnum = pgEnum("articleship_status", [
+  "not_started", "ongoing", "completed", "terminated",
+]);
+
 export const copStatusEnum = pgEnum("cop_status", [
   "active", "surrendered", "restored", "none",
 ]);
 
 export const employerUserRoleEnum = pgEnum("employer_user_role", [
   "owner", "poster", "viewer",
-]);
-
-export const approvalStageEnum = pgEnum("approval_stage", ["mcm", "chairman"]);
-
-export const approvalStatusEnum = pgEnum("approval_status", [
-  "pending", "approved", "rejected",
-]);
-
-export const approvalTargetEnum = pgEnum("approval_target", [
-  "event", "newsletter", "circular", "gallery_album",
-  "paper_presentation", "kb_source", "forum_thread",
-]);
-
-export const refundStatusEnum = pgEnum("refund_status", [
-  "pending", "processed", "failed",
-]);
-
-export const disputeStatusEnum = pgEnum("dispute_status", [
-  "open", "under_review", "won", "lost", "accepted",
 ]);
 
 export const paymentStatusEnum = pgEnum("payment_status", [
