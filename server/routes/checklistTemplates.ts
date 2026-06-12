@@ -283,5 +283,11 @@ function buildQuestionInsert(template_id: string, q: any, idx: number) {
   const required = q?.required !== false;
   const config = normaliseConfig(type as QuestionType, q?.config);
   const sort_order = Number.isFinite(Number(q?.sort_order)) ? Number(q.sort_order) : idx;
-  return { template_id, sort_order, type, label, help_text, required, config };
+  // Only persist section_owner_role on section_heading rows. The frontend
+  // should already null it out for other types, but defensive on the
+  // backend in case an old client sends it.
+  const section_owner_role = type === "section_heading"
+    ? (trim(q?.section_owner_role) || null)
+    : null;
+  return { template_id, sort_order, type, label, help_text, required, config, section_owner_role };
 }

@@ -7,28 +7,78 @@ import {
   cpeCredits,
   memberProfiles,
   studentProfiles,
+  dashboardLayouts,
 } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
+import { currentFy } from "../lib/fy.js";
 
 export const dashboardRouter = Router();
 
-/**
- * Indian Financial Year (Apr 1 â€“ Mar 31) covering `now`.
- * cpe_credits.year is a calendar-year integer per the schema comment, so we
- * filter on issued_at instead â€” that lets a single FY span two calendar years
- * without us having to OR two year buckets together.
- */
-function currentFy(now = new Date()) {
-  const month = now.getUTCMonth();
-  const year = now.getUTCFullYear();
-  const startYear = month >= 3 ? year : year - 1;
-  const endYear = startYear + 1;
-  return {
-    label: `FY ${startYear}â€“${String(endYear).slice(-2)}`,
-    start: new Date(Date.UTC(startYear, 3, 1)),
-    end: new Date(Date.UTC(endYear, 3, 1)),
-  };
+// ─── Customizable layout endpoints ──────────────────────────────────────────
+// Per-user widget layout for the customizable dashboard. The widget registry
+// lives on the frontend; this endpoint stores opaque { id, size } items in
+// render order. We sanity-check that the body is an array of objects with
+// string id + size ∈ {sm, md, lg}, but we don't validate the ids themselves
+// against a catalog — unknown ids are silently dropped client-side so the
+// backend stays evergreen as widgets are added/renamed.
+const ALLOWED_SIZES = new Set(["sm", "md", "lg"]);
+
+function sanitizeLayout(input: unknown): Array<{ id: string; size: "sm" | "md" | "lg" }> {
+  if (!Array.isArray(input)) return [];
+  const out: Array<{ id: string; size: "sm" | "md" | "lg" }> = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") continue;
+    const id = (raw as { id?: unknown }).id;
+    const size = (raw as { size?: unknown }).size;
+    if (typeof id !== "string" || id.length === 0 || id.length > 64) continue;
+    if (typeof size !== "string" || !ALLOWED_SIZES.has(size)) continue;
+    if (seen.has(id)) continue;     // dedupe — a widget appears at most once
+    seen.add(id);
+    out.push({ id, size: size as "sm" | "md" | "lg" });
+    if (out.length >= 60) break;    // hard cap so a hostile payload can't blow up
+  }
+  return out;
 }
+
+dashboardRouter.get("/layout", requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const [row] = await db
+      .select({ layout: dashboardLayouts.layout, updated_at: dashboardLayouts.updated_at })
+      .from(dashboardLayouts)
+      .where(eq(dashboardLayouts.user_id, req.user!.id))
+      .limit(1);
+    res.json({
+      layout: row?.layout ?? null,             // null → frontend uses its default
+      updated_at: row?.updated_at ?? null,
+    });
+  } catch (err) { next(err); }
+});
+
+dashboardRouter.put("/layout", requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const layout = sanitizeLayout(req.body?.layout);
+    await db
+      .insert(dashboardLayouts)
+      .values({ user_id: req.user!.id, layout, updated_at: new Date() })
+      .onConflictDoUpdate({
+        target: dashboardLayouts.user_id,
+        set: { layout, updated_at: new Date() },
+      });
+    res.json({ ok: true, layout });
+  } catch (err) { next(err); }
+});
+
+dashboardRouter.delete("/layout", requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    await db.delete(dashboardLayouts).where(eq(dashboardLayouts.user_id, req.user!.id));
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// FY helper now lives in lib/fy.ts (single source of truth). The previous
+// local copy had a corrupted en-dash byte sequence that rendered as
+// "FY 2026 - 27" mojibake in the dashboard CPE badge.
 
 /** Upcoming events the current user is registered/waitlisted for. */
 async function getUpcomingEvents(userId: string, now: Date) {
@@ -76,7 +126,7 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
       const fy = currentFy(now);
 
       // Sum CPE hours in the current FY split by structured/unstructured.
-      // numeric() comes back as string from postgres-js â€” coerce to number on read.
+      // numeric() comes back as string from postgres-js - coerce to number on read.
       const cpeRows = await db
         .select({
           type: cpeCredits.type,

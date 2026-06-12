@@ -8,22 +8,25 @@ export const roleScopeEnum = pgEnum("role_scope", [
   "global", "branch", "committee",
 ]);
 
-export const eventChecklistStatusEnum = pgEnum("event_checklist_status", [
-  "awaiting_committee", "awaiting_branch_review", "approved",
-]);
-
-export const eventChecklistItemKindEnum = pgEnum("event_checklist_item_kind", [
-  "money", "number", "text", "date",
-]);
-
-export const eventChecklistActionEnum = pgEnum("event_checklist_action", [
-  "created", "sent_to_committee", "submitted_for_review", "approved", "rejected",
-]);
+// Legacy event_checklist_* enums were dropped in migration 0024 along with
+// their tables. The generic checklist engine below replaces them.
 
 // ─── Generic checklist engine (templates + instances) ─────────────────────
 export const checklistQuestionTypeEnum = pgEnum("checklist_question_type", [
   "short_text", "long_text", "number", "money", "date", "datetime",
   "radio", "dropdown", "yes_no", "checkbox", "rating", "file", "section_heading",
+  // 'task_list' — composite question whose value is an array of tasks
+  // assigned to people (description, assignee, due_date, status). Mirrored
+  // in checklist_task_assignments table. Added in migration 0027.
+  "task_list",
+  // 'time_range' — value { start: 'HH:MM', end: 'HH:MM' }, used for event
+  // times like "5:00 PM – 8:00 PM". Added in migration 0028.
+  "time_range",
+  // 'budget_table' — structured event budget matching the branch's existing
+  // Excel format. Stored as a single JSON blob; see lib/checklistQuestions.ts
+  // for the shape. Auto-totals + deficit/surplus computed client-side.
+  // Added in migration 0029.
+  "budget_table",
 ]);
 
 export const checklistInstanceStatusEnum = pgEnum("checklist_instance_status", [
@@ -32,6 +35,9 @@ export const checklistInstanceStatusEnum = pgEnum("checklist_instance_status", [
 
 export const checklistInstanceActionEnum = pgEnum("checklist_instance_action", [
   "created", "released", "assigned", "submitted", "approved", "rejected", "reopened",
+  // 'rejected_final' — terminal reject that also cancels the linked event.
+  // Added in migration 0026 alongside the /reject-final endpoint.
+  "rejected_final",
 ]);
 
 export const forumThreadTagEnum = pgEnum("forum_thread_tag", [

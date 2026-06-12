@@ -1,15 +1,18 @@
 import { Router } from "express";
-import { and, asc, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import { aliasedTable, and, asc, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
   checklistTemplates, checklistTemplateQuestions,
   checklistInstances, checklistInstanceResponses, checklistInstanceReviews,
+  checklistInstanceApprovals,
+  checklistTaskAssignments,
   events, users, roles, userRoleAssignments,
 } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { isAdmin, loadUserPermissions } from "../auth/permissions.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
-import { validateResponseValue, type QuestionType } from "../lib/checklistQuestions.js";
+import { validateResponseValue, type QuestionType, type TaskItem } from "../lib/checklistQuestions.js";
+import { notifyAsync } from "../lib/notify.js";
 
 export const checklistInstancesRouter = Router();
 checklistInstancesRouter.use(requireUser);
@@ -222,6 +225,42 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
     const responseMap: Record<string, unknown> = {};
     for (const r of responses) responseMap[r.question_id] = r.value;
 
+    // For task_list questions, pull the dedicated task rows so the
+    // renderer knows the DB id of each task (needed to call /done /
+    // /cancel without a save round-trip). Joined with the assignee user
+    // to get a display name.
+    const taskQuestionIds = questions.filter((q) => q.type === "task_list").map((q) => q.id);
+    const tasksByQuestion: Record<string, any[]> = {};
+    if (taskQuestionIds.length > 0) {
+      const taskAssigneeU = aliasedTable(users, "task_assignee_u");
+      const taskRows = await db
+        .select({
+          id:           checklistTaskAssignments.id,
+          response_id:  checklistTaskAssignments.response_id,
+          question_id:  checklistInstanceResponses.question_id,
+          description:  checklistTaskAssignments.description,
+          assignee_id:  checklistTaskAssignments.assignee_id,
+          assignee_name: taskAssigneeU.name,
+          assignee_email: taskAssigneeU.email,
+          due_date:     checklistTaskAssignments.due_date,
+          status:       checklistTaskAssignments.status,
+          notes:        checklistTaskAssignments.notes,
+          sort_order:   checklistTaskAssignments.sort_order,
+        })
+        .from(checklistTaskAssignments)
+        .innerJoin(checklistInstanceResponses, eq(checklistInstanceResponses.id, checklistTaskAssignments.response_id))
+        .leftJoin(taskAssigneeU, eq(taskAssigneeU.id, checklistTaskAssignments.assignee_id))
+        .where(and(
+          eq(checklistInstanceResponses.instance_id, id),
+          inArray(checklistInstanceResponses.question_id, taskQuestionIds),
+        ))
+        .orderBy(asc(checklistTaskAssignments.sort_order));
+      for (const t of taskRows) {
+        if (!tasksByQuestion[t.question_id]) tasksByQuestion[t.question_id] = [];
+        tasksByQuestion[t.question_id].push(t);
+      }
+    }
+
     // Look up the assigned filler + reviewer so the admin sees who got
     // pinned (or that nobody did — important for the release decision).
     const assigneeIds = [row.instance.assigned_fill_user_id, row.instance.assigned_review_user_id]
@@ -233,13 +272,20 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
     const filler   = row.instance.assigned_fill_user_id   ? byId.get(row.instance.assigned_fill_user_id)   ?? null : null;
     const reviewer = row.instance.assigned_review_user_id ? byId.get(row.instance.assigned_review_user_id) ?? null : null;
 
+    // Approval stages (for event-bound instances). May be empty for
+    // legacy / non-event instances — the frontend treats an empty array
+    // as "single-reviewer mode".
+    const stages = await loadStages(id);
+
     res.json({
       instance: row.instance,
       template: row.template,
       questions,
       responses: responseMap,
+      tasks: tasksByQuestion,
       reviews,
       assignees: { filler, reviewer },
+      stages,
       perms,
     });
   } catch (err) { handleApiError(err, res, next); }
@@ -344,6 +390,12 @@ checklistInstancesRouter.post("/:id/release", async (req: AuthedRequest, res, ne
       instance_id: id, actor_id: req.user!.id, action: "released",
       note: trim(req.body?.note) || null,
     });
+
+    // Auto-create the chairman / treasurer / VC approval stages for
+    // event-bound instances. Non-event instances continue to use the
+    // single-reviewer model.
+    await ensureApprovalStages(id, !!row.instance.event_id && !!row.event_committee_id);
+
     res.json(updated);
   } catch (err) { handleApiError(err, res, next); }
 });
@@ -374,6 +426,64 @@ async function findActiveRoleHolder(
   return row?.user_id ?? null;
 }
 
+// ─── Multi-stage approval stages for event-bound instances ──────────────────
+//
+// Section R of the requirements describes three parallel approvals:
+//   • Branch chairman — overall sign-off
+//   • Treasurer       — budget / IUT items
+//   • Vice-Chairman   — agenda
+//
+// We auto-create these stages when an event-bound instance is RELEASED.
+// Non-event instances continue to use the original single-reviewer flow.
+//
+// `cascade_checklist_approval_status` (migration 0025) is the SQL trigger
+// that watches these stage rows and flips the parent instance.
+const EVENT_APPROVAL_STAGES: Array<{
+  stage_code: string;
+  stage_label: string;
+  required_role_code: string;
+  sort_order: number;
+}> = [
+  { stage_code: "branch_chairman", stage_label: "Branch Chairman — overall approval", required_role_code: "branch_chairman", sort_order: 10 },
+  { stage_code: "treasurer_iut",   stage_label: "Treasurer — IUT / budget review",    required_role_code: "branch_treasurer", sort_order: 20 },
+  { stage_code: "vc_agenda",       stage_label: "Vice-Chairman — agenda review",      required_role_code: "branch_vice_chairman", sort_order: 30 },
+];
+
+async function ensureApprovalStages(instanceId: string, isEventBound: boolean) {
+  if (!isEventBound) return;
+  // INSERT ... ON CONFLICT keeps re-releases (after reject + reopen)
+  // idempotent — existing stage rows are preserved with their statuses
+  // so the chairman doesn't have to re-approve work they'd already signed off.
+  for (const s of EVENT_APPROVAL_STAGES) {
+    await db.insert(checklistInstanceApprovals).values({
+      instance_id: instanceId,
+      stage_code: s.stage_code,
+      stage_label: s.stage_label,
+      required_role_code: s.required_role_code,
+      sort_order: s.sort_order,
+    }).onConflictDoNothing();
+  }
+}
+
+async function loadStages(instanceId: string) {
+  return db.select({
+    id:                 checklistInstanceApprovals.id,
+    stage_code:         checklistInstanceApprovals.stage_code,
+    stage_label:        checklistInstanceApprovals.stage_label,
+    required_role_code: checklistInstanceApprovals.required_role_code,
+    status:             checklistInstanceApprovals.status,
+    sort_order:         checklistInstanceApprovals.sort_order,
+    decided_by:         checklistInstanceApprovals.decided_by,
+    decider_name:       users.name,
+    decided_at:         checklistInstanceApprovals.decided_at,
+    note:               checklistInstanceApprovals.note,
+  })
+    .from(checklistInstanceApprovals)
+    .leftJoin(users, eq(users.id, checklistInstanceApprovals.decided_by))
+    .where(eq(checklistInstanceApprovals.instance_id, instanceId))
+    .orderBy(asc(checklistInstanceApprovals.sort_order));
+}
+
 // ─── PATCH /api/checklist-instances/:id ───────────────────────────────────
 // Admin updates assignment + title + notes. Cannot change template_id.
 checklistInstancesRouter.patch("/:id", async (req: AuthedRequest, res, next) => {
@@ -399,9 +509,40 @@ checklistInstancesRouter.patch("/:id", async (req: AuthedRequest, res, next) => 
   } catch (err) { handleApiError(err, res, next); }
 });
 
+// Compute per-question section owner. Questions inherit `section_owner_role`
+// from the closest preceding section_heading; questions before any section
+// heading have no owner restriction (null).
+function computeSectionOwners<T extends { id: string; type: string; sort_order: number; section_owner_role: string | null }>(
+  questions: T[],
+): Map<string, string | null> {
+  const sorted = [...questions].sort((a, b) => a.sort_order - b.sort_order);
+  const out = new Map<string, string | null>();
+  let current: string | null = null;
+  for (const q of sorted) {
+    if (q.type === "section_heading") {
+      current = q.section_owner_role ?? null;
+    }
+    out.set(q.id, current);
+  }
+  return out;
+}
+
 // ─── PUT /api/checklist-instances/:id/responses ───────────────────────────
 // Bulk upsert all answers. Body: { responses: { [question_id]: value } }
 // Allowed while status is awaiting_fill OR rejected (re-fill after reject).
+//
+// Section ownership: each question may belong to a section that's owned by
+// a specific role (via the closest preceding section_heading's
+// `section_owner_role`). If a question has an owner role, the caller must
+// either hold that role OR be the assigned filler / admin. This is what
+// lets the treasurer edit "Budget & IUT" without owning the whole
+// checklist; conversely it stops the committee chair from editing the
+// budget if it's not theirs.
+//
+// Task lists: when a question of type `task_list` is saved, we reconcile
+// the response value into the dedicated `checklist_task_assignments`
+// table — tear down + recreate the rows for that response. New assignees
+// get an email + in-app notification via the existing notify() dispatcher.
 checklistInstancesRouter.put("/:id/responses", async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
@@ -417,28 +558,96 @@ checklistInstancesRouter.put("/:id/responses", async (req: AuthedRequest, res, n
       .from(checklistTemplateQuestions)
       .where(eq(checklistTemplateQuestions.template_id, row.template.id));
 
-    // Build (question, cleanedValue) pairs. Only persist questions the caller
-    // touched + any that have a stored response already (so partial fills
-    // round-trip cleanly). Validation is "best effort" here — full required
-    // checking happens at /submit so the user can save progress.
-    const pairs: { question_id: string; value: unknown }[] = [];
+    // Section-ownership lookup: question_id → required role code (or null
+    // for "anyone with fill rights").
+    const sectionOwners = computeSectionOwners(questions.map((q) => ({
+      id: q.id, type: q.type as string, sort_order: q.sort_order,
+      section_owner_role: q.section_owner_role,
+    })));
+    const callerPerms = await loadUserPermissions(req.user!.id);
+
+    // Build (question, cleanedValue) pairs. Validation is "best effort"
+    // here — required checking happens at /submit so save-progress works.
+    const pairs: { question: typeof questions[number]; value: unknown }[] = [];
     for (const q of questions) {
       const has = Object.prototype.hasOwnProperty.call(incoming, q.id);
       if (!has) continue;
-      // Save-progress: required validation is deferred to /submit.
+
+      // Enforce per-section ownership. The committee chair filling the
+      // whole checklist can still touch sections with no owner restriction.
+      const owner = sectionOwners.get(q.id);
+      if (owner) {
+        const allowed = callerPerms.isAdmin || callerPerms.codes.has(owner);
+        if (!allowed) {
+          throw new ApiError(403, `Only ${owner.replace(/_/g, " ")} can edit this section`);
+        }
+      }
+
       const cleaned = validateResponseValue(q.type as QuestionType, false, q.config, incoming[q.id]);
-      pairs.push({ question_id: q.id, value: cleaned });
+      pairs.push({ question: q, value: cleaned });
     }
+
+    // Collect newly-assigned tasks for post-commit notification. We can
+    // only know "new" by diffing against existing rows inside the tx.
+    const newAssignments: Array<{
+      assignee_id: string;
+      description: string;
+      due_date: string | null;
+    }> = [];
 
     await db.transaction(async (tx) => {
       for (const p of pairs) {
-        await tx
+        // Upsert the response row.
+        const [resp] = await tx
           .insert(checklistInstanceResponses)
-          .values({ instance_id: id, question_id: p.question_id, value: p.value as any })
+          .values({ instance_id: id, question_id: p.question.id, value: p.value as any })
           .onConflictDoUpdate({
             target: [checklistInstanceResponses.instance_id, checklistInstanceResponses.question_id],
             set: { value: p.value as any, updated_at: new Date() },
-          });
+          })
+          .returning();
+
+        // For task_list questions, reconcile the task_assignments rows.
+        if (p.question.type === "task_list") {
+          const tasks = (Array.isArray(p.value) ? p.value : []) as TaskItem[];
+
+          // Existing rows for this response so we can detect "newly
+          // assigned to user X" vs "already assigned to user X".
+          const existing = await tx
+            .select({ id: checklistTaskAssignments.id, assignee_id: checklistTaskAssignments.assignee_id })
+            .from(checklistTaskAssignments)
+            .where(eq(checklistTaskAssignments.response_id, resp.id));
+          const existingAssignees = new Set(
+            existing.map((e) => e.assignee_id).filter((x): x is string => !!x),
+          );
+
+          // Wipe + recreate. Simpler than trying to diff client cids
+          // across saves; the row count per task_list is tiny (< 50).
+          await tx.delete(checklistTaskAssignments)
+            .where(eq(checklistTaskAssignments.response_id, resp.id));
+
+          for (let i = 0; i < tasks.length; i++) {
+            const t = tasks[i];
+            await tx.insert(checklistTaskAssignments).values({
+              response_id: resp.id,
+              description: t.description,
+              assignee_id: t.assignee_id ?? null,
+              due_date: t.due_date ?? null,
+              status: t.status ?? "pending",
+              notes: t.notes ?? null,
+              sort_order: i,
+            });
+            // Newly-assigned-to-this-user means the assignee wasn't in
+            // the previous row set for this response.
+            if (t.assignee_id && !existingAssignees.has(t.assignee_id)) {
+              newAssignments.push({
+                assignee_id: t.assignee_id,
+                description: t.description,
+                due_date: t.due_date ?? null,
+              });
+            }
+          }
+        }
       }
       // Touch parent so updated_at advances. Drizzle refuses an empty set(),
       // so we explicitly bump updated_at (the trigger would do this anyway,
@@ -448,7 +657,32 @@ checklistInstancesRouter.put("/:id/responses", async (req: AuthedRequest, res, n
         .where(eq(checklistInstances.id, id));
     });
 
-    res.json({ ok: true, saved: pairs.length });
+    // Fire notifications outside the txn so DB writes don't roll back on
+    // mail failures. Use notifyAsync — fire-and-forget; errors logged.
+    const [assignerRow] = await db
+      .select({ name: users.name }).from(users)
+      .where(eq(users.id, req.user!.id)).limit(1);
+    const eventTitle = row.event_committee_id
+      ? (await db.select({ title: events.title }).from(events)
+          .where(eq(events.id, row.instance.event_id!)).limit(1))[0]?.title ?? row.instance.title
+      : row.instance.title;
+
+    for (const a of newAssignments) {
+      notifyAsync({
+        user_id: a.assignee_id,
+        template_key: "task_assigned",
+        vars: {
+          assigner_name: assignerRow?.name ?? "The team",
+          event_title: eventTitle,
+          task_description: a.description,
+          due_date: a.due_date ?? "(no due date)",
+          checklist_link: `${process.env.APP_URL ?? ""}/#/my-checklists?id=${id}`,
+        },
+        link_url: `/#/my-checklists?id=${id}`,
+      });
+    }
+
+    res.json({ ok: true, saved: pairs.length, new_assignments: newAssignments.length });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -502,12 +736,23 @@ checklistInstancesRouter.post("/:id/submit", async (req: AuthedRequest, res, nex
 });
 
 // ─── POST /api/checklist-instances/:id/approve ────────────────────────────
+// Single-reviewer approve. For event-bound instances with stage rows this
+// is BLOCKED — the user must call /approve-stage instead. The block forces
+// the multi-stage flow where it applies and prevents the chairman from
+// accidentally short-circuiting the treasurer / VC stages.
 checklistInstancesRouter.post("/:id/approve", async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
     const { row, perms } = await authorise(id, req.user!.id);
     if (!perms.canReview) throw new ApiError(403, "You can't review this checklist");
     if (row.instance.status !== "awaiting_review") throw new ApiError(400, "Not awaiting review");
+
+    const stages = await loadStages(id);
+    if (stages.length > 0) {
+      throw new ApiError(400,
+        "This checklist uses multi-stage approval. Approve your own stage via /approve-stage instead.",
+      );
+    }
 
     const [updated] = await db.update(checklistInstances)
       .set({ status: "approved", reviewed_at: new Date() })
@@ -518,6 +763,186 @@ checklistInstancesRouter.post("/:id/approve", async (req: AuthedRequest, res, ne
       note: trim(req.body?.note) || null,
     });
     res.json(updated);
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/checklist-instances/:id/approve-stage ──────────────────────
+// Decide a single approval stage. The DB trigger cascades the instance
+// status when ALL stages are approved (or any is rejected).
+//
+// The user must hold the stage's `required_role_code`. Branch chairman is
+// allowed to approve ANY stage (override path — Section R.5 "plain approve").
+checklistInstancesRouter.post("/:id/approve-stage", async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id);
+    const stage_code = need(trim(req.body?.stage_code), "Stage code");
+    const note = trim(req.body?.note) || null;
+
+    const { row } = await authorise(id, req.user!.id);
+    if (row.instance.status !== "awaiting_review") throw new ApiError(400, "Not awaiting review");
+
+    const [stage] = await db.select().from(checklistInstanceApprovals)
+      .where(and(
+        eq(checklistInstanceApprovals.instance_id, id),
+        eq(checklistInstanceApprovals.stage_code, stage_code),
+      )).limit(1);
+    if (!stage) throw new ApiError(404, "Stage not found on this instance");
+    if (stage.status !== "pending") throw new ApiError(400, `Stage already ${stage.status}`);
+
+    const perms = await loadUserPermissions(req.user!.id);
+    // STRICT rule: each stage can only be approved by the role that owns
+    // it. The branch chairman approves the chairman stage, the treasurer
+    // approves the treasurer stage, the VC approves the VC stage. Admin
+    // is the only super-admin escape hatch — every other override path
+    // (publish without checklist, etc.) lives on the events router, not
+    // here.
+    const canDecideStage = perms.isAdmin || perms.codes.has(stage.required_role_code);
+    if (!canDecideStage) {
+      throw new ApiError(403,
+        `This stage requires the ${stage.required_role_code} role.`,
+      );
+    }
+
+    const [updated] = await db.update(checklistInstanceApprovals)
+      .set({
+        status: "approved",
+        decided_by: req.user!.id,
+        decided_at: new Date(),
+        note,
+      })
+      .where(eq(checklistInstanceApprovals.id, stage.id))
+      .returning();
+
+    // The cascade trigger will flip the instance to 'approved' if this was
+    // the last pending stage. Return the latest instance + stages so the
+    // frontend can reflect the new state without a follow-up GET.
+    const [instanceRow] = await db.select().from(checklistInstances).where(eq(checklistInstances.id, id)).limit(1);
+    const stages = await loadStages(id);
+    res.json({ stage: updated, instance: instanceRow, stages });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/checklist-instances/:id/reject-final ───────────────────────
+// Terminal reject — distinct from /reject-stage. Whereas /reject-stage
+// sends the checklist back to the filler (who can fix and resubmit),
+// /reject-final closes the door:
+//   - the instance status becomes 'rejected'
+//   - the linked event (if any) is cancelled
+//   - the action is recorded with type 'rejected_final' in the review log
+//
+// Use case: an event idea isn't viable at all (date conflict with WIRC,
+// regulatory concern, etc.) and shouldn't sit in someone's inbox waiting
+// for a re-fill that's never going to happen. Per Section R.5.
+//
+// Strict per-role gate (same as /reject-stage): only the stage owner or
+// admin can call this. Note is required so there's always a paper trail.
+checklistInstancesRouter.post("/:id/reject-final", async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id);
+    const stage_code = need(trim(req.body?.stage_code), "Stage code");
+    const note = need(trim(req.body?.note), "Reason");
+
+    const { row } = await authorise(id, req.user!.id);
+    if (row.instance.status !== "awaiting_review") throw new ApiError(400, "Not awaiting review");
+
+    const [stage] = await db.select().from(checklistInstanceApprovals)
+      .where(and(
+        eq(checklistInstanceApprovals.instance_id, id),
+        eq(checklistInstanceApprovals.stage_code, stage_code),
+      )).limit(1);
+    if (!stage) throw new ApiError(404, "Stage not found on this instance");
+    if (stage.status !== "pending") throw new ApiError(400, `Stage already ${stage.status}`);
+
+    const perms = await loadUserPermissions(req.user!.id);
+    const canDecideStage = perms.isAdmin || perms.codes.has(stage.required_role_code);
+    if (!canDecideStage) {
+      throw new ApiError(403, `This stage requires the ${stage.required_role_code} role.`);
+    }
+
+    // Cancel the linked event + close the instance + write the audit row,
+    // all in a transaction so a partial state can't leak.
+    const result = await db.transaction(async (tx) => {
+      // 1. Mark the stage as rejected (the cascade trigger from 0025 will
+      //    flip the instance to rejected — but that path leaves the event
+      //    in pending_approval. We want a stronger "cancelled" end state).
+      await tx.update(checklistInstanceApprovals)
+        .set({ status: "rejected", decided_by: req.user!.id, decided_at: new Date(), note })
+        .where(eq(checklistInstanceApprovals.id, stage.id));
+
+      // 2. Force-set the instance to 'rejected' (in case the trigger
+      //    didn't fire fast enough; idempotent).
+      await tx.update(checklistInstances)
+        .set({ status: "rejected", reviewed_at: new Date(), updated_at: new Date() })
+        .where(eq(checklistInstances.id, id));
+
+      // 3. Cancel the linked event if there is one.
+      if (row.instance.event_id) {
+        await tx.update(events)
+          .set({ status: "cancelled", updated_at: new Date() })
+          .where(eq(events.id, row.instance.event_id));
+      }
+
+      // 4. Record the action in the review log.
+      await tx.insert(checklistInstanceReviews).values({
+        instance_id: id,
+        actor_id: req.user!.id,
+        action: "rejected_final",
+        note,
+      });
+
+      const [instanceRow] = await tx.select().from(checklistInstances).where(eq(checklistInstances.id, id)).limit(1);
+      return instanceRow;
+    });
+
+    const stages = await loadStages(id);
+    res.json({ instance: result, stages });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/checklist-instances/:id/reject-stage ───────────────────────
+// Any approver can reject — the trigger cascades the instance to 'rejected'.
+// The note is required so the chairman / filler knows what to fix.
+checklistInstancesRouter.post("/:id/reject-stage", async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id);
+    const stage_code = need(trim(req.body?.stage_code), "Stage code");
+    const note = need(trim(req.body?.note), "Rejection note");
+
+    const { row } = await authorise(id, req.user!.id);
+    if (row.instance.status !== "awaiting_review") throw new ApiError(400, "Not awaiting review");
+
+    const [stage] = await db.select().from(checklistInstanceApprovals)
+      .where(and(
+        eq(checklistInstanceApprovals.instance_id, id),
+        eq(checklistInstanceApprovals.stage_code, stage_code),
+      )).limit(1);
+    if (!stage) throw new ApiError(404, "Stage not found on this instance");
+    if (stage.status !== "pending") throw new ApiError(400, `Stage already ${stage.status}`);
+
+    const perms = await loadUserPermissions(req.user!.id);
+    // Same STRICT rule as approve-stage: only the role that owns the stage
+    // (or admin) can decide it. The chairman can't reject the treasurer's
+    // stage on the treasurer's behalf.
+    const canDecideStage = perms.isAdmin || perms.codes.has(stage.required_role_code);
+    if (!canDecideStage) {
+      throw new ApiError(403,
+        `This stage requires the ${stage.required_role_code} role.`,
+      );
+    }
+
+    const [updated] = await db.update(checklistInstanceApprovals)
+      .set({
+        status: "rejected",
+        decided_by: req.user!.id,
+        decided_at: new Date(),
+        note,
+      })
+      .where(eq(checklistInstanceApprovals.id, stage.id))
+      .returning();
+
+    const [instanceRow] = await db.select().from(checklistInstances).where(eq(checklistInstances.id, id)).limit(1);
+    const stages = await loadStages(id);
+    res.json({ stage: updated, instance: instanceRow, stages });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -558,6 +983,11 @@ checklistInstancesRouter.post("/:id/reopen", async (req: AuthedRequest, res, nex
       instance_id: id, actor_id: req.user!.id, action: "reopened",
       note: trim(req.body?.note) || null,
     });
+    // Reset any approval stages back to 'pending' so the chairman /
+    // treasurer / VC have to act again after the filler resubmits.
+    await db.update(checklistInstanceApprovals)
+      .set({ status: "pending", decided_by: null, decided_at: null, note: null })
+      .where(eq(checklistInstanceApprovals.instance_id, id));
     res.json(updated);
   } catch (err) { handleApiError(err, res, next); }
 });

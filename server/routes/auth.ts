@@ -21,6 +21,7 @@ import {
   UnverifiedEmailError,
   NoAccountError,
 } from "../auth/users.js";
+import { getPostLoginPath } from "../auth/landingPath.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { sameOrigin } from "../middleware/sameOrigin.js";
 import { loginLimiter, signupLimiter, forgotPasswordLimiter } from "../middleware/rateLimit.js";
@@ -148,7 +149,8 @@ authRouter.post("/login", loginLimiter, sameOrigin, async (req, res, next) => {
     const { user, isNew } = result;
     const token = signSessionToken(user.id);
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions);
-    res.json({ ok: true, redirect: isNew ? "/onboarding" : "/dashboard" });
+    const redirect = await getPostLoginPath(user.id, isNew);
+    res.json({ ok: true, redirect });
   } catch (err) {
     next(err);
   }
@@ -243,7 +245,8 @@ authRouter.post("/signup", signupLimiter, sameOrigin, async (req, res, next) => 
     const { user, isNew } = result;
     const token = signSessionToken(user.id);
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions);
-    res.json({ ok: true, redirect: isNew ? "/onboarding" : "/dashboard" });
+    const redirect = await getPostLoginPath(user.id, isNew);
+    res.json({ ok: true, redirect });
   } catch (err) {
     next(err);
   }
@@ -344,7 +347,8 @@ authRouter.get("/callback", async (req, res, next) => {
     clearTempCookies();
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions);
 
-    res.redirect(`${appUrl()}/#${isNew ? "/onboarding" : "/dashboard"}`);
+    const redirect = await getPostLoginPath(user.id, isNew);
+    res.redirect(`${appUrl()}/#${redirect}`);
   } catch (err) {
     next(err);
   }

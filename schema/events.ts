@@ -1,10 +1,9 @@
 import {
-  pgTable, uuid, text, integer, numeric, timestamp, boolean,
+  pgTable, uuid, text, integer, numeric, timestamp,
 } from "drizzle-orm/pg-core";
 import {
   eventAudienceEnum, eventModeEnum, eventStatusEnum,
   registrationStatusEnum, cpeTypeEnum,
-  eventChecklistStatusEnum, eventChecklistItemKindEnum, eventChecklistActionEnum,
 } from "./enums";
 import { users, branches } from "./identity";
 import { payments } from "./payments";
@@ -56,56 +55,9 @@ export const eventRegistrations = pgTable("event_registrations", {
   deleted_at:    timestamp("deleted_at", { withTimezone: true }),
 });
 
-// ─── Event Checklists (LEGACY — soft-deprecated 2026-06-04) ─────────────────
-//
-// The original event-approval pipeline. Replaced by the generic checklist
-// engine in schema/checklists.ts; new event approvals create a row in
-// `checklist_instances` instead. These tables stay live ONLY for in-flight
-// rows started before the swap.
-//
-// SUNSET DATE: 2026-09-04 (3 months).
-// At that point:
-//   1. Run: SELECT COUNT(*) FROM event_checklists WHERE finalized_at IS NULL;
-//      Confirm the count is 0 (every old checklist has been approved/rejected).
-//   2. Drop routes/checklists.ts, hooks/useChecklist.js, the legacy badge on
-//      DashboardPage, the legacy branch in EventsAdminPage.ChecklistButton,
-//      the legacy filter in CommitteeChecklistsCard + ApprovalsQueueCard.
-//   3. Drop the tables + their enums (event_checklist_status,
-//      event_checklist_item_kind, event_checklist_action) via a new migration.
-//
-// Until that date: leave alone. The legacy code path is fully maintained.
-// admin drafts → committee chairman fills → branch chairman reviews
-// Branch chairman approval auto-publishes the event (via DB trigger).
-
-export const eventChecklists = pgTable("event_checklists", {
-  id:           uuid("id").primaryKey().defaultRandom(),
-  event_id:     uuid("event_id").notNull().unique().references(() => events.id, { onDelete: "cascade" }),
-  status:       eventChecklistStatusEnum("status").notNull().default("awaiting_committee"),
-  created_by:   uuid("created_by").references(() => users.id),
-  created_at:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updated_at:   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  finalized_at: timestamp("finalized_at", { withTimezone: true }),
-});
-
-export const eventChecklistItems = pgTable("event_checklist_items", {
-  id:           uuid("id").primaryKey().defaultRandom(),
-  checklist_id: uuid("checklist_id").notNull().references(() => eventChecklists.id, { onDelete: "cascade" }),
-  label:        text("label").notNull(),
-  kind:         eventChecklistItemKindEnum("kind").notNull().default("text"),
-  value:        text("value"),  // chairman-supplied, interpreted per kind
-  required:     boolean("required").notNull().default(true),
-  sort_order:   integer("sort_order").notNull().default(0),
-  created_at:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
-export const eventChecklistReviews = pgTable("event_checklist_reviews", {
-  id:           uuid("id").primaryKey().defaultRandom(),
-  checklist_id: uuid("checklist_id").notNull().references(() => eventChecklists.id, { onDelete: "cascade" }),
-  actor_id:     uuid("actor_id").references(() => users.id),
-  action:       eventChecklistActionEnum("action").notNull(),
-  note:         text("note"),
-  created_at:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+// Legacy event_checklists / event_checklist_items / event_checklist_reviews
+// tables were dropped in migration 0024. The single source of truth for
+// event approval is now checklist_instances (see schema/checklists.ts).
 
 // ─── CPE Credits ──────────────────────────────────────────────────────────────
 

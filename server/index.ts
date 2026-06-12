@@ -9,7 +9,6 @@ import { adminRouter } from "./routes/admin/index.js";
 import { publicEventsRouter } from "./routes/events.js";
 import { registrationsRouter } from "./routes/registrations.js";
 import { publicCommitteesRouter } from "./routes/committees.js";
-import { checklistsRouter } from "./routes/checklists.js";
 import { checklistTemplatesRouter } from "./routes/checklistTemplates.js";
 import { checklistInstancesRouter } from "./routes/checklistInstances.js";
 import { branchRouter } from "./routes/branch.js";
@@ -19,9 +18,11 @@ import { siteRouter } from "./routes/site.js";
 import { announcementsRouter } from "./routes/announcements.js";
 import { employerRouter } from "./routes/employer.js";
 import { attachEventChatSocket } from "./lib/eventChatSocket.js";
+import { startEscalationCron } from "./lib/escalations.js";
 import { publicJobsRouter } from "./routes/jobs.js";
 import { membersRouter } from "./routes/members.js";
 import { notificationsRouter } from "./routes/notifications.js";
+import { checklistTasksRouter } from "./routes/checklistTasks.js";
 
 const app = express();
 
@@ -57,7 +58,6 @@ app.use("/api/events", registrationsRouter);
 app.use("/api/events", eventChatRouter);
 app.use("/api/events", publicEventsRouter);
 app.use("/api/committees", publicCommitteesRouter);
-app.use("/api/checklists", checklistsRouter);
 app.use("/api/checklist-templates", checklistTemplatesRouter);
 app.use("/api/checklist-instances", checklistInstancesRouter);
 app.use("/api/branch", branchRouter);
@@ -68,6 +68,7 @@ app.use("/api/employer", employerRouter);
 app.use("/api/jobs", publicJobsRouter);
 app.use("/api/members", membersRouter);
 app.use("/api/notifications", notificationsRouter);
+app.use("/api/checklist-tasks", checklistTasksRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {
@@ -89,3 +90,7 @@ const server = app.listen(port, () => {
   console.log(`API listening on http://localhost:${port}`);
 });
 attachEventChatSocket(server);
+
+// Approval-stage escalation: chairperson gets pinged when a stage stays
+// pending more than 3 days past the event's ends_at. See lib/escalations.ts.
+startEscalationCron();

@@ -4,7 +4,7 @@ import type { Response, NextFunction } from "express";
 import { db } from "../../db/client.js";
 import {
   events, eventRegistrations, users, committees,
-  userRoleAssignments, roles, eventChecklists, eventChecklistReviews,
+  userRoleAssignments, roles, checklistInstances,
 } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { loadUserPermissions } from "../auth/permissions.js";
@@ -134,26 +134,34 @@ branchRouter.get("/metrics", requireBranchAccess, async (req, res, next) => {
         .where(eq(committees.active, true))
         .then((r) => r[0]?.n ?? 0),
 
-      // Approvals
+      // Approvals — read from the generic checklist_instances engine.
       db
         .select({ n: sql<number>`count(*)::int`.as("n") })
-        .from(eventChecklists)
-        .where(eq(eventChecklists.status, "awaiting_branch_review"))
+        .from(checklistInstances)
+        .where(and(eq(checklistInstances.status, "awaiting_review"), isNull(checklistInstances.deleted_at)))
         .then((r) => r[0]?.n ?? 0),
 
       db
         .select({ n: sql<number>`count(*)::int`.as("n") })
-        .from(eventChecklists)
-        .where(and(eq(eventChecklists.status, "approved"), gte(eventChecklists.finalized_at, startOfMonth)))
+        .from(checklistInstances)
+        .where(and(
+          eq(checklistInstances.status, "approved"),
+          gte(checklistInstances.reviewed_at, startOfMonth),
+          isNull(checklistInstances.deleted_at),
+        ))
         .then((r) => r[0]?.n ?? 0),
 
-      // Average approval cycle time (hours) â€” created â†’ finalized, only for approved
+      // Average approval cycle time (hours) — created → reviewed, only for approved
       db
         .select({
-          avg_hours: sql<number>`COALESCE(EXTRACT(EPOCH FROM AVG(${eventChecklists.finalized_at} - ${eventChecklists.created_at})) / 3600, 0)::float`.as("avg_hours"),
+          avg_hours: sql<number>`COALESCE(EXTRACT(EPOCH FROM AVG(${checklistInstances.reviewed_at} - ${checklistInstances.created_at})) / 3600, 0)::float`.as("avg_hours"),
         })
-        .from(eventChecklists)
-        .where(and(eq(eventChecklists.status, "approved"), isNotNull(eventChecklists.finalized_at)))
+        .from(checklistInstances)
+        .where(and(
+          eq(checklistInstances.status, "approved"),
+          isNotNull(checklistInstances.reviewed_at),
+          isNull(checklistInstances.deleted_at),
+        ))
         .then((r) => r[0]?.avg_hours ?? 0),
 
       // Per-committee breakdown: events count + registrations count
@@ -214,21 +222,24 @@ branchRouter.get("/metrics", requireBranchAccess, async (req, res, next) => {
         .orderBy(desc(events.starts_at))
         .limit(10),
 
-      // Pending approvals list (top 5 oldest)
+      // Pending approvals list (top 5 oldest) — from checklist_instances
       db
         .select({
-          id: eventChecklists.id,
-          event_id: eventChecklists.event_id,
+          id: checklistInstances.id,
+          event_id: checklistInstances.event_id,
           event_title: events.title,
           committee_code: committees.code,
           committee_name: committees.name,
-          updated_at: eventChecklists.updated_at,
+          updated_at: checklistInstances.updated_at,
         })
-        .from(eventChecklists)
-        .innerJoin(events, eq(events.id, eventChecklists.event_id))
+        .from(checklistInstances)
+        .innerJoin(events, eq(events.id, checklistInstances.event_id))
         .leftJoin(committees, eq(committees.id, events.committee_id))
-        .where(eq(eventChecklists.status, "awaiting_branch_review"))
-        .orderBy(asc(eventChecklists.updated_at))
+        .where(and(
+          eq(checklistInstances.status, "awaiting_review"),
+          isNull(checklistInstances.deleted_at),
+        ))
+        .orderBy(asc(checklistInstances.updated_at))
         .limit(5),
     ]);
 

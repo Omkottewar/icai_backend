@@ -14,17 +14,33 @@ import { ApiError } from "./apiError.js";
 export type QuestionType =
   | "short_text" | "long_text"
   | "number" | "money"
-  | "date" | "datetime"
+  | "date" | "datetime" | "time_range"
   | "radio" | "dropdown" | "yes_no" | "checkbox"
-  | "rating" | "file" | "section_heading";
+  | "rating" | "file" | "section_heading"
+  | "task_list" | "budget_table";
 
 export const QUESTION_TYPES = [
   "short_text", "long_text",
   "number", "money",
-  "date", "datetime",
+  "date", "datetime", "time_range",
   "radio", "dropdown", "yes_no", "checkbox",
   "rating", "file", "section_heading",
+  "task_list", "budget_table",
 ] as const;
+
+// A single task row inside a task_list response. The shape is denormalised
+// from the dedicated checklist_task_assignments table so the response
+// blob stays self-contained for the frontend.
+export type TaskItem = {
+  // Stable client-generated id used to match rows across saves; the
+  // backend echoes it back. NOT the DB id.
+  cid?: string;
+  description: string;
+  assignee_id?: string | null;
+  due_date?: string | null;     // 'YYYY-MM-DD'
+  status?: "pending" | "done" | "cancelled";
+  notes?: string | null;
+};
 
 export function isQuestionType(v: unknown): v is QuestionType {
   return typeof v === "string" && (QUESTION_TYPES as readonly string[]).includes(v);
@@ -114,6 +130,29 @@ export function normaliseConfig(type: QuestionType, raw: any): Record<string, un
     }
     case "section_heading":
       return {};
+    case "time_range":
+      // No template-time knobs today. Could later allow min/max bounds.
+      return {};
+    case "budget_table": {
+      // Template-time knobs:
+      //   faculty_count — default rows for the per-faculty categories
+      //                   (Stay / Travel / Food / Cab). The treasurer can
+      //                   leave unused rows at 0; the renderer hides
+      //                   computed sub-rows beyond this number.
+      const out: Record<string, unknown> = {};
+      const fc = Number(cfg.faculty_count);
+      out.faculty_count = Number.isFinite(fc) ? clampInt(fc, 1, 20) : 6;
+      return out;
+    }
+    case "task_list": {
+      // Optional defaults the builder may set on the template:
+      //   min_tasks  — refuse to submit with fewer rows
+      //   default_due_days — pre-fill new tasks' due date as event start - N days
+      const out: Record<string, unknown> = {};
+      if (Number.isFinite(Number(cfg.min_tasks))) out.min_tasks = clampInt(Number(cfg.min_tasks), 0, 50);
+      if (Number.isFinite(Number(cfg.default_due_days))) out.default_due_days = clampInt(Number(cfg.default_due_days), 0, 365);
+      return out;
+    }
   }
 }
 
@@ -204,6 +243,118 @@ export function validateResponseValue(
       // pipeline to have produced these; this layer only sanity-checks shape.
       if (typeof raw !== "object" || !raw || !("file_id" in raw)) throw new ApiError(400, "Upload a file");
       return raw;
+    }
+    case "time_range": {
+      // Expect { start: 'HH:MM', end: 'HH:MM' }. Both required when present.
+      if (typeof raw !== "object" || raw === null) throw new ApiError(400, "Pick start and end times");
+      const r = raw as Record<string, unknown>;
+      const tre = /^([01]\d|2[0-3]):[0-5]\d$/;
+      const start = typeof r.start === "string" ? r.start : "";
+      const end   = typeof r.end   === "string" ? r.end   : "";
+      if (!tre.test(start) || !tre.test(end)) throw new ApiError(400, "Times must be in 24-hour HH:MM format");
+      if (start >= end) throw new ApiError(400, "End time must be after start time");
+      return { start, end };
+    }
+    case "budget_table": {
+      // Shape: a big JSON blob with revenue + expenses by category. We
+      // sanity-check the shape (object, expected keys) and coerce all
+      // amounts to non-negative integers (paise). The actual category list
+      // is fixed client-side; we don't gate on which categories appear so
+      // future additions don't require backend changes.
+      if (typeof raw !== "object" || raw === null) throw new ApiError(400, "Budget must be an object");
+      const b = raw as Record<string, any>;
+      const facultyCount = Number(cfg.faculty_count) || 6;
+
+      // Coerce per-faculty number arrays
+      const numArr = (v: unknown): number[] => {
+        if (!Array.isArray(v)) return [];
+        return v.slice(0, facultyCount).map((x) => {
+          const n = Math.round(Number(x));
+          return Number.isFinite(n) && n >= 0 ? n : 0;
+        });
+      };
+      // Coerce travel array (each row is { to, from })
+      const travelArr = (v: unknown) => {
+        if (!Array.isArray(v)) return [];
+        return v.slice(0, facultyCount).map((x) => {
+          const r = (x && typeof x === "object") ? x : {};
+          const to   = Math.round(Number((r as any).to))   || 0;
+          const from = Math.round(Number((r as any).from)) || 0;
+          return { to: Math.max(0, to), from: Math.max(0, from) };
+        });
+      };
+      // Coerce {label, amount_paise} addable-row arrays
+      const labeledArr = (v: unknown) => {
+        if (!Array.isArray(v)) return [];
+        return v.map((x) => {
+          const r = (x && typeof x === "object") ? x : {};
+          return {
+            label: typeof (r as any).label === "string" ? (r as any).label.slice(0, 200) : "",
+            amount_paise: Math.max(0, Math.round(Number((r as any).amount_paise)) || 0),
+          };
+        }).slice(0, 50);  // cap row count
+      };
+      const single = (v: unknown) => Math.max(0, Math.round(Number(v)) || 0);
+
+      const revenue = (b.revenue && typeof b.revenue === "object") ? b.revenue : {};
+      const expenses = (b.expenses && typeof b.expenses === "object") ? b.expenses : {};
+      const facultyNames = Array.isArray(b.faculty_names)
+        ? b.faculty_names.slice(0, facultyCount).map((s: unknown) => typeof s === "string" ? s.slice(0, 100) : "")
+        : [];
+
+      return {
+        faculty_names: facultyNames,
+        revenue: {
+          participation: {
+            participants: Math.max(0, Math.round(Number((revenue.participation || {}).participants)) || 0),
+            fee_paise:    Math.max(0, Math.round(Number((revenue.participation || {}).fee_paise))    || 0),
+          },
+          other: labeledArr(revenue.other),
+        },
+        expenses: {
+          stay:           numArr(expenses.stay),
+          travel:         travelArr(expenses.travel),
+          food_faculty:   numArr(expenses.food_faculty),
+          memento:        labeledArr(expenses.memento),
+          cab:            numArr(expenses.cab),
+          food_event:     labeledArr(expenses.food_event),
+          venue:          labeledArr(expenses.venue),
+          photography:    single(expenses.photography),
+          material:       single(expenses.material),
+          transportation: single(expenses.transportation),
+          printing:       single(expenses.printing),
+          flower:         single(expenses.flower),
+          light_sound:    single(expenses.light_sound),
+          led_screen:     single(expenses.led_screen),
+          other:          labeledArr(expenses.other),
+        },
+      };
+    }
+    case "task_list": {
+      // The raw value is an array of TaskItem rows. We trim, validate each,
+      // and return the cleaned array. The reconciliation into the
+      // checklist_task_assignments table happens in the responses save
+      // endpoint — this layer is shape-only.
+      if (!Array.isArray(raw)) throw new ApiError(400, "Tasks must be a list");
+      const cleaned: TaskItem[] = [];
+      for (const r of raw) {
+        if (!r || typeof r !== "object") continue;
+        const t = r as Record<string, unknown>;
+        const description = typeof t.description === "string" ? t.description.trim() : "";
+        if (!description) continue;   // silently drop rows with no description
+        cleaned.push({
+          cid: typeof t.cid === "string" ? t.cid : undefined,
+          description: description.slice(0, 500),
+          assignee_id: typeof t.assignee_id === "string" && t.assignee_id ? t.assignee_id : null,
+          due_date: typeof t.due_date === "string" && t.due_date ? t.due_date.slice(0, 10) : null,
+          status: (t.status === "done" || t.status === "cancelled") ? t.status : "pending",
+          notes: typeof t.notes === "string" ? t.notes.slice(0, 1000) : null,
+        });
+      }
+      if (cfg.min_tasks && cleaned.length < cfg.min_tasks) {
+        throw new ApiError(400, `Add at least ${cfg.min_tasks} task${cfg.min_tasks === 1 ? "" : "s"}`);
+      }
+      return cleaned;
     }
   }
 }

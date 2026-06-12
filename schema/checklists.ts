@@ -48,6 +48,11 @@ export const checklistTemplateQuestions = pgTable("checklist_template_questions"
   help_text:   text("help_text"),
   required:    boolean("required").notNull().default(true),
   config:      jsonb("config").notNull().default({}),
+  // Only meaningful on 'section_heading' rows. Says "everything between
+  // this heading and the next is editable only by users holding this role
+  // code". NULL = no restriction (anyone with fill rights can edit).
+  // Added in migration 0027.
+  section_owner_role: text("section_owner_role"),
   created_at:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   templateSortIdx: index("idx_checklist_template_questions_template_sort").on(t.template_id, t.sort_order),
