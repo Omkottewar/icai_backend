@@ -18,9 +18,11 @@ import {
   notifications,
   notificationTemplates,
   notificationDeliveries,
+  pushSubscriptions,
   users,
 } from "../../schema/index.js";
 import { sendEmail } from "./email.js";
+import { sendPush } from "./webpush.js";
 
 export type NotifyInput = {
   user_id: string;
@@ -62,6 +64,7 @@ export async function notify(input: NotifyInput): Promise<NotifyResult | null> {
       email: users.email,
       phone: users.phone,
       notify_email: users.notify_email,
+      notify_push: users.notify_push,
     }).from(users).where(eq(users.id, input.user_id)).limit(1),
   ]);
 
@@ -144,6 +147,75 @@ export async function notify(input: NotifyInput): Promise<NotifyResult | null> {
         sent_at:         result.status === "sent" ? new Date() : null,
       });
       deliveries.push({ channel, status: result.status, error: result.status !== "sent" ? (result as any).error ?? (result as any).reason : undefined });
+      continue;
+    }
+
+    if (channel === "webpush") {
+      // User-level opt-out gate. notify_push defaults to true, so users only
+      // miss pushes if they explicitly turned them off in settings.
+      if (user.notify_push === false) {
+        await db.insert(notificationDeliveries).values({
+          notification_id: notif.id,
+          channel:         "webpush",
+          recipient:       "",
+          status:          "skipped",
+          error:           "user_opted_out",
+        });
+        deliveries.push({ channel, status: "skipped", error: "user_opted_out" });
+        continue;
+      }
+
+      const subs = await db
+        .select({
+          id:       pushSubscriptions.id,
+          endpoint: pushSubscriptions.endpoint,
+          p256dh:   pushSubscriptions.p256dh,
+          auth:     pushSubscriptions.auth,
+        })
+        .from(pushSubscriptions)
+        .where(eq(pushSubscriptions.user_id, input.user_id));
+
+      if (subs.length === 0) {
+        await db.insert(notificationDeliveries).values({
+          notification_id: notif.id,
+          channel:         "webpush",
+          recipient:       "",
+          status:          "skipped",
+          error:           "no_subscription",
+        });
+        deliveries.push({ channel, status: "skipped", error: "no_subscription" });
+        continue;
+      }
+
+      // Fan out to every device this user has registered. Each device gets
+      // its own delivery row so admins can see "delivered to 2 of 3 devices"
+      // in the audit trail.
+      let anySent = false;
+      for (const sub of subs) {
+        const result = await sendPush(sub, {
+          title,
+          body,
+          url: input.link_url ?? undefined,
+          tag: input.template_key,
+          data: { notification_id: notif.id, template_key: input.template_key },
+        });
+        await db.insert(notificationDeliveries).values({
+          notification_id: notif.id,
+          channel:         "webpush",
+          recipient:       sub.endpoint.slice(0, 200), // truncate for audit
+          status:          result.status,
+          error:           result.status === "failed" ? result.error
+                         : result.status === "skipped" ? result.reason
+                         : null,
+          sent_at:         result.status === "sent" ? new Date() : null,
+        });
+        if (result.status === "sent") anySent = true;
+      }
+      deliveries.push({
+        channel,
+        status: anySent ? "sent" : "failed",
+        error:  anySent ? undefined : "all_devices_failed",
+      });
       continue;
     }
 

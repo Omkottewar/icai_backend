@@ -21,8 +21,19 @@ export const files = pgTable("files", {
   name:         text("name").notNull(),                           // original filename
   mime_type:    text("mime_type").notNull(),
   size_bytes:   integer("size_bytes").notNull(),
-  storage_path: text("storage_path").notNull(),                   // path within the bucket
+  storage_path: text("storage_path").notNull(),                   // path within the bucket (the original)
   bucket:       text("bucket").notNull(),                         // avatars / banners / certificates
+  // Image variants — populated by the sharp pipeline at upload time for
+  // image MIME types. NULL for PDFs and other non-image files. Storing
+  // variant paths (rather than computing them on-the-fly from the original)
+  // means we can move to object storage later without touching any caller.
+  thumb_path:   text("thumb_path"),                               // ~240px wide WebP — grid tiles
+  medium_path:  text("medium_path"),                              // ~800px wide WebP — lightbox
+  width:        integer("width"),                                  // pixels of the original
+  height:       integer("height"),
+  // Required for any image used in the public gallery. Optional for other
+  // uses (banners, certificates) — the gallery admin enforces presence.
+  alt_text:     text("alt_text"),
   uploaded_by:  uuid("uploaded_by").references((): AnyPgColumn => users.id, { onDelete: "set null" }),
   created_at:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   deleted_at:   timestamp("deleted_at", { withTimezone: true }),

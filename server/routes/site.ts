@@ -6,6 +6,7 @@ import {
   users, userRoleAssignments, roles, files,
 } from "../../schema/index.js";
 import { handleApiError } from "../lib/apiError.js";
+import { storage } from "../lib/storage.js";
 
 export const siteRouter = Router();
 
@@ -101,7 +102,7 @@ siteRouter.get("/managing-committee", async (_req, res, next) => {
         name:      r.name,
         role_code: r.role_code,
         role_name: r.role_name,
-        avatar_url: r.avatar_path ? `/uploads/${r.avatar_path}` : null,
+        avatar_url: r.avatar_path ? storage().url(r.avatar_path) : null,
       }))
       .sort((a, b) => {
         const pa = ROLE_ORDER[a.role_code] ?? 999;

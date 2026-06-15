@@ -16,16 +16,19 @@
 // dispatch, so the same row won't be picked up twice. If notify fails the
 // timestamp isn't set, and the next tick retries.
 
-import { and, eq, gt, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
   checklistInstanceApprovals,
   checklistInstances,
   events,
+  grievances,
+  grievanceSubjectRoutes,
   roles,
   userRoleAssignments,
 } from "../../schema/index.js";
 import { notify } from "./notify.js";
+import { sendEmail } from "./email.js";
 
 const ESCALATION_AFTER_DAYS = 3;
 // Polling interval. Hourly is fine for a 3-day window — even if we miss the
@@ -83,6 +86,72 @@ async function findChairperson(): Promise<string | null> {
   return row?.user_id ?? null;
 }
 
+const GRIEVANCE_SLA_HOURS = 48;
+
+/**
+ * Grievance escalation — any unresolved grievance older than the SLA without
+ * an escalated_at stamp gets one nudge email to the routed inbox (cc'd to
+ * the chairperson if available). Stamps escalated_at so the same row isn't
+ * pinged twice.
+ */
+async function runGrievanceSweep(): Promise<{ checked: number; escalated: number }> {
+  const overdue = await db
+    .select({
+      id: grievances.id,
+      ticket_no: grievances.ticket_no,
+      name: grievances.name,
+      subject: grievances.subject,
+      message: grievances.message,
+      created_at: grievances.created_at,
+    })
+    .from(grievances)
+    .where(and(
+      inArray(grievances.status, ["open", "in_review"] as const),
+      isNull(grievances.escalated_at),
+      lt(grievances.created_at, sql`NOW() - INTERVAL '${sql.raw(String(GRIEVANCE_SLA_HOURS))} hours'`),
+    ));
+
+  if (overdue.length === 0) return { checked: 0, escalated: 0 };
+
+  let escalated = 0;
+  const appUrl = process.env.APP_URL ?? "";
+  for (const g of overdue) {
+    const [route] = await db
+      .select({ route_email: grievanceSubjectRoutes.route_email })
+      .from(grievanceSubjectRoutes)
+      .where(eq(grievanceSubjectRoutes.subject, g.subject))
+      .limit(1);
+    if (!route?.route_email) {
+      // No mailbox configured for this subject — nothing to escalate to.
+      // Skip without stamping so a later config fix can still trigger it.
+      continue;
+    }
+    const ageH = Math.round((Date.now() - new Date(g.created_at).getTime()) / 3_600_000);
+    try {
+      await sendEmail({
+        to: route.route_email,
+        subject: `[ESCALATION] ${g.ticket_no} unanswered for ${ageH}h`,
+        body: [
+          `Grievance ${g.ticket_no} from ${g.name} has been open for ${ageH} hours without a response.`,
+          ``,
+          `Subject: ${g.subject}`,
+          `Message: ${g.message.slice(0, 500)}${g.message.length > 500 ? "…" : ""}`,
+          ``,
+          `Open in admin: ${appUrl}/#/admin/grievances?ticket_no=${encodeURIComponent(g.ticket_no)}`,
+        ].join("\n"),
+      });
+      await db.update(grievances)
+        .set({ escalated_at: new Date() })
+        .where(eq(grievances.id, g.id));
+      escalated++;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[escalations] grievance mail failed", { ticket: g.ticket_no, err });
+    }
+  }
+  return { checked: overdue.length, escalated };
+}
+
 /** Run one sweep. Exported so the test harness / admin trigger can call it. */
 export async function runEscalationSweep(): Promise<{ checked: number; escalated: number }> {
   const candidates = await findCandidates();
@@ -135,12 +204,20 @@ export function startEscalationCron() {
       // eslint-disable-next-line no-console
       console.error("[escalations] initial sweep failed", err);
     });
+    runGrievanceSweep().catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error("[escalations] initial grievance sweep failed", err);
+    });
   }, 30_000);
 
   intervalHandle = setInterval(() => {
     runEscalationSweep().catch((err) => {
       // eslint-disable-next-line no-console
       console.error("[escalations] sweep failed", err);
+    });
+    runGrievanceSweep().catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error("[escalations] grievance sweep failed", err);
     });
   }, TICK_INTERVAL_MS);
 }

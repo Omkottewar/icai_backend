@@ -20,6 +20,12 @@ import { mentorshipAdminRouter } from "./mentorship.js";
 import { articleshipMatchesAdminRouter } from "./articleshipMatches.js";
 import { exportsAdminRouter } from "./exports.js";
 import { approvalsAdminRouter } from "./approvals.js";
+import { paperPresentationsAdminRouter } from "./paperPresentations.js";
+import { galleryAdminRouter } from "./galleryAlbums.js";
+import { newslettersAdminRouter } from "./newsletters.js";
+import { officeBearersAdminRouter } from "./officeBearers.js";
+import { annualReportsAdminRouter } from "./annualReports.js";
+import { grievancesAdminRouter, grievanceRoutesAdminRouter } from "./grievances.js";
 
 export const adminRouter = Router();
 
@@ -45,3 +51,10 @@ adminRouter.use("/mentorship", mentorshipAdminRouter);
 adminRouter.use("/articleship-matches", articleshipMatchesAdminRouter);
 adminRouter.use("/exports", exportsAdminRouter);
 adminRouter.use("/approvals", approvalsAdminRouter);
+adminRouter.use("/paper-presentations", paperPresentationsAdminRouter);
+adminRouter.use("/gallery-albums", galleryAdminRouter);
+adminRouter.use("/newsletters", newslettersAdminRouter);
+adminRouter.use("/office-bearers", officeBearersAdminRouter);
+adminRouter.use("/annual-reports", annualReportsAdminRouter);
+adminRouter.use("/grievances", grievancesAdminRouter);
+adminRouter.use("/grievance-routes", grievanceRoutesAdminRouter);

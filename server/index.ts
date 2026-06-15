@@ -22,7 +22,10 @@ import { startEscalationCron } from "./lib/escalations.js";
 import { publicJobsRouter } from "./routes/jobs.js";
 import { membersRouter } from "./routes/members.js";
 import { notificationsRouter } from "./routes/notifications.js";
+import { pushRouter } from "./routes/push.js";
 import { checklistTasksRouter } from "./routes/checklistTasks.js";
+import { branchContentRouter } from "./routes/branchContent.js";
+import { grievancesRouter } from "./routes/grievances.js";
 
 const app = express();
 
@@ -68,7 +71,14 @@ app.use("/api/employer", employerRouter);
 app.use("/api/jobs", publicJobsRouter);
 app.use("/api/members", membersRouter);
 app.use("/api/notifications", notificationsRouter);
+app.use("/api/push", pushRouter);
 app.use("/api/checklist-tasks", checklistTasksRouter);
+// Branch-level content (Resources page, Gallery, About page). One router
+// serves all five entities — endpoints are scoped under sub-paths like
+// /paper-presentations, /gallery-albums, /newsletters, /office-bearers,
+// /annual-reports.
+app.use("/api", branchContentRouter);
+app.use("/api/grievances", grievancesRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {

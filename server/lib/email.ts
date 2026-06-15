@@ -85,11 +85,23 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
     return { status: "skipped", reason: "smtp_not_configured_dev" };
   }
 
+  // Dev safety net — when DEV_EMAIL_OVERRIDE is set (and we're not in
+  // production), redirect every outbound email to that single inbox. Keeps
+  // test grievances, registrations, escalations, etc. from accidentally
+  // hitting real branch addresses while wiring SMTP up. The original
+  // recipient is prepended to the subject so the override inbox can still
+  // tell who *would have* received each mail.
+  const override = process.env.DEV_EMAIL_OVERRIDE;
+  const finalTo      = override && process.env.NODE_ENV !== "production" ? override : input.to;
+  const finalSubject = override && process.env.NODE_ENV !== "production"
+    ? `[→ ${input.to}] ${input.subject}`
+    : input.subject;
+
   try {
     const info = await transporter.sendMail({
       from,
-      to:      input.to,
-      subject: input.subject,
+      to:      finalTo,
+      subject: finalSubject,
       text:    input.body,
       html:    input.html,
     });

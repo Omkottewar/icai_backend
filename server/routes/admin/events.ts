@@ -5,6 +5,7 @@ import { events, eventRegistrations, committees, branches, files, checklistInsta
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { requireRole, committeeOwnerOnly } from "../../middleware/requireRole.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { storage } from "../../lib/storage.js";
 
 // ─── Role gates for this router ─────────────────────────────────────────
 // publish / cancel / hard-decide → only branch leadership (Section R.5)
@@ -186,7 +187,7 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
       ...row.event,
       committee_name: row.committee_name,
       branch_name: row.branch_name,
-      banner_url: row.banner_path ? `/uploads/${row.banner_path}` : null,
+      banner_url: row.banner_path ? storage().url(row.banner_path) : null,
       registrations_total: regs,
     });
   } catch (err) { handleApiError(err, res, next); }

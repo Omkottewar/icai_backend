@@ -3,6 +3,7 @@ import { and, asc, eq, gt, isNull } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { events, committees, files } from "../../schema/index.js";
 import { handleApiError, ApiError, trim } from "../lib/apiError.js";
+import { storage } from "../lib/storage.js";
 
 export const publicEventsRouter = Router();
 
@@ -58,7 +59,7 @@ publicEventsRouter.get("/", async (req, res, next) => {
     res.json({
       rows: rows.map((r) => ({
         ...r,
-        banner_url: r.banner_path ? `/uploads/${r.banner_path}` : null,
+        banner_url: r.banner_path ? storage().url(r.banner_path) : null,
       })),
     });
   } catch (err) { handleApiError(err, res, next); }
@@ -100,7 +101,7 @@ publicEventsRouter.get("/:slug", async (req, res, next) => {
 
     res.json({
       ...row,
-      banner_url: row.banner_path ? `/uploads/${row.banner_path}` : null,
+      banner_url: row.banner_path ? storage().url(row.banner_path) : null,
     });
   } catch (err) { handleApiError(err, res, next); }
 });

@@ -8,7 +8,7 @@ import { notify } from "../../lib/notify.js";
 
 export const notificationTemplatesAdminRouter = Router();
 
-const ALLOWED_CHANNELS = new Set(["inapp", "email", "sms", "whatsapp"]);
+const ALLOWED_CHANNELS = new Set(["inapp", "email", "sms", "whatsapp", "webpush"]);
 
 // ─── GET /api/admin/notification-templates ────────────────────────────────
 notificationTemplatesAdminRouter.get("/", async (_req, res, next) => {
