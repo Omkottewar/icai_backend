@@ -3,25 +3,18 @@ import { and, asc, desc, eq, ilike, isNull, ne, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
 import { events, eventRegistrations, committees, branches, files, checklistInstances, checklistInstanceApprovals, eventOverrideLog } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
-import { requireRole, committeeOwnerOnly } from "../../middleware/requireRole.js";
+import { requireRole } from "../../middleware/requireRole.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
 import { storage } from "../../lib/storage.js";
 
 // ─── Role gates for this router ─────────────────────────────────────────
-// publish / cancel / hard-decide → only branch leadership (Section R.5)
-const canPublishEvents = requireRole(["branch_chairman", "branch_vice_chairman"]);
-// edit/delete → branch leadership OR the committee chairman of THIS event's
-// committee. Uses committeeOwnerOnly() with a loader that reads events.committee_id.
-const canEditThisEvent = committeeOwnerOnly(async (req) => {
-  const id = trim(req.params?.id);
-  if (!id) return null;
-  const [row] = await db
-    .select({ committee_id: events.committee_id })
-    .from(events)
-    .where(and(eq(events.id, id), isNull(events.deleted_at)))
-    .limit(1);
-  return row?.committee_id ?? null;
-});
+// Every mutating endpoint (create / edit / delete / publish / cancel) is
+// locked to admin + branch_chairman. Other admin-shell roles
+// (committee_chairman, branch_treasurer, branch_secretary, branch_manager,
+// accountant, etc.) can still SEE the events list — they need that to find
+// and fill their checklist tasks — but cannot change event metadata.
+// `requireRole` always allows `admin` as a universal override.
+const canManageEvents = requireRole(["branch_chairman"]);
 
 export const eventsAdminRouter = Router();
 
@@ -194,13 +187,8 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
 });
 
 // ─── POST /api/admin/events ──────────────────────────────────────────────
-// Create gate: branch leadership can create for any committee; committee
-// chairmen can create only for the committees they chair.
-const canCreateEvent = committeeOwnerOnly(async (req) => {
-  const cid = typeof req.body?.committee_id === "string" ? req.body.committee_id.trim() : null;
-  return cid || null;
-});
-eventsAdminRouter.post("/", canCreateEvent, async (req: AuthedRequest, res, next) => {
+// Create gate: admin + branch_chairman only.
+eventsAdminRouter.post("/", canManageEvents, async (req: AuthedRequest, res, next) => {
   try {
     const title = need(trim(req.body.title), "Title");
     const committee_id = need(trim(req.body.committee_id), "Committee");
@@ -259,8 +247,8 @@ eventsAdminRouter.post("/", canCreateEvent, async (req: AuthedRequest, res, next
 });
 
 // ─── PATCH /api/admin/events/:id ─────────────────────────────────────────
-// Edit gate: branch leadership OR the committee chairman of this event.
-eventsAdminRouter.patch("/:id", canEditThisEvent, async (req, res, next) => {
+// Edit gate: admin + branch_chairman only.
+eventsAdminRouter.patch("/:id", canManageEvents, async (req, res, next) => {
   try {
     const id = String(req.params.id);
     const [existing] = await db.select().from(events).where(and(eq(events.id, id), isNull(events.deleted_at))).limit(1);
@@ -310,7 +298,7 @@ eventsAdminRouter.patch("/:id", canEditThisEvent, async (req, res, next) => {
 });
 
 // ─── POST /api/admin/events/:id/publish ──────────────────────────────────
-// Branch chairman / VC / admin only (gated by canPublishEvents middleware).
+// Branch chairman / admin only (gated by canManageEvents).
 //
 // Two paths:
 //   1. Happy path: there's an attached checklist instance AND it's in
@@ -327,7 +315,7 @@ eventsAdminRouter.patch("/:id", canEditThisEvent, async (req, res, next) => {
 // Without ?override=true AND with an incomplete checklist, the endpoint
 // returns 400 — forcing the chairman to make an explicit decision rather
 // than silently rubber-stamping.
-eventsAdminRouter.post("/:id/publish", canPublishEvents, async (req: AuthedRequest, res, next) => {
+eventsAdminRouter.post("/:id/publish", canManageEvents, async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
     const override = String(req.query.override ?? "") === "true";
@@ -381,7 +369,7 @@ eventsAdminRouter.post("/:id/publish", canPublishEvents, async (req: AuthedReque
 });
 
 // â”€â”€â”€ POST /api/admin/events/:id/cancel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-eventsAdminRouter.post("/:id/cancel", canPublishEvents, async (req, res, next) => {
+eventsAdminRouter.post("/:id/cancel", canManageEvents, async (req, res, next) => {
   try {
     const id = String(req.params.id);
     const [existing] = await db.select().from(events).where(and(eq(events.id, id), isNull(events.deleted_at))).limit(1);
@@ -393,7 +381,7 @@ eventsAdminRouter.post("/:id/cancel", canPublishEvents, async (req, res, next) =
 });
 
 // â”€â”€â”€ DELETE /api/admin/events/:id â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-eventsAdminRouter.delete("/:id", canEditThisEvent, async (req, res, next) => {
+eventsAdminRouter.delete("/:id", canManageEvents, async (req, res, next) => {
   try {
     const id = String(req.params.id);
     const [row] = await db.update(events).set({ deleted_at: new Date() }).where(and(eq(events.id, id), isNull(events.deleted_at))).returning();
