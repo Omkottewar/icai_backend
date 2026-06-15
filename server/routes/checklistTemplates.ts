@@ -249,26 +249,55 @@ checklistTemplatesRouter.post("/:id/clone", async (req: AuthedRequest, res, next
 });
 
 // ─── DELETE /api/checklist-templates/:id ──────────────────────────────────
-// Soft-delete. Refuses if any instance was ever spawned from this version
-// (the audit trail must keep working).
+// Soft-delete the template. Only blocks if a LIVE instance still references
+// this template — i.e. one that is not soft-deleted and is still in a
+// non-terminal status. Soft-deleted instances and terminal instances
+// (approved / rejected) don't block: the FK keeps audit history intact even
+// after the template row is marked deleted.
+//
+// `?force=1` cascades a soft-delete to the live instances too. This is
+// what the admin actually wants when they say "delete the template I just
+// created by mistake" — without force we'd nag them about an instance they
+// already meant to discard.
 checklistTemplatesRouter.delete("/:id", async (req: AuthedRequest, res, next) => {
   try {
     await requireAdminUser(req);
     const id = String(req.params.id);
+    const force = req.query.force === "1" || req.query.force === "true";
 
-    const [{ uses }] = await db
-      .select({ uses: sql<number>`COUNT(*)::int`.as("uses") })
+    // Live instance = not soft-deleted AND not in a terminal status.
+    const [{ live }] = await db
+      .select({ live: sql<number>`COUNT(*)::int`.as("live") })
       .from(checklistInstances)
-      .where(eq(checklistInstances.template_id, id));
-    if ((uses ?? 0) > 0) {
-      throw new ApiError(400, `Cannot delete: ${uses} instance(s) reference this version. Unpublish a draft instead.`);
+      .where(and(
+        eq(checklistInstances.template_id, id),
+        isNull(checklistInstances.deleted_at),
+        sql`${checklistInstances.status} NOT IN ('approved', 'rejected')`,
+      ));
+
+    if ((live ?? 0) > 0 && !force) {
+      throw new ApiError(
+        400,
+        `Cannot delete: ${live} active instance(s) reference this template. Retry with ?force=1 to also soft-delete those instances.`,
+      );
     }
 
-    const [row] = await db.update(checklistTemplates)
-      .set({ deleted_at: new Date() })
-      .where(eq(checklistTemplates.id, id))
-      .returning();
-    if (!row) throw new ApiError(404, "Template not found");
+    await db.transaction(async (tx) => {
+      if (force && (live ?? 0) > 0) {
+        await tx.update(checklistInstances)
+          .set({ deleted_at: new Date() })
+          .where(and(
+            eq(checklistInstances.template_id, id),
+            isNull(checklistInstances.deleted_at),
+          ));
+      }
+      const [row] = await tx.update(checklistTemplates)
+        .set({ deleted_at: new Date() })
+        .where(eq(checklistTemplates.id, id))
+        .returning();
+      if (!row) throw new ApiError(404, "Template not found");
+    });
+
     res.json({ ok: true });
   } catch (err) { handleApiError(err, res, next); }
 });
