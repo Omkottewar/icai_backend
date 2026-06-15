@@ -96,7 +96,19 @@ class SupabaseDriver implements StorageDriver {
         cacheControl: "31536000",   // 1 year — bytes at <uuid>.<ext> are immutable
       },
     );
-    if (error) throw new Error(`Supabase upload failed: ${error.message}`);
+    if (error) {
+      // Supabase's "Invalid path specified in request URL" almost always
+      // means the bucket itself doesn't exist (their message is misleading).
+      // Surface the supabase bucket + path we tried so the operator can spot
+      // typos and missing buckets at a glance.
+      const anyErr = error as { name?: string; statusCode?: string | number; message: string };
+      const hint = /invalid path/i.test(anyErr.message)
+        ? ` — does the Supabase bucket "${this.bucket}" exist and is it Public?`
+        : "";
+      throw new Error(
+        `Supabase upload failed (bucket="${this.bucket}", path="${path}"): ${anyErr.message}${hint}`,
+      );
+    }
     return path;
   }
 
@@ -122,12 +134,27 @@ let _driver: StorageDriver | null = null;
 export function storage(): StorageDriver {
   if (_driver) return _driver;
 
-  const supaUrl    = process.env.SUPABASE_URL;
+  const rawUrl     = process.env.SUPABASE_URL;
   const supaKey    = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const supaBucket = process.env.SUPABASE_BUCKET ?? "public-content";
+  const supaBucket = (process.env.SUPABASE_BUCKET ?? "public-content").trim();
 
-  if (supaUrl && supaKey) {
-    _driver = new SupabaseDriver(supaUrl, supaKey, supaBucket);
+  if (rawUrl && supaKey) {
+    // The Supabase JS SDK expects the *project* URL only — it appends
+    // /rest/v1/ for Postgres and /storage/v1/ for Storage internally. If
+    // an operator pastes "https://<proj>.supabase.co/rest/v1/" (the
+    // PostgREST URL shown in the dashboard's Project Settings → API page),
+    // the SDK ends up building URLs like /rest/v1/storage/v1/... which
+    // Supabase routes nowhere, yielding the confusing "Invalid path
+    // specified in request URL" error on every upload. Strip any path
+    // before handing the URL to createClient.
+    const cleanedUrl = stripPathFromSupabaseUrl(rawUrl);
+    if (cleanedUrl !== rawUrl) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[storage] SUPABASE_URL had a path/query — normalised "${rawUrl}" → "${cleanedUrl}". Update your .env to suppress this warning.`,
+      );
+    }
+    _driver = new SupabaseDriver(cleanedUrl, supaKey, supaBucket);
     // eslint-disable-next-line no-console
     console.log(`[storage] Using Supabase Storage (bucket: ${supaBucket})`);
   } else {
@@ -136,4 +163,16 @@ export function storage(): StorageDriver {
     console.log("[storage] Using local disk (./uploads). Set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY to switch.");
   }
   return _driver;
+}
+
+function stripPathFromSupabaseUrl(raw: string): string {
+  try {
+    const u = new URL(raw.trim());
+    // Keep protocol + host; drop pathname, search, hash.
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    // If URL parsing fails, fall back to a regex that strips everything
+    // after the first single slash that's not part of "https://".
+    return raw.trim().replace(/^(https?:\/\/[^/]+).*$/i, "$1");
+  }
 }

@@ -37,8 +37,10 @@ const app = express();
 app.set("trust proxy", 1);
 
 // Bumped from the default 100kb so event-banner uploads (base64-encoded
-// images, capped at ~6 MB on the file endpoint) fit through the JSON parser.
-app.use(express.json({ limit: "10mb" }));
+// images up to 6 MB AND videos up to 30 MB on the file endpoint) fit
+// through the JSON parser. Base64 inflates by ~33%, so 50 MB gives the
+// 30 MB video cap (≈ 40 MB base64) comfortable headroom.
+app.use(express.json({ limit: "50mb" }));
 app.use(cookieParser());
 
 // Serve uploaded banners/certificates. Local-disk-backed for the MVP;

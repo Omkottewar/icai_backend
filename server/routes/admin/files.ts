@@ -15,8 +15,18 @@ export const filesAdminRouter = Router();
 const ALLOWED_MIME = new Set([
   "image/jpeg", "image/png", "image/webp", "image/gif",
   "application/pdf",
+  // Video types — used for event banners. Cross-browser playable formats
+  // only. MOV is accepted because iPhone camera output is MOV; everything
+  // else (avi, mkv, wmv) is intentionally excluded since browsers can't
+  // play them inline.
+  "video/mp4", "video/webm", "video/quicktime",
 ]);
-const MAX_BYTES = 6 * 1024 * 1024; // 6 MB
+const VIDEO_MIMES = new Set(["video/mp4", "video/webm", "video/quicktime"]);
+// Per-type size caps. Images are tiny after the sharp pipeline; videos
+// need real headroom. The express.json body limit in server/index.ts must
+// be at least 1.4× whichever is bigger here (base64 overhead).
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024;   // 6 MB
+const MAX_VIDEO_BYTES = 30 * 1024 * 1024;  // 30 MB
 
 // ─── POST /api/admin/files ────────────────────────────────────────────────────
 // Body: { name, mime_type, bucket, data_base64, alt_text? }
@@ -44,8 +54,12 @@ filesAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
 
     const stripped = dataB64.replace(/^data:[^;]+;base64,/, "");
     const buf = Buffer.from(stripped, "base64");
-    if (buf.length === 0)            throw new ApiError(400, "File data is empty or invalid base64");
-    if (buf.length > MAX_BYTES)      throw new ApiError(400, "File exceeds 6 MB limit");
+    if (buf.length === 0) throw new ApiError(400, "File data is empty or invalid base64");
+    const isVideo = VIDEO_MIMES.has(mimeType);
+    const cap = isVideo ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES;
+    if (buf.length > cap) {
+      throw new ApiError(400, `File exceeds ${Math.round(cap / (1024 * 1024))} MB limit`);
+    }
 
     let storage_path: string;
     let thumb_path: string | null = null;

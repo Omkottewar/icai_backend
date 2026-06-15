@@ -17,7 +17,7 @@ export const notificationTemplates = pgTable("notification_templates", {
   key:           text("key").primaryKey(),
   name:          text("name").notNull(),
   description:   text("description"),
-  channels:      text("channels").array().notNull().default(["inapp", "email"]),
+  channels:      text("channels").array().notNull().default(["inapp", "email", "webpush"]),
   email_subject: text("email_subject"),
   email_body:    text("email_body"),
   inapp_title:   text("inapp_title"),

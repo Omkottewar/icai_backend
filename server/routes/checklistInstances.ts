@@ -292,8 +292,19 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
 });
 
 // ─── POST /api/checklist-instances ────────────────────────────────────────
-// Admin creates an instance from a published template. ALWAYS starts in
-// 'draft' status — admin must explicitly release before the filler can see it.
+// Admin creates an instance from a published template. The instance is
+// auto-released (status = 'awaiting_fill') immediately so the committee
+// chairman / treasurer / branch chairman dashboards see it without the
+// admin having to dig into the detail page and click 'Release'. This is
+// the right tradeoff for a small branch — the explicit two-step flow was
+// confusing non-tech admins and silently hiding all newly-created
+// checklists from everyone except admins.
+//
+// Fall-back: if no filler can be resolved (template has no fill_role and
+// no committee chairman is assigned), we keep the instance in 'draft' and
+// return it as-is so the admin can fix the assignment, then hit the
+// existing release endpoint manually.
+//
 // Body: { template_id, title?, event_id?, assigned_fill_user_id?, assigned_review_user_id?, notes? }
 checklistInstancesRouter.post("/", async (req: AuthedRequest, res, next) => {
   try {
@@ -342,6 +353,12 @@ checklistInstancesRouter.post("/", async (req: AuthedRequest, res, next) => {
       }
     }
 
+    // Decide whether we can skip the manual-release step. We can iff there
+    // is *some* way for the filler stage to resolve — an assigned user OR a
+    // template-level fill_role that the filler page can match on.
+    const hasFiller = !!fill || !!tpl.fill_role;
+    const isEventBound = !!event_id && !!event_committee_id;
+
     const created = await db.transaction(async (tx) => {
       const [row] = await tx.insert(checklistInstances).values({
         template_id: tpl.id,
@@ -351,13 +368,28 @@ checklistInstancesRouter.post("/", async (req: AuthedRequest, res, next) => {
         assigned_fill_user_id: fill,
         assigned_review_user_id: reviewer,
         created_by: req.user!.id,
-        status: "draft",  // <-- not visible to filler until admin releases
+        status: hasFiller ? "awaiting_fill" : "draft",
       }).returning();
       await tx.insert(checklistInstanceReviews).values({
         instance_id: row.id, actor_id: req.user!.id, action: "created",
       });
+      if (hasFiller) {
+        // Log the auto-release as a separate audit row so the timeline
+        // doesn't lie about a missing transition.
+        await tx.insert(checklistInstanceReviews).values({
+          instance_id: row.id, actor_id: req.user!.id, action: "released",
+          note: "Auto-released on creation",
+        });
+      }
       return row;
     });
+
+    // Stage rows live outside the create transaction because
+    // ensureApprovalStages uses the top-level `db` handle (it's also called
+    // from /release). Only event-bound, auto-released instances get stages.
+    if (hasFiller && isEventBound) {
+      await ensureApprovalStages(created.id, true);
+    }
 
     res.status(201).json(created);
   } catch (err) { handleApiError(err, res, next); }
