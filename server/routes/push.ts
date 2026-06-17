@@ -138,6 +138,12 @@ pushRouter.post("/test", async (req: AuthedRequest, res, next) => {
           url:   "/dashboard",
           tag:   "push_test",
           icon:  "/pwa-192.png",
+          // Monochrome silhouette for Android's small-icon slot. Without
+          // this the OS falls back to the coloured icon and renders it
+          // as a black square. SW already defaults this for notify()
+          // dispatches; the test push sets it explicitly so the test
+          // appearance matches a real production push exactly.
+          badge: "/notification-badge.svg",
           data:  { test: true },
         },
       );
