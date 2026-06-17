@@ -4,7 +4,7 @@ import { db } from "../../db/client.js";
 import { pushSubscriptions, users } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
-import { getVapidPublicKey, isWebPushConfigured } from "../lib/webpush.js";
+import { getVapidPublicKey, isWebPushConfigured, sendPush } from "../lib/webpush.js";
 
 export const pushRouter = Router();
 
@@ -97,6 +97,93 @@ pushRouter.post("/unsubscribe", async (req: AuthedRequest, res, next) => {
     }
 
     res.json({ ok: true });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/push/test ─────────────────────────────────────────────────
+// Send an immediate test push to every device this user has subscribed.
+// Bypasses notify.ts and notification_deliveries — this is purely a debug
+// ping so the user (or a support admin) can confirm "yes, push reaches my
+// phone right now". The payload mirrors what notify() would normally send
+// so the SW renders it identically.
+//
+// Returns per-device { ok, error? } so the diagnostics UI can show which
+// device received it (or why each failed).
+pushRouter.post("/test", async (req: AuthedRequest, res, next) => {
+  try {
+    if (!isWebPushConfigured()) throw new ApiError(503, "push_not_configured");
+
+    const subs = await db
+      .select({
+        id:         pushSubscriptions.id,
+        endpoint:   pushSubscriptions.endpoint,
+        p256dh:     pushSubscriptions.p256dh,
+        auth:       pushSubscriptions.auth,
+        user_agent: pushSubscriptions.user_agent,
+      })
+      .from(pushSubscriptions)
+      .where(eq(pushSubscriptions.user_id, req.user!.id));
+
+    if (subs.length === 0) {
+      throw new ApiError(400, "No subscriptions registered for this user. Click 'Enable' on a device first, then try again.");
+    }
+
+    // Send to every device in parallel — most users have one, a few have two.
+    const results = await Promise.all(subs.map(async (s) => {
+      const r = await sendPush(
+        { id: s.id, endpoint: s.endpoint, p256dh: s.p256dh, auth: s.auth },
+        {
+          title: "Test notification — ICAI Nagpur",
+          body:  "If you can read this, push notifications are working on this device. 🎉",
+          url:   "/dashboard",
+          tag:   "push_test",
+          icon:  "/pwa-192.png",
+          data:  { test: true },
+        },
+      );
+      // Truncate the user_agent so the response stays small.
+      const ua = s.user_agent ? s.user_agent.slice(0, 120) : null;
+      return { device: ua, ...r };
+    }));
+
+    const anySent = results.some((r) => r.status === "sent");
+    res.json({
+      ok:      anySent,
+      sent_to: results.filter((r) => r.status === "sent").length,
+      total:   results.length,
+      results,
+    });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── GET /api/push/status ────────────────────────────────────────────────
+// One-stop diagnostic for the settings card. Tells the frontend everything
+// it needs to render a "🟢 Push working" or "🔴 X is wrong" panel without
+// chaining 3 separate calls.
+pushRouter.get("/status", async (req: AuthedRequest, res, next) => {
+  try {
+    const subs = await db
+      .select({
+        id:           pushSubscriptions.id,
+        user_agent:   pushSubscriptions.user_agent,
+        created_at:   pushSubscriptions.created_at,
+        last_seen_at: pushSubscriptions.last_seen_at,
+      })
+      .from(pushSubscriptions)
+      .where(eq(pushSubscriptions.user_id, req.user!.id));
+
+    const [userRow] = await db
+      .select({ notify_push: users.notify_push })
+      .from(users)
+      .where(eq(users.id, req.user!.id))
+      .limit(1);
+
+    res.json({
+      server_configured: isWebPushConfigured(),
+      user_opted_in:     userRow?.notify_push ?? false,
+      subscription_count: subs.length,
+      subscriptions:      subs,
+    });
   } catch (err) { handleApiError(err, res, next); }
 });
 

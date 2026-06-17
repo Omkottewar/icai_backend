@@ -70,7 +70,25 @@ export async function notify(input: NotifyInput): Promise<NotifyResult | null> {
 
   const tmpl = tmplRow[0];
   const user = userRow[0];
-  if (!tmpl || !tmpl.enabled || !user) return null;
+
+  // Loud warnings when a dispatch silently no-ops. These were the #1 source
+  // of "notifications don't work" tickets — code referenced a key that wasn't
+  // seeded, and the whole dispatch returned null without an audit trail.
+  if (!tmpl) {
+    // eslint-disable-next-line no-console
+    console.warn(`[notify] template not found in DB: '${input.template_key}' — dispatch dropped. Seed the template or check the key spelling.`);
+    return null;
+  }
+  if (!tmpl.enabled) {
+    // eslint-disable-next-line no-console
+    console.warn(`[notify] template '${input.template_key}' is disabled — dispatch dropped.`);
+    return null;
+  }
+  if (!user) {
+    // eslint-disable-next-line no-console
+    console.warn(`[notify] user not found: ${input.user_id} (template '${input.template_key}') — dispatch dropped.`);
+    return null;
+  }
 
   // Conventional helper variables every template can use without the caller
   // having to pass them. Caller-supplied `vars` win on conflict.

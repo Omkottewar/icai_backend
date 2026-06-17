@@ -19,6 +19,7 @@ import { announcementsRouter } from "./routes/announcements.js";
 import { employerRouter } from "./routes/employer.js";
 import { attachEventChatSocket } from "./lib/eventChatSocket.js";
 import { startEscalationCron } from "./lib/escalations.js";
+import { runNotificationHealthcheck } from "./lib/notifyHealthcheck.js";
 import { publicJobsRouter } from "./routes/jobs.js";
 import { membersRouter } from "./routes/members.js";
 import { notificationsRouter } from "./routes/notifications.js";
@@ -106,3 +107,8 @@ attachEventChatSocket(server);
 // Approval-stage escalation: chairperson gets pinged when a stage stays
 // pending more than 3 days past the event's ends_at. See lib/escalations.ts.
 startEscalationCron();
+
+// Boot-time notification system sanity check — confirms every template
+// key referenced in code exists + is enabled in DB, and flags missing
+// SMTP / VAPID config. Logs go to stdout; non-fatal.
+runNotificationHealthcheck();

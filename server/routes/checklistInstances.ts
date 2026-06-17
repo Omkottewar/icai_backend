@@ -4,7 +4,7 @@ import { db } from "../../db/client.js";
 import {
   checklistTemplates, checklistTemplateQuestions,
   checklistInstances, checklistInstanceResponses, checklistInstanceReviews,
-  checklistInstanceApprovals,
+  checklistInstanceApprovals, checklistInstanceSectionAssignments,
   checklistTaskAssignments,
   events, users, roles, userRoleAssignments,
 } from "../../schema/index.js";
@@ -13,6 +13,135 @@ import { isAdmin, loadUserPermissions } from "../auth/permissions.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { validateResponseValue, type QuestionType, type TaskItem } from "../lib/checklistQuestions.js";
 import { notifyAsync } from "../lib/notify.js";
+
+// ─── Notification helpers (used by create / release / submit / reassign) ──
+// Centralised so all five lifecycle points dispatch with the same shape and
+// link URL. Keeping it here (rather than in lib/) so the local imports of
+// users/events/etc are reused.
+
+const checklistLink = (id: string) => `/#/my-checklists?id=${id}`;
+
+/**
+ * Fire `checklist_assigned` to one user. `sections` is the optional list of
+ * section labels they're responsible for (used to render the body); pass
+ * empty when the user is the primary filler (whole checklist).
+ */
+function notifyChecklistAssigned(opts: {
+  user_id: string;
+  assigner_name: string;
+  checklist_title: string;
+  event_title: string | null;
+  sections: string[];
+  instance_id: string;
+}) {
+  const sectionClause = opts.sections.length > 0
+    ? ` (section${opts.sections.length === 1 ? '' : 's'}: ${opts.sections.join(', ')})`
+    : "";
+  const sectionSummary = opts.sections.length > 0
+    ? `You're responsible for: ${opts.sections.join(', ')}`
+    : "The whole checklist is yours to fill.";
+  const eventClause = opts.event_title ? `Event: ${opts.event_title}.\n\n` : "";
+  notifyAsync({
+    user_id: opts.user_id,
+    template_key: "checklist_assigned",
+    vars: {
+      assigner_name:   opts.assigner_name,
+      checklist_title: opts.checklist_title,
+      event_title:     opts.event_title ?? "",
+      event_clause:    eventClause,
+      section_clause:  sectionClause,
+      section_summary: sectionSummary,
+      checklist_link:  `${process.env.APP_URL ?? ""}${checklistLink(opts.instance_id)}`,
+    },
+    link_url: checklistLink(opts.instance_id),
+  });
+}
+
+/**
+ * Fan-out: notify the primary filler + every distinct section assignee. We
+ * dedupe by user_id so the chairman doesn't get two emails when they're both
+ * the primary filler AND assigned to a section.
+ *
+ * sectionsByUser[user_id] is the list of section labels they own. Empty
+ * array if the user has no section assignment (they're the primary filler).
+ */
+async function notifyChecklistAssignees(opts: {
+  instance_id: string;
+  assigner_name: string;
+  checklist_title: string;
+  event_title: string | null;
+  primary_filler_id: string | null;
+  sectionsByUser: Map<string, string[]>;
+  // user_ids to skip (e.g. user who just acted — don't notify yourself)
+  skip?: Set<string>;
+}) {
+  const skip = opts.skip ?? new Set();
+  const seen = new Set<string>();
+
+  // Primary filler first.
+  if (opts.primary_filler_id && !skip.has(opts.primary_filler_id)) {
+    seen.add(opts.primary_filler_id);
+    notifyChecklistAssigned({
+      user_id:         opts.primary_filler_id,
+      assigner_name:   opts.assigner_name,
+      checklist_title: opts.checklist_title,
+      event_title:     opts.event_title,
+      sections:        opts.sectionsByUser.get(opts.primary_filler_id) ?? [],
+      instance_id:     opts.instance_id,
+    });
+  }
+  // Then every section assignee not already covered.
+  for (const [user_id, sections] of opts.sectionsByUser.entries()) {
+    if (seen.has(user_id) || skip.has(user_id)) continue;
+    seen.add(user_id);
+    notifyChecklistAssigned({
+      user_id,
+      assigner_name:   opts.assigner_name,
+      checklist_title: opts.checklist_title,
+      event_title:     opts.event_title,
+      sections,
+      instance_id:     opts.instance_id,
+    });
+  }
+}
+
+/** Build sectionsByUser for an instance by joining section_assignments with template questions. */
+async function loadSectionsByUser(instance_id: string): Promise<Map<string, string[]>> {
+  const rows = await db
+    .select({
+      assignee_id: checklistInstanceSectionAssignments.assignee_id,
+      label:       checklistTemplateQuestions.label,
+    })
+    .from(checklistInstanceSectionAssignments)
+    .innerJoin(checklistTemplateQuestions,
+      eq(checklistTemplateQuestions.id, checklistInstanceSectionAssignments.section_question_id))
+    .where(eq(checklistInstanceSectionAssignments.instance_id, instance_id));
+  const m = new Map<string, string[]>();
+  for (const r of rows) {
+    if (!r.assignee_id) continue;
+    const list = m.get(r.assignee_id) ?? [];
+    list.push(r.label);
+    m.set(r.assignee_id, list);
+  }
+  return m;
+}
+
+/** Look up the actor's display name for the {{assigner_name}} / {{filler_name}} vars. */
+async function actorName(user_id: string): Promise<string> {
+  const [u] = await db.select({ name: users.name }).from(users).where(eq(users.id, user_id)).limit(1);
+  return u?.name ?? "The team";
+}
+
+/** Look up the event title bound to an instance, or null for non-event-bound. */
+async function instanceEventTitle(instance_id: string): Promise<string | null> {
+  const [row] = await db
+    .select({ title: events.title })
+    .from(checklistInstances)
+    .leftJoin(events, eq(events.id, checklistInstances.event_id))
+    .where(eq(checklistInstances.id, instance_id))
+    .limit(1);
+  return row?.title ?? null;
+}
 
 export const checklistInstancesRouter = Router();
 checklistInstancesRouter.use(requireUser);
@@ -79,6 +208,20 @@ async function authorise(instanceId: string, userId: string) {
     row.instance.assigned_review_user_id === userId
     || roleMatch(effectiveReviewRole);
 
+  // Per-section filler overlay: a user assigned to ANY section on this
+  // instance gains read access + fill rights *for their assigned section
+  // questions only*. The actual per-question gate is in PUT /responses;
+  // here we just compute whether the user has a foothold at all.
+  const mySectionAssignmentRows = await db
+    .select({ section_question_id: checklistInstanceSectionAssignments.section_question_id })
+    .from(checklistInstanceSectionAssignments)
+    .where(and(
+      eq(checklistInstanceSectionAssignments.instance_id, instanceId),
+      eq(checklistInstanceSectionAssignments.assignee_id, userId),
+    ));
+  const mySectionIds = new Set(mySectionAssignmentRows.map((r) => r.section_question_id));
+  const isSectionAssignee = mySectionIds.size > 0;
+
   // SEPARATION OF DUTIES (matches legacy event_checklists behaviour):
   //   • admin CREATES + RELEASES the checklist and can MONITOR + MANAGE
   //     (reassign, reopen, delete) — but cannot fill or approve.
@@ -95,12 +238,17 @@ async function authorise(instanceId: string, userId: string) {
   return {
     row,
     perms: {
-      canRead:    perms.isAdmin || (!isDraft && (isFiller || isReviewer)),
+      canRead:    perms.isAdmin || (!isDraft && (isFiller || isReviewer || isSectionAssignee)),
+      // Whole-instance fill rights — the primary filler / role-holder.
       canFill:    !isDraft && isFiller,
       canSubmit:  !isDraft && isFiller,
       canReview:  !isDraft && isReviewer,
       canManage:  perms.isAdmin,
       canRelease: perms.isAdmin && isDraft,
+      // Per-section fill rights — the question-level enforcement uses this
+      // (PUT /:id/responses checks each question's section against this set).
+      canFillSections: !isDraft && isSectionAssignee,
+      mySectionIds: Array.from(mySectionIds),
     },
   };
 }
@@ -118,6 +266,14 @@ checklistInstancesRouter.get("/", async (req: AuthedRequest, res, next) => {
     if (perms.isAdmin) orConds.push(sql`TRUE`);
     orConds.push(eq(checklistInstances.assigned_fill_user_id,   userId));
     orConds.push(eq(checklistInstances.assigned_review_user_id, userId));
+    // Per-section assignees see instances where they own at least one
+    // section. Use EXISTS to avoid duplicating rows by JOINing through the
+    // assignments table.
+    orConds.push(sql`EXISTS (
+      SELECT 1 FROM checklist_instance_section_assignments csa
+      WHERE csa.instance_id = ${checklistInstances.id}
+        AND csa.assignee_id = ${userId}
+    )`);
 
     // Event-bound instances follow a fixed rule (mirrors authorise()):
     //   committee chairman of the event's committee can fill
@@ -261,10 +417,29 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
       }
     }
 
+    // Per-section assignment rows + joined assignee names.
+    const sectionAssigneeU = aliasedTable(users, "section_assignee_u");
+    const sectionAssignments = await db
+      .select({
+        id:                   checklistInstanceSectionAssignments.id,
+        section_question_id:  checklistInstanceSectionAssignments.section_question_id,
+        assignee_id:          checklistInstanceSectionAssignments.assignee_id,
+        assignee_name:        sectionAssigneeU.name,
+        assignee_email:       sectionAssigneeU.email,
+      })
+      .from(checklistInstanceSectionAssignments)
+      .leftJoin(sectionAssigneeU, eq(sectionAssigneeU.id, checklistInstanceSectionAssignments.assignee_id))
+      .where(eq(checklistInstanceSectionAssignments.instance_id, id));
+
     // Look up the assigned filler + reviewer so the admin sees who got
     // pinned (or that nobody did — important for the release decision).
-    const assigneeIds = [row.instance.assigned_fill_user_id, row.instance.assigned_review_user_id]
-      .filter((x): x is string => !!x);
+    // We also pull the section assignee IDs into the same lookup so the
+    // assignees panel can render names without an extra round-trip.
+    const assigneeIds = [
+      row.instance.assigned_fill_user_id,
+      row.instance.assigned_review_user_id,
+      ...sectionAssignments.map((s) => s.assignee_id),
+    ].filter((x): x is string => !!x);
     const assigneeRows = assigneeIds.length === 0 ? [] :
       await db.select({ id: users.id, name: users.name, email: users.email })
         .from(users).where(inArray(users.id, assigneeIds));
@@ -285,6 +460,7 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
       tasks: tasksByQuestion,
       reviews,
       assignees: { filler, reviewer },
+      section_assignments: sectionAssignments,
       stages,
       perms,
     });
@@ -305,7 +481,17 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
 // return it as-is so the admin can fix the assignment, then hit the
 // existing release endpoint manually.
 //
-// Body: { template_id, title?, event_id?, assigned_fill_user_id?, assigned_review_user_id?, notes? }
+// Body: {
+//   template_id, title?, event_id?, notes?,
+//   assigned_fill_user_id?, assigned_review_user_id?,
+//   section_assignments?: [{ section_question_id: uuid, assignee_id: uuid|null }]
+// }
+//
+// section_assignments lets the admin pin a specific user to a specific
+// section of the checklist (e.g. treasurer fills Budget, convener fills
+// Speakers). It's an OVERLAY: the primary filler (assigned_fill_user_id)
+// can still edit everything; section assignees gain edit rights for THEIR
+// section only.
 checklistInstancesRouter.post("/", async (req: AuthedRequest, res, next) => {
   try {
     if (!(await isAdmin(req.user!.id))) throw new ApiError(403, "Admin only");
@@ -320,6 +506,34 @@ checklistInstancesRouter.post("/", async (req: AuthedRequest, res, next) => {
     const notes = trim(req.body.notes) || null;
     let fill = trim(req.body.assigned_fill_user_id) || null;
     let reviewer = trim(req.body.assigned_review_user_id) || null;
+
+    // Validate section_assignments shape + ownership. Each section_question_id
+    // must (a) belong to THIS template and (b) be of type 'section_heading'.
+    // We resolve the user IDs at the same time so we can fail fast on garbage
+    // input instead of inserting and then erroring with an FK violation.
+    const rawAssignments: Array<{ section_question_id: string; assignee_id: string | null }> =
+      Array.isArray(req.body.section_assignments)
+        ? req.body.section_assignments.map((a: any) => ({
+            section_question_id: trim(a?.section_question_id),
+            assignee_id: trim(a?.assignee_id) || null,
+          })).filter((a: any) => a.section_question_id)
+        : [];
+    let validAssignments: Array<{ section_question_id: string; assignee_id: string | null }> = [];
+    if (rawAssignments.length > 0) {
+      const sectionIds = rawAssignments.map((a) => a.section_question_id);
+      const sections = await db
+        .select({ id: checklistTemplateQuestions.id, type: checklistTemplateQuestions.type })
+        .from(checklistTemplateQuestions)
+        .where(and(
+          eq(checklistTemplateQuestions.template_id, tpl.id),
+          inArray(checklistTemplateQuestions.id, sectionIds),
+        ));
+      const sectionIdSet = new Set(sections.filter((s) => s.type === "section_heading").map((s) => s.id));
+      validAssignments = rawAssignments.filter((a) => sectionIdSet.has(a.section_question_id));
+      if (validAssignments.length !== rawAssignments.length) {
+        throw new ApiError(400, "One or more section_question_id values don't belong to this template or aren't section headings");
+      }
+    }
 
     let event_committee_id: string | null = null;
     if (event_id) {
@@ -354,9 +568,11 @@ checklistInstancesRouter.post("/", async (req: AuthedRequest, res, next) => {
     }
 
     // Decide whether we can skip the manual-release step. We can iff there
-    // is *some* way for the filler stage to resolve — an assigned user OR a
-    // template-level fill_role that the filler page can match on.
-    const hasFiller = !!fill || !!tpl.fill_role;
+    // is *some* way for the filler stage to resolve — an assigned user, a
+    // template-level fill_role the filler page can match on, OR at least
+    // one per-section assignment (in which case the assignees handle their
+    // sections directly).
+    const hasFiller = !!fill || !!tpl.fill_role || validAssignments.some((a) => a.assignee_id);
     const isEventBound = !!event_id && !!event_committee_id;
 
     const created = await db.transaction(async (tx) => {
@@ -381,6 +597,19 @@ checklistInstancesRouter.post("/", async (req: AuthedRequest, res, next) => {
           note: "Auto-released on creation",
         });
       }
+      // Persist per-section filler assignments (if the admin chose any).
+      // Skip rows with assignee_id=null — those just mean "no override,
+      // fall back to the primary filler" so there's no value in storing them.
+      const toInsert = validAssignments.filter((a) => a.assignee_id);
+      if (toInsert.length > 0) {
+        await tx.insert(checklistInstanceSectionAssignments).values(
+          toInsert.map((a) => ({
+            instance_id: row.id,
+            section_question_id: a.section_question_id,
+            assignee_id: a.assignee_id!,
+          })),
+        );
+      }
       return row;
     });
 
@@ -389,6 +618,42 @@ checklistInstancesRouter.post("/", async (req: AuthedRequest, res, next) => {
     // from /release). Only event-bound, auto-released instances get stages.
     if (hasFiller && isEventBound) {
       await ensureApprovalStages(created.id, true);
+    }
+
+    // Notify everyone the admin just assigned. Fire-and-forget so a slow
+    // SMTP call doesn't delay the create response. Skip in draft status —
+    // the dedicated /release endpoint sends the notification instead so the
+    // filler doesn't see a checklist that's still being set up.
+    if (hasFiller) {
+      const sectionsByUser = new Map<string, string[]>();
+      if (validAssignments.length > 0) {
+        // Resolve section_question_id → label for the body string.
+        const headings = await db
+          .select({ id: checklistTemplateQuestions.id, label: checklistTemplateQuestions.label })
+          .from(checklistTemplateQuestions)
+          .where(and(
+            eq(checklistTemplateQuestions.template_id, tpl.id),
+            inArray(checklistTemplateQuestions.id, validAssignments.map((a) => a.section_question_id)),
+          ));
+        const byId = new Map(headings.map((h) => [h.id, h.label]));
+        for (const a of validAssignments) {
+          if (!a.assignee_id) continue;
+          const list = sectionsByUser.get(a.assignee_id) ?? [];
+          list.push(byId.get(a.section_question_id) ?? "a section");
+          sectionsByUser.set(a.assignee_id, list);
+        }
+      }
+      const assignerName = await actorName(req.user!.id);
+      const eventTitle = isEventBound ? (await instanceEventTitle(created.id)) : null;
+      void notifyChecklistAssignees({
+        instance_id:       created.id,
+        assigner_name:     assignerName,
+        checklist_title:   title,
+        event_title:       eventTitle,
+        primary_filler_id: fill,
+        sectionsByUser,
+        skip:              new Set([req.user!.id]),
+      });
     }
 
     res.status(201).json(created);
@@ -407,10 +672,19 @@ checklistInstancesRouter.post("/:id/release", async (req: AuthedRequest, res, ne
     if (!perms.canRelease) throw new ApiError(403, "Admin only");
     if (row.instance.status !== "draft") throw new ApiError(400, "Already released");
 
-    const hasFiller = !!row.instance.assigned_fill_user_id || !!row.template.fill_role;
+    // Section assignees count toward "has a filler" too — if at least one
+    // section is assigned, the instance is actionable.
+    const [{ section_count }] = await db
+      .select({ section_count: sql<number>`COUNT(*)::int`.as("section_count") })
+      .from(checklistInstanceSectionAssignments)
+      .where(and(
+        eq(checklistInstanceSectionAssignments.instance_id, id),
+        sql`${checklistInstanceSectionAssignments.assignee_id} IS NOT NULL`,
+      ));
+    const hasFiller = !!row.instance.assigned_fill_user_id || !!row.template.fill_role || (section_count ?? 0) > 0;
     if (!hasFiller) {
       throw new ApiError(400,
-        "Cannot release — no filler assigned. Set assigned_fill_user_id (or set a fill_role on the template) first.",
+        "Cannot release — no filler assigned. Set a primary filler or at least one section assignment first.",
       );
     }
 
@@ -427,6 +701,22 @@ checklistInstancesRouter.post("/:id/release", async (req: AuthedRequest, res, ne
     // event-bound instances. Non-event instances continue to use the
     // single-reviewer model.
     await ensureApprovalStages(id, !!row.instance.event_id && !!row.event_committee_id);
+
+    // Notify assignees that the draft is now live and they can start.
+    // The create endpoint deliberately skipped this for drafts; release
+    // is when the filler is meant to see it for the first time.
+    const sectionsByUser = await loadSectionsByUser(id);
+    const assignerName = await actorName(req.user!.id);
+    const eventTitle = !!row.instance.event_id ? (await instanceEventTitle(id)) : null;
+    void notifyChecklistAssignees({
+      instance_id:       id,
+      assigner_name:     assignerName,
+      checklist_title:   row.instance.title,
+      event_title:       eventTitle,
+      primary_filler_id: row.instance.assigned_fill_user_id,
+      sectionsByUser,
+      skip:              new Set([req.user!.id]),
+    });
 
     res.json(updated);
   } catch (err) { handleApiError(err, res, next); }
@@ -521,7 +811,7 @@ async function loadStages(instanceId: string) {
 checklistInstancesRouter.patch("/:id", async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
-    const { perms } = await authorise(id, req.user!.id);
+    const { row: before, perms } = await authorise(id, req.user!.id);
     if (!perms.canManage) throw new ApiError(403, "Admin only");
 
     const patch: Record<string, any> = {};
@@ -537,7 +827,135 @@ checklistInstancesRouter.patch("/:id", async (req: AuthedRequest, res, next) => 
         instance_id: id, actor_id: req.user!.id, action: "assigned",
       });
     }
+
+    // Notify the NEW primary filler if they changed and it's not a draft.
+    // Draft instances will get a notification on release; sending now would
+    // leak a half-set-up checklist into the filler's inbox.
+    const fillerChanged = req.body.assigned_fill_user_id !== undefined
+      && patch.assigned_fill_user_id
+      && patch.assigned_fill_user_id !== before.instance.assigned_fill_user_id
+      && patch.assigned_fill_user_id !== req.user!.id
+      && before.instance.status !== "draft";
+    if (fillerChanged) {
+      const assignerName = await actorName(req.user!.id);
+      const eventTitle = !!before.instance.event_id ? (await instanceEventTitle(id)) : null;
+      notifyChecklistAssigned({
+        user_id:         patch.assigned_fill_user_id,
+        assigner_name:   assignerName,
+        checklist_title: row.title,
+        event_title:     eventTitle,
+        sections:        [],
+        instance_id:     id,
+      });
+    }
+
     res.json(row);
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── PUT /api/checklist-instances/:id/section-assignments ─────────────────
+// Replace-all reassignment of per-section fillers. Body:
+//   { assignments: [{ section_question_id, assignee_id|null }] }
+// Rows with assignee_id=null are dropped (no-assignment is the default).
+//
+// Admin-only — section assignment is part of "managing" the instance.
+checklistInstancesRouter.put("/:id/section-assignments", async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id);
+    const { row, perms } = await authorise(id, req.user!.id);
+    if (!perms.canManage) throw new ApiError(403, "Admin only");
+
+    const incoming: Array<{ section_question_id: string; assignee_id: string | null }> =
+      Array.isArray(req.body?.assignments)
+        ? req.body.assignments.map((a: any) => ({
+            section_question_id: trim(a?.section_question_id),
+            assignee_id: trim(a?.assignee_id) || null,
+          })).filter((a: any) => a.section_question_id)
+        : [];
+
+    if (incoming.length > 0) {
+      const sectionIds = incoming.map((a) => a.section_question_id);
+      const sections = await db
+        .select({ id: checklistTemplateQuestions.id, type: checklistTemplateQuestions.type })
+        .from(checklistTemplateQuestions)
+        .where(and(
+          eq(checklistTemplateQuestions.template_id, row.template.id),
+          inArray(checklistTemplateQuestions.id, sectionIds),
+        ));
+      const validSet = new Set(sections.filter((s) => s.type === "section_heading").map((s) => s.id));
+      if (incoming.some((a) => !validSet.has(a.section_question_id))) {
+        throw new ApiError(400, "One or more section_question_id values aren't section headings on this template");
+      }
+    }
+
+    const toInsert = incoming.filter((a) => a.assignee_id);
+
+    // Snapshot the previous assignments so we can fire notifications ONLY
+    // for users who are newly assigned (or newly assigned to a section
+    // they didn't own before). Querying inside the txn keeps it consistent
+    // with the wipe+recreate below.
+    const previous = await db
+      .select({
+        assignee_id: checklistInstanceSectionAssignments.assignee_id,
+        section_question_id: checklistInstanceSectionAssignments.section_question_id,
+      })
+      .from(checklistInstanceSectionAssignments)
+      .where(eq(checklistInstanceSectionAssignments.instance_id, id));
+    const prevKey = new Set(previous.map((p) => `${p.assignee_id}:${p.section_question_id}`));
+
+    await db.transaction(async (tx) => {
+      // Wipe + recreate. Row count per instance is tiny (one per section,
+      // typically 3-7); avoiding a complex diff keeps the path obvious.
+      await tx.delete(checklistInstanceSectionAssignments)
+        .where(eq(checklistInstanceSectionAssignments.instance_id, id));
+      if (toInsert.length > 0) {
+        await tx.insert(checklistInstanceSectionAssignments).values(
+          toInsert.map((a) => ({
+            instance_id: id,
+            section_question_id: a.section_question_id,
+            assignee_id: a.assignee_id!,
+          })),
+        );
+      }
+      await tx.insert(checklistInstanceReviews).values({
+        instance_id: id, actor_id: req.user!.id, action: "assigned",
+        note: `Section assignments updated (${toInsert.length} section${toInsert.length === 1 ? '' : 's'} assigned)`,
+      });
+    });
+
+    // Notify users who gained a new section assignment. Re-assigning the
+    // same user to the same section is silent (they already know).
+    const fresh = toInsert.filter((a) => !prevKey.has(`${a.assignee_id}:${a.section_question_id}`));
+    if (fresh.length > 0 && row.instance.status !== "draft") {
+      // Group new sections per user so each gets ONE notification listing
+      // all their new sections, not N separate emails.
+      const headings = await db
+        .select({ id: checklistTemplateQuestions.id, label: checklistTemplateQuestions.label })
+        .from(checklistTemplateQuestions)
+        .where(inArray(checklistTemplateQuestions.id, fresh.map((a) => a.section_question_id)));
+      const labelById = new Map(headings.map((h) => [h.id, h.label]));
+      const newSectionsByUser = new Map<string, string[]>();
+      for (const a of fresh) {
+        const list = newSectionsByUser.get(a.assignee_id!) ?? [];
+        list.push(labelById.get(a.section_question_id) ?? "a section");
+        newSectionsByUser.set(a.assignee_id!, list);
+      }
+      const assignerName = await actorName(req.user!.id);
+      const eventTitle = !!row.instance.event_id ? (await instanceEventTitle(id)) : null;
+      for (const [user_id, sections] of newSectionsByUser) {
+        if (user_id === req.user!.id) continue;
+        notifyChecklistAssigned({
+          user_id,
+          assigner_name:   assignerName,
+          checklist_title: row.instance.title,
+          event_title:     eventTitle,
+          sections,
+          instance_id:     id,
+        });
+      }
+    }
+
+    res.json({ ok: true, count: toInsert.length });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -563,13 +981,16 @@ function computeSectionOwners<T extends { id: string; type: string; sort_order: 
 // Bulk upsert all answers. Body: { responses: { [question_id]: value } }
 // Allowed while status is awaiting_fill OR rejected (re-fill after reject).
 //
-// Section ownership: each question may belong to a section that's owned by
-// a specific role (via the closest preceding section_heading's
-// `section_owner_role`). If a question has an owner role, the caller must
-// either hold that role OR be the assigned filler / admin. This is what
-// lets the treasurer edit "Budget & IUT" without owning the whole
-// checklist; conversely it stops the committee chair from editing the
-// budget if it's not theirs.
+// Section ownership semantics (REVISED): the `section_owner_role` field on
+// section_heading rows now denotes "who REVIEWS this section" — it drives
+// the multi-stage approval routing (treasurer reviews Budget & IUT, VC
+// reviews Speakers & Agenda, etc.). It does NOT restrict who can fill the
+// section. The committee chairman fills the ENTIRE checklist; the reviewers
+// only see / approve their assigned slice afterwards.
+//
+// Older logic forced the treasurer (or whichever role owned a section) to
+// log in and edit their section themselves — that's not how the branch
+// actually works. The committee chairman is the single filler.
 //
 // Task lists: when a question of type `task_list` is saved, we reconcile
 // the response value into the dedicated `checklist_task_assignments`
@@ -579,7 +1000,9 @@ checklistInstancesRouter.put("/:id/responses", async (req: AuthedRequest, res, n
   try {
     const id = String(req.params.id);
     const { row, perms } = await authorise(id, req.user!.id);
-    if (!perms.canFill) throw new ApiError(403, "You can't fill this checklist");
+    if (!perms.canFill && !perms.canFillSections) {
+      throw new ApiError(403, "You can't fill this checklist");
+    }
     if (!["awaiting_fill", "rejected"].includes(row.instance.status)) {
       throw new ApiError(400, "Checklist is not editable in its current state");
     }
@@ -590,31 +1013,41 @@ checklistInstancesRouter.put("/:id/responses", async (req: AuthedRequest, res, n
       .from(checklistTemplateQuestions)
       .where(eq(checklistTemplateQuestions.template_id, row.template.id));
 
-    // Section-ownership lookup: question_id → required role code (or null
-    // for "anyone with fill rights").
-    const sectionOwners = computeSectionOwners(questions.map((q) => ({
-      id: q.id, type: q.type as string, sort_order: q.sort_order,
-      section_owner_role: q.section_owner_role,
-    })));
-    const callerPerms = await loadUserPermissions(req.user!.id);
+    // For section-only fillers (perms.canFill === false), we need to know
+    // which section each question belongs to. Walk the sorted question list
+    // and tag each q with the section_heading id that precedes it. Questions
+    // before any section_heading land with sectionId=null and are NOT
+    // editable by section-only fillers.
+    let sectionMap: Map<string, string | null> | null = null;
+    if (!perms.canFill) {
+      const sorted = [...questions].sort((a, b) => a.sort_order - b.sort_order);
+      sectionMap = new Map();
+      let currentSection: string | null = null;
+      for (const q of sorted) {
+        if (q.type === "section_heading") {
+          currentSection = q.id;
+          sectionMap.set(q.id, q.id); // a section heading "belongs to itself"
+        } else {
+          sectionMap.set(q.id, currentSection);
+        }
+      }
+    }
+    const allowedSections = new Set(perms.mySectionIds || []);
 
     // Build (question, cleanedValue) pairs. Validation is "best effort"
     // here — required checking happens at /submit so save-progress works.
+    // Section-only fillers can only touch questions whose section is in
+    // their allowedSections set; primary fillers can touch anything.
     const pairs: { question: typeof questions[number]; value: unknown }[] = [];
     for (const q of questions) {
       const has = Object.prototype.hasOwnProperty.call(incoming, q.id);
       if (!has) continue;
-
-      // Enforce per-section ownership. The committee chair filling the
-      // whole checklist can still touch sections with no owner restriction.
-      const owner = sectionOwners.get(q.id);
-      if (owner) {
-        const allowed = callerPerms.isAdmin || callerPerms.codes.has(owner);
-        if (!allowed) {
-          throw new ApiError(403, `Only ${owner.replace(/_/g, " ")} can edit this section`);
+      if (!perms.canFill) {
+        const sec = sectionMap!.get(q.id);
+        if (!sec || !allowedSections.has(sec)) {
+          throw new ApiError(403, `You can't edit "${q.label}" — it's outside your assigned section(s).`);
         }
       }
-
       const cleaned = validateResponseValue(q.type as QuestionType, false, q.config, incoming[q.id]);
       pairs.push({ question: q, value: cleaned });
     }
@@ -763,6 +1196,42 @@ checklistInstancesRouter.post("/:id/submit", async (req: AuthedRequest, res, nex
       instance_id: id, actor_id: req.user!.id, action: "submitted",
       note: trim(req.body?.note) || null,
     });
+
+    // Tell the reviewer there's something waiting. For event-bound
+    // instances with multi-stage approval, also nudge the treasurer + VC
+    // — each stage has its own decider, and waiting for the chairman to
+    // forward the work would slow approvals down.
+    const fillerName = await actorName(req.user!.id);
+    const eventTitle = !!row.instance.event_id ? (await instanceEventTitle(id)) : null;
+    const reviewerIds = new Set<string>();
+    if (row.instance.assigned_review_user_id) reviewerIds.add(row.instance.assigned_review_user_id);
+    // Stage reviewers — resolve role codes to actual users via the same
+    // helper the create flow uses.
+    if (!!row.instance.event_id && !!row.event_committee_id) {
+      for (const stage of EVENT_APPROVAL_STAGES) {
+        const uid = await findActiveRoleHolder(stage.required_role_code);
+        if (uid) reviewerIds.add(uid);
+      }
+    } else if (row.template.review_role) {
+      const uid = await findActiveRoleHolder(row.template.review_role);
+      if (uid) reviewerIds.add(uid);
+    }
+    for (const uid of reviewerIds) {
+      if (uid === req.user!.id) continue; // don't notify yourself
+      notifyAsync({
+        user_id: uid,
+        template_key: "checklist_submitted",
+        vars: {
+          filler_name:     fillerName,
+          checklist_title: row.instance.title,
+          event_title:     eventTitle ?? "",
+          event_clause:    eventTitle ? `Event: ${eventTitle}.\n\n` : "",
+          checklist_link:  `${process.env.APP_URL ?? ""}${checklistLink(id)}`,
+        },
+        link_url: checklistLink(id),
+      });
+    }
+
     res.json(updated);
   } catch (err) { handleApiError(err, res, next); }
 });

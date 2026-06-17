@@ -100,6 +100,28 @@ homeAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
       .orderBy(asc(checklistInstances.submitted_at))
       .limit(10);
 
+    // (a2) Checklists awaiting THIS user to FILL (not review). Without this,
+    // the committee chairman / treasurer / anyone who is the named filler
+    // sees nothing on their dashboard even after the admin releases their
+    // checklist — the existing 'myReviewQueue' only matches reviewers.
+    const myFillQueueP = db.select({
+      id: checklistInstances.id, title: checklistInstances.title,
+      status: checklistInstances.status, updated_at: checklistInstances.updated_at,
+      template_name: checklistTemplates.name,
+      event_id: checklistInstances.event_id,
+      event_title: events.title,
+    })
+      .from(checklistInstances)
+      .leftJoin(checklistTemplates, eq(checklistTemplates.id, checklistInstances.template_id))
+      .leftJoin(events, eq(events.id, checklistInstances.event_id))
+      .where(and(
+        eq(checklistInstances.assigned_fill_user_id, user.id),
+        eq(checklistInstances.status, "awaiting_fill"),
+        isNull(checklistInstances.deleted_at),
+      ))
+      .orderBy(asc(checklistInstances.updated_at))
+      .limit(10);
+
     // (b) Multi-stage approval stages where the user holds the required role.
     // Each office bearer role owns exactly one stage code today:
     //   branch_chairman      → 'branch_chairman'
@@ -323,6 +345,7 @@ homeAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
     const [
       pendingEvents,
       myReviewQueue,
+      myFillQueue,
       myStageQueue,
       myCommitteeEvents,
       pendingBills,
@@ -344,6 +367,7 @@ homeAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
     ] = await Promise.all([
       pendingEventsP,
       myReviewQueueP,
+      myFillQueueP,
       myStageQueueP,
       myCommitteeEventsP,
       pendingBillsP,
@@ -398,6 +422,21 @@ homeAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
         pending_since: c.submitted_at?.toISOString?.() ?? c.updated_at?.toISOString?.(),
         action_label:  "Review",
         action_href:   `/my-checklists`,
+      });
+    }
+    // Checklists assigned to THIS user to fill (committee chairmen + anyone
+    // else who's the named filler on a released instance). Distinct from the
+    // review queue above — the filler isn't reviewing, they're answering the
+    // questions before submitting for review.
+    for (const c of myFillQueue) {
+      inbox.push({
+        id:            `checklist:fill:${c.id}`,
+        kind:          "checklist_fill",
+        title:         c.event_title ?? c.title,
+        subtitle:      c.template_name ?? "Checklist",
+        pending_since: c.updated_at?.toISOString?.(),
+        action_label:  "Fill checklist",
+        action_href:   `/my-checklists?id=${c.id}`,
       });
     }
     // Multi-stage approval rows where the viewer owns the stage. For the

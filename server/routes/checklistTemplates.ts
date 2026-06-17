@@ -23,6 +23,10 @@ async function requireAdminUser(req: AuthedRequest) {
 // ─── GET /api/checklist-templates ─────────────────────────────────────────
 // Lists the LATEST version per family, plus a count of versions in the family.
 // Set ?all=1 to see every version (used by the version history drawer).
+//
+// Starter templates (is_starter=true) are hidden — they live behind the
+// dedicated /starters endpoint and aren't part of the user's editable
+// inventory.
 checklistTemplatesRouter.get("/", async (req: AuthedRequest, res, next) => {
   try {
     await requireAdminUser(req);
@@ -32,7 +36,10 @@ checklistTemplatesRouter.get("/", async (req: AuthedRequest, res, next) => {
       const rows = await db
         .select()
         .from(checklistTemplates)
-        .where(isNull(checklistTemplates.deleted_at))
+        .where(and(
+          isNull(checklistTemplates.deleted_at),
+          eq(checklistTemplates.is_starter, false),
+        ))
         .orderBy(desc(checklistTemplates.updated_at));
       return res.json({ rows });
     }
@@ -46,11 +53,35 @@ checklistTemplatesRouter.get("/", async (req: AuthedRequest, res, next) => {
                MAX(version) AS max_version,
                COUNT(*)     AS version_count
         FROM checklist_templates
-        WHERE deleted_at IS NULL
+        WHERE deleted_at IS NULL AND is_starter = false
         GROUP BY family_id
       ) fam ON fam.family_id = t.family_id AND fam.max_version = t.version
-      WHERE t.deleted_at IS NULL
+      WHERE t.deleted_at IS NULL AND t.is_starter = false
       ORDER BY t.updated_at DESC
+    `);
+    res.json({ rows: Array.from(result) });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── GET /api/checklist-templates/starters ────────────────────────────────
+// Curated, system-supplied templates the "+ New template" gallery shows
+// the user as one-click starting points. Always sorted by name so the
+// order is stable.
+//
+// `question_count` excludes section_heading rows since those aren't really
+// "items the user has to fill" — gives a meaningful number for the card UI.
+checklistTemplatesRouter.get("/starters", async (req: AuthedRequest, res, next) => {
+  try {
+    await requireAdminUser(req);
+    const result = await db.execute(sql`
+      SELECT t.*,
+             (SELECT COUNT(*)::int FROM checklist_template_questions q
+              WHERE q.template_id = t.id AND q.type <> 'section_heading') AS question_count,
+             (SELECT COUNT(*)::int FROM checklist_template_questions q
+              WHERE q.template_id = t.id AND q.type = 'section_heading') AS section_count
+      FROM checklist_templates t
+      WHERE t.is_starter = true AND t.deleted_at IS NULL
+      ORDER BY t.name ASC
     `);
     res.json({ rows: Array.from(result) });
   } catch (err) { handleApiError(err, res, next); }
@@ -130,6 +161,7 @@ checklistTemplatesRouter.patch("/:id", async (req: AuthedRequest, res, next) => 
 
     const [existing] = await db.select().from(checklistTemplates).where(eq(checklistTemplates.id, id)).limit(1);
     if (!existing || existing.deleted_at) throw new ApiError(404, "Template not found");
+    if (existing.is_starter) throw new ApiError(400, "Starter templates are read-only. Click \"Use\" to make your own copy first.");
     if (existing.is_published) throw new ApiError(400, "Published templates are locked. Clone a new version to edit.");
 
     const patch: Record<string, any> = {};
@@ -169,6 +201,7 @@ checklistTemplatesRouter.post("/:id/publish", async (req: AuthedRequest, res, ne
 
     const [existing] = await db.select().from(checklistTemplates).where(eq(checklistTemplates.id, id)).limit(1);
     if (!existing || existing.deleted_at) throw new ApiError(404, "Template not found");
+    if (existing.is_starter) throw new ApiError(400, "Starter templates are already active.");
     if (existing.is_published) return res.json(existing);
 
     const [questionCount] = await db
@@ -197,11 +230,15 @@ checklistTemplatesRouter.post("/:id/clone", async (req: AuthedRequest, res, next
 
     const [src] = await db.select().from(checklistTemplates).where(eq(checklistTemplates.id, id)).limit(1);
     if (!src) throw new ApiError(404, "Template not found");
+    // Cloning FROM a starter is always a new family — there's no "v2 of a
+    // starter" semantics; users should get a clean copy they fully own.
+    const isStarterClone = src.is_starter;
+    const forkAsNewFamily = newFamily || isStarterClone;
 
     const created = await db.transaction(async (tx) => {
       let family_id: string;
       let version: number;
-      if (newFamily) {
+      if (forkAsNewFamily) {
         family_id = crypto.randomUUID();
         version = 1;
       } else {
@@ -213,15 +250,26 @@ checklistTemplatesRouter.post("/:id/clone", async (req: AuthedRequest, res, next
         version = next_version;
       }
 
+      // Naming rules:
+      //   • Cloning a starter → plain starter name (the user just picked
+      //     "CPE Seminar" from the gallery; they don't want "(copy)" tacked on).
+      //   • Forking a user template into a new family → "{name} (copy)".
+      //   • New version in the same family → exact same name.
+      const clonedName = isStarterClone
+        ? src.name
+        : (newFamily ? `${src.name} (copy)` : src.name);
+
       const [row] = await tx.insert(checklistTemplates).values({
         family_id, version,
-        name: newFamily ? `${src.name} (copy)` : src.name,
+        name: clonedName,
         description: src.description,
         category: src.category,
         fill_role: src.fill_role,
         review_role: src.review_role,
         created_by: req.user!.id,
         is_published: false,
+        // Clones are never starters themselves — even if the source was one.
+        is_starter: false,
       }).returning();
 
       const srcQuestions = await tx
@@ -239,6 +287,10 @@ checklistTemplatesRouter.post("/:id/clone", async (req: AuthedRequest, res, next
           help_text: q.help_text,
           required: q.required,
           config: q.config as any,
+          // section_owner_role lives on section_heading rows — preserving it
+          // is critical for starter clones where the whole point is "the
+          // treasurer reviews Budget, the VC reviews Speakers, etc."
+          section_owner_role: q.section_owner_role,
         })));
       }
       return row;
@@ -264,6 +316,14 @@ checklistTemplatesRouter.delete("/:id", async (req: AuthedRequest, res, next) =>
     await requireAdminUser(req);
     const id = String(req.params.id);
     const force = req.query.force === "1" || req.query.force === "true";
+
+    // Starters can't be deleted via the API — they're system rows. The
+    // seed script is the only way to add/replace them.
+    const [target] = await db.select({ is_starter: checklistTemplates.is_starter })
+      .from(checklistTemplates)
+      .where(eq(checklistTemplates.id, id))
+      .limit(1);
+    if (target?.is_starter) throw new ApiError(400, "Starter templates can't be deleted.");
 
     // Live instance = not soft-deleted AND not in a terminal status.
     const [{ live }] = await db

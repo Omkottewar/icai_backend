@@ -27,6 +27,11 @@ export const checklistTemplates = pgTable("checklist_templates", {
   description:  text("description"),
   category:     text("category"),
   is_published: boolean("is_published").notNull().default(false),
+  // Curated, system-supplied template surfaced in the "+ New template"
+  // gallery (CPE Seminar, Workshop, Study Circle, Post-Event Bills). Hidden
+  // from the main templates list; only readable via /starters, clonable
+  // into a user-owned draft. Added in migration 0034.
+  is_starter:   boolean("is_starter").notNull().default(false),
   fill_role:    text("fill_role"),
   review_role:  text("review_role"),
   created_by:   uuid("created_by").references(() => users.id),
@@ -89,6 +94,25 @@ export const checklistInstanceResponses = pgTable("checklist_instance_responses"
   updated_at:  timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   instanceQuestionIdx: uniqueIndex("ux_checklist_responses_instance_question").on(t.instance_id, t.question_id),
+}));
+
+// ─── Per-section filler assignments (migration 0035) ────────────────────────
+// Optional overlay on top of checklist_instances. Maps each section_heading
+// row in the parent template to ONE user who can fill questions inside that
+// section. The instance's `assigned_fill_user_id` remains the fallback filler
+// and can edit every section regardless — these rows ADD edit rights for
+// specific sections, they don't restrict the chairman.
+export const checklistInstanceSectionAssignments = pgTable("checklist_instance_section_assignments", {
+  id:                   uuid("id").primaryKey().defaultRandom(),
+  instance_id:          uuid("instance_id").notNull().references(() => checklistInstances.id, { onDelete: "cascade" }),
+  section_question_id:  uuid("section_question_id").notNull().references(() => checklistTemplateQuestions.id, { onDelete: "cascade" }),
+  assignee_id:          uuid("assignee_id").references(() => users.id, { onDelete: "set null" }),
+  created_at:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at:           timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  instanceSectionIdx: uniqueIndex("ux_checklist_section_assignments_instance_section").on(t.instance_id, t.section_question_id),
+  instanceIdx:        index("idx_checklist_section_assignments_instance").on(t.instance_id),
+  assigneeIdx:        index("idx_checklist_section_assignments_assignee").on(t.assignee_id),
 }));
 
 export const checklistInstanceReviews = pgTable("checklist_instance_reviews", {

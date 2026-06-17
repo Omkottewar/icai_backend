@@ -71,8 +71,49 @@ export type SendEmailResult =
  * Returns a structured result instead of throwing — the caller (notify())
  * records this on the delivery audit row regardless of outcome.
  */
+// Hard blocklist — recipients matching ANY of these domain suffixes are
+// rejected before nodemailer ever sees them, regardless of NODE_ENV. This
+// is belt-and-braces protection against accidentally emailing the real
+// ICAI organisation while developing or after a config flip.
+//
+// To send to one of these in production (after you've audited the
+// recipient list), remove the entry or set ALLOW_ICAI_OUTBOUND=1.
+//
+// Ordered MOST-SPECIFIC first so the audit log shows the closest match
+// (e.g. "blocked_domain:nagpur.icai.org" instead of the broader
+// "icai.org") — easier triage when reading the deliveries table.
+const BLOCKED_DOMAINS = [
+  "nagpur.icai.org",
+  "wirc-icai.org",
+  "icai.org",
+  "icai.in",
+];
+
+function isBlockedRecipient(addr: string): string | null {
+  if (process.env.ALLOW_ICAI_OUTBOUND === "1") return null;
+  // Extract the bare email from "Name <email@host>" or plain "email@host".
+  const m = addr.match(/<([^>]+)>|([^\s<>]+@[^\s<>]+)/);
+  const email = (m?.[1] ?? m?.[2] ?? addr).toLowerCase().trim();
+  const host = email.split("@")[1];
+  if (!host) return null;
+  for (const blocked of BLOCKED_DOMAINS) {
+    if (host === blocked || host.endsWith("." + blocked)) return blocked;
+  }
+  return null;
+}
+
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
   const from = process.env.EMAIL_FROM || "ICAI Nagpur <no-reply@nagpur.icai.org>";
+
+  // Safety net — runs before transport setup so even a totally misconfigured
+  // SMTP path can't slip through. Logs loudly so the admin log makes it
+  // obvious why a delivery was refused.
+  const blockedDomain = isBlockedRecipient(input.to);
+  if (blockedDomain) {
+    // eslint-disable-next-line no-console
+    console.warn(`[email] BLOCKED outbound to '${input.to}' — domain '${blockedDomain}' is on the safety blocklist. Set ALLOW_ICAI_OUTBOUND=1 to override.`);
+    return { status: "skipped", reason: `blocked_domain:${blockedDomain}` };
+  }
 
   const transporter = await getTransporter();
   if (!transporter) {
