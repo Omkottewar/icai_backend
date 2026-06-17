@@ -1,4 +1,16 @@
 import "dotenv/config";
+import { setDefaultResultOrder } from "node:dns";
+
+// Prefer IPv4 when resolving any hostname (Supabase, SMTP, etc.).
+// Without this, hosts like Render/Fly/Railway that lack outbound IPv6 fail
+// with ENETUNREACH on connections to dual-stack services that happen to
+// return the AAAA record first. The local machine almost always has full
+// IPv6, so this is a no-op in dev and a bug-fix in prod.
+//
+// Must run before any module that opens a socket — keep it at the top of
+// the entry file, above the `db/client` import chain.
+setDefaultResultOrder("ipv4first");
+
 import express from "express";
 import cookieParser from "cookie-parser";
 import { join } from "node:path";
