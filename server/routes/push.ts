@@ -143,7 +143,7 @@ pushRouter.post("/test", async (req: AuthedRequest, res, next) => {
           // as a black square. SW already defaults this for notify()
           // dispatches; the test push sets it explicitly so the test
           // appearance matches a real production push exactly.
-          badge: "/notification-badge.svg",
+          badge: "/notification-badge.png",
           data:  { test: true },
         },
       );
