@@ -28,6 +28,7 @@
     "express-rate-limit": "^8.5.2",
     "jsonwebtoken": "^9.0.3",
     "nodemailer": "^6.9.16",
+    "openai": "^6.43.0",
     "postgres": "^3.4.5",
     "sharp": "^0.35.1",
     "web-push": "^3.6.7",
