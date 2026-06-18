@@ -81,6 +81,20 @@ const chatLimiter = rateLimit({
   },
 });
 
+// Lighter limiter for feedback — stops a client spamming the chairman review
+// queue with thumbs. Keyed like the chat limiter (user id when authed, else IP).
+const feedbackLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  limit: 20,
+  keyGenerator: (req) => {
+    const user = (req as AuthedRequest).user;
+    return user ? `u:${user.id}` : `ip:${ipKeyGenerator(req.ip ?? "")}`;
+  },
+  message: { error: "rate_limited", message: "Too many feedback submissions. Please wait a moment." },
+});
+
 // ─── role-keyed starter questions (static; no table — P1-2) ─────────────────
 // Keyed by the coarse role the frontend already knows. The route returns the
 // matching bucket plus the shared "common" set so every visitor sees something.
@@ -275,7 +289,7 @@ pragyaanRouter.get("/config", (_req, res, next) => {
 // { messageId, rating:'up'|'down', comment? } → kb_feedback. The table is
 // created in migration 0038; until then the insert hits a missing relation,
 // which we translate into a 503 "not yet available" rather than a crash.
-pragyaanRouter.post("/feedback", optionalAuth, async (req: AuthedRequest, res, next) => {
+pragyaanRouter.post("/feedback", optionalAuth, feedbackLimiter, async (req: AuthedRequest, res, next) => {
   try {
     const messageId = need(trim(req.body?.messageId), "messageId");
     const rating = trim(req.body?.rating);

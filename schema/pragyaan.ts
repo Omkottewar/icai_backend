@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, integer, timestamp, jsonb, vector, AnyPgColumn,
+  pgTable, uuid, text, integer, bigint, timestamp, jsonb, vector, boolean, real, AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import {
@@ -71,5 +71,51 @@ export const kbMessages = pgTable("kb_messages", {
   tokens_in:       integer("tokens_in"),
   tokens_out:      integer("tokens_out"),
   latency_ms:      integer("latency_ms"),
+  created_at:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ─── Governance / audit / analytics (migration 0038) ───────────────────────
+
+/** Answer-quality thumbs up/down on an assistant turn (P1-1). */
+export const kbFeedback = pgTable("kb_feedback", {
+  id:         uuid("id").primaryKey().defaultRandom(),
+  message_id: uuid("message_id").notNull().references(() => kbMessages.id, { onDelete: "cascade" }),
+  rating:     text("rating").notNull(), // 'up' | 'down' (CHECK enforced in SQL)
+  comment:    text("comment"),
+  user_id:    uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+  created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Append-only, hash-chained governance log (P0-8). UPDATE/DELETE are blocked by
+ * a DB trigger; `row_hash` chains `prev_hash`, so any tampering breaks the chain.
+ * Written only via server/lib/pragyaan/audit.ts. `seq` is the chain order.
+ */
+export const kbAudit = pgTable("kb_audit", {
+  seq:          bigint("seq", { mode: "number" }).generatedAlwaysAsIdentity(),
+  id:           uuid("id").primaryKey().defaultRandom(),
+  source_id:    uuid("source_id").references(() => kbSources.id, { onDelete: "set null" }),
+  actor_id:     uuid("actor_id").references(() => users.id, { onDelete: "set null" }),
+  action:       text("action").notNull(),
+  from_version: integer("from_version"),
+  to_version:   integer("to_version"),
+  detail:       jsonb("detail").notNull().default(sql`'{}'::jsonb`),
+  prev_hash:    text("prev_hash"),
+  row_hash:     text("row_hash").notNull(),
+  created_at:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Per-answer analytics for the admin dashboards (P1-5). */
+export const kbQueryLog = pgTable("kb_query_log", {
+  id:              uuid("id").primaryKey().defaultRandom(),
+  conversation_id: uuid("conversation_id").references(() => kbConversations.id, { onDelete: "set null" }),
+  question:        text("question"),
+  lang:            localeEnum("lang"),
+  role_label:      text("role_label"),
+  scope_set:       text("scope_set").array(),
+  no_answer:       boolean("no_answer").notNull().default(false),
+  top_similarity:  real("top_similarity"),
+  citation_count:  integer("citation_count").notNull().default(0),
+  model:           text("model"),
   created_at:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

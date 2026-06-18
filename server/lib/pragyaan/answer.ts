@@ -20,7 +20,7 @@
 
 import { sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
-import { kbConversations, kbMessages } from "../../../schema/index.js";
+import { kbConversations, kbMessages, kbQueryLog } from "../../../schema/index.js";
 import { getProvider } from "./provider.js";
 import { retrieve } from "./retrieval.js";
 import type { RetrievedChunk } from "./retrieval.js";
@@ -38,6 +38,11 @@ export interface Citation {
   url: string | null;
   /** kb_chunks.id of the best-matching chunk for this source (deep-link hint). */
   chunk_id: string;
+  /** Originating table kind ('event'|'circular'|…) for DB-sourced rows — lets
+   *  the client build an in-app deep-link when there's no explicit url. */
+  origin_kind: string | null;
+  /** Originating DB row id, paired with origin_kind for the deep-link. */
+  origin_id: string | null;
 }
 
 export interface AnswerInput {
@@ -77,7 +82,10 @@ function toCitations(sources: RetrievedChunk[]): Citation[] {
   for (const c of sources) {
     if (seen.has(c.sourceId)) continue;
     seen.add(c.sourceId);
-    out.push({ source_id: c.sourceId, title: c.title, url: c.url, chunk_id: c.id });
+    out.push({
+      source_id: c.sourceId, title: c.title, url: c.url, chunk_id: c.id,
+      origin_kind: c.originKind, origin_id: c.originId,
+    });
   }
   return out;
 }
@@ -108,22 +116,20 @@ async function logQuery(row: {
   model: string;
 }): Promise<void> {
   try {
-    await db.execute(sql`
-      INSERT INTO kb_query_log
-        (conversation_id, question, lang, role_label, scope_set,
-         no_answer, top_similarity, citation_count, model)
-      VALUES (
-        ${row.conversationId},
-        ${row.question},
-        ${row.lang},
-        ${row.roleLabel},
-        ${row.scopeSet},
-        ${row.noAnswer},
-        ${row.topSimilarity},
-        ${row.citationCount},
-        ${row.model}
-      )
-    `);
+    // Drizzle insert (not raw SQL): the model's scope_set column is
+    // text().array(), so the JS string[] serializes to a Postgres text[]
+    // correctly — binding a raw JS array into db.execute(sql`…`) does not.
+    await db.insert(kbQueryLog).values({
+      conversation_id: row.conversationId,
+      question: row.question,
+      lang: row.lang,
+      role_label: row.roleLabel,
+      scope_set: row.scopeSet,
+      no_answer: row.noAnswer,
+      top_similarity: row.topSimilarity,
+      citation_count: row.citationCount,
+      model: row.model,
+    });
   } catch (err) {
     if (isMissingRelation(err)) return; // kb_query_log not migrated yet — skip.
     // eslint-disable-next-line no-console

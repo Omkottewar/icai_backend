@@ -15,7 +15,9 @@
     "db:studio": "drizzle-kit studio",
     "db:check": "drizzle-kit check",
     "storage:migrate": "node scripts/migrate-uploads-to-supabase.mjs",
-    "storage:migrate:dry": "node scripts/migrate-uploads-to-supabase.mjs --dry-run"
+    "storage:migrate:dry": "node scripts/migrate-uploads-to-supabase.mjs --dry-run",
+    "pragyaan:ingest": "tsx scripts/ingest-public.mjs",
+    "pragyaan:ingest:dry": "tsx scripts/ingest-public.mjs --dry-run"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.1",
@@ -29,6 +31,7 @@
     "jsonwebtoken": "^9.0.3",
     "nodemailer": "^6.9.16",
     "openai": "^6.43.0",
+    "pdf-parse": "^2.4.5",
     "postgres": "^3.4.5",
     "sharp": "^0.35.1",
     "web-push": "^3.6.7",
