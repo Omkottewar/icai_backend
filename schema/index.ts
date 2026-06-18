@@ -28,4 +28,5 @@ export * from "./articleshipMatches";
 export * from "./dashboardLayouts";
 export * from "./branchContent";
 export * from "./grievances";
+export * from "./pragyaan";
 export * from "./relations";
