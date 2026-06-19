@@ -26,7 +26,7 @@ import { newslettersAdminRouter } from "./newsletters.js";
 import { officeBearersAdminRouter } from "./officeBearers.js";
 import { annualReportsAdminRouter } from "./annualReports.js";
 import { grievancesAdminRouter, grievanceRoutesAdminRouter } from "./grievances.js";
-import { pragyaanAdminRouter } from "./pragyaan.js";
+import { resourcesAdminRouter } from "./resources.js";
 
 export const adminRouter = Router();
 
@@ -59,4 +59,4 @@ adminRouter.use("/office-bearers", officeBearersAdminRouter);
 adminRouter.use("/annual-reports", annualReportsAdminRouter);
 adminRouter.use("/grievances", grievancesAdminRouter);
 adminRouter.use("/grievance-routes", grievanceRoutesAdminRouter);
-adminRouter.use("/pragyaan", pragyaanAdminRouter);
+adminRouter.use("/resources", resourcesAdminRouter);

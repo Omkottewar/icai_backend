@@ -37,6 +37,7 @@ import { membersRouter } from "./routes/members.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { pushRouter } from "./routes/push.js";
 import { checklistTasksRouter } from "./routes/checklistTasks.js";
+import { resourcesRouter } from "./routes/resources.js";
 import { branchContentRouter } from "./routes/branchContent.js";
 import { grievancesRouter } from "./routes/grievances.js";
 import { pragyaanRouter } from "./routes/pragyaan.js";
@@ -94,6 +95,10 @@ app.use("/api/checklist-tasks", checklistTasksRouter);
 // /paper-presentations, /gallery-albums, /newsletters, /office-bearers,
 // /annual-reports.
 app.use("/api", branchContentRouter);
+// Section L (Resources) — papers, e-journal, topics, bookmarks, comments,
+// quizzes. Lives under /api/resources/... so it doesn't collide with the
+// older /paper-presentations endpoint.
+app.use("/api/resources", resourcesRouter);
 app.use("/api/grievances", grievancesRouter);
 app.use("/api/pragyaan", pragyaanRouter);
 app.use("/api/admin", adminRouter);

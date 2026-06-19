@@ -32,6 +32,7 @@ branchContentRouter.get("/paper-presentations", async (_req, res, next) => {
   try {
     const rows = await db.select({
       id:           paperPresentations.id,
+      slug:         paperPresentations.slug,
       title:        paperPresentations.title,
       speaker_name: paperPresentations.speaker_name,
       committee_tag: paperPresentations.committee_tag,
@@ -44,7 +45,12 @@ branchContentRouter.get("/paper-presentations", async (_req, res, next) => {
       .from(paperPresentations)
       .leftJoin(files, eq(files.id, paperPresentations.pdf_file_id))
       .leftJoin(events, eq(events.id, paperPresentations.event_id))
-      .where(eq(paperPresentations.hidden, false))
+      // hidden=false AND status='published' so member-submitted drafts /
+      // rejected entries don't surface on the public Resources page.
+      .where(and(
+        eq(paperPresentations.hidden, false),
+        eq(paperPresentations.status, "published"),
+      ))
       .orderBy(asc(paperPresentations.sort_order), desc(paperPresentations.presented_on));
 
     res.json({

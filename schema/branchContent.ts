@@ -8,9 +8,24 @@ import {
   timestamp,
   uniqueIndex,
   index,
+  jsonb,
+  pgEnum,
 } from "drizzle-orm/pg-core";
 import { events } from "./events";
 import { files } from "./files";
+import { committees } from "./committees";
+import { users } from "./identity";
+
+// Lifecycle enum shared by paper_presentations + ejournal_issues. Added in
+// migration 0037 — replaces the older boolean `hidden` flag for new code
+// paths while leaving `hidden` in place for legacy reads.
+export const resourceStatusEnum = pgEnum("resource_status", [
+  "draft",
+  "pending_review",
+  "published",
+  "rejected",
+  "archived",
+]);
 
 // ─── Branch content tables ─────────────────────────────────────────────────────
 //
@@ -30,13 +45,31 @@ export const paperPresentations = pgTable(
   "paper_presentations",
   {
     id:            uuid("id").primaryKey().defaultRandom(),
+    slug:          text("slug").notNull().unique(),                       // URL routing (mig 0037)
     title:         text("title").notNull(),
+    abstract:      text("abstract"),                                      // 2-3 sentence summary
+    description:   text("description"),                                   // legacy body — retained for reads
     speaker_name:  text("speaker_name").notNull(),
-    committee_tag: text("committee_tag"),                                // GST | DT | IT | Audit | CPE | WICASA | Branch
+    author_user_id: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    author_designation: text("author_designation"),
+    committee_tag: text("committee_tag"),                                 // legacy free-text tag
+    committee_id:  uuid("committee_id").references(() => committees.id, { onDelete: "set null" }),
     event_id:      uuid("event_id").references(() => events.id, { onDelete: "set null" }),
     presented_on:  date("presented_on"),
     pdf_file_id:   uuid("pdf_file_id").references(() => files.id, { onDelete: "set null" }),
-    description:   text("description"),
+    cover_file_id: uuid("cover_file_id").references(() => files.id, { onDelete: "set null" }),
+    // Submission workflow (mig 0037). Existing rows default to 'published'
+    // so the migration doesn't hide previously-uploaded content.
+    status:        resourceStatusEnum("status").notNull().default("published"),
+    submitted_by:  uuid("submitted_by").references(() => users.id, { onDelete: "set null" }),
+    reviewed_by:   uuid("reviewed_by").references(() => users.id, { onDelete: "set null" }),
+    reviewed_at:   timestamp("reviewed_at", { withTimezone: true }),
+    review_note:   text("review_note"),
+    published_at:  timestamp("published_at", { withTimezone: true }),
+    view_count:    integer("view_count").notNull().default(0),
+    // ICAI mandates "views expressed are personal" disclaimer on paper
+    // presentations. Default text matches the client-confirmed wording.
+    disclaimer_text: text("disclaimer_text").notNull().default("Views expressed are personal"),
     hidden:        boolean("hidden").notNull().default(false),
     sort_order:    integer("sort_order").notNull().default(0),
     created_at:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -45,8 +78,163 @@ export const paperPresentations = pgTable(
   (t) => [
     index("paper_presentations_committee_idx").on(t.committee_tag),
     index("paper_presentations_presented_idx").on(t.presented_on),
+    index("paper_presentations_status_idx").on(t.status),
+    index("paper_presentations_author_idx").on(t.author_user_id),
   ],
 );
+
+// ─── Closed topic taxonomy ────────────────────────────────────────────────
+export const resourceTopics = pgTable("resource_topics", {
+  id:          uuid("id").primaryKey().defaultRandom(),
+  code:        text("code").notNull().unique(),                          // 'gst', 'direct_tax'
+  name:        text("name").notNull(),
+  description: text("description"),
+  sort_order:  integer("sort_order").notNull().default(0),
+  active:      boolean("active").notNull().default(true),
+  created_at:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const paperTopics = pgTable("paper_topics", {
+  paper_id:   uuid("paper_id").notNull().references(() => paperPresentations.id, { onDelete: "cascade" }),
+  topic_id:   uuid("topic_id").notNull().references(() => resourceTopics.id, { onDelete: "cascade" }),
+  created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("paper_topics_pk").on(t.paper_id, t.topic_id),
+  index("paper_topics_topic_idx").on(t.topic_id),
+]);
+
+// ─── E-journal archive (L.5) ──────────────────────────────────────────────
+export const ejournalIssues = pgTable("ejournal_issues", {
+  id:                uuid("id").primaryKey().defaultRandom(),
+  slug:              text("slug").notNull().unique(),
+  title:             text("title").notNull(),
+  issue_label:       text("issue_label").notNull(),                      // 'Vol III, Issue 2 — Apr-Jun 2026'
+  issue_year:        integer("issue_year").notNull(),
+  issue_quarter:     integer("issue_quarter"),                           // 1-4, nullable for annual
+  cover_file_id:     uuid("cover_file_id").references(() => files.id, { onDelete: "set null" }),
+  pdf_file_id:       uuid("pdf_file_id").references(() => files.id, { onDelete: "set null" }),
+  editorial_summary: text("editorial_summary"),
+  status:            resourceStatusEnum("status").notNull().default("published"),
+  published_at:      timestamp("published_at", { withTimezone: true }),
+  created_by:        uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  view_count:        integer("view_count").notNull().default(0),
+  hidden:            boolean("hidden").notNull().default(false),
+  created_at:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at:        timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("ejournal_issues_year_idx").on(t.issue_year, t.issue_quarter),
+  index("ejournal_issues_status_idx").on(t.status),
+]);
+
+export const ejournalTopics = pgTable("ejournal_topics", {
+  issue_id: uuid("issue_id").notNull().references(() => ejournalIssues.id, { onDelete: "cascade" }),
+  topic_id: uuid("topic_id").notNull().references(() => resourceTopics.id, { onDelete: "cascade" }),
+}, (t) => [uniqueIndex("ejournal_topics_pk").on(t.issue_id, t.topic_id)]);
+
+// ─── Curated link-out cards for icai.org content (L.1/L.3/L.6) ───────────
+export const icaiLinkCards = pgTable("icai_link_cards", {
+  id:          uuid("id").primaryKey().defaultRandom(),
+  category:    text("category").notNull(),                               // 'circulars' | 'standards' | 'knowledge_repo' | 'other'
+  title:       text("title").notNull(),
+  description: text("description"),
+  url:         text("url").notNull(),
+  icon_emoji:  text("icon_emoji"),
+  sort_order:  integer("sort_order").notNull().default(0),
+  active:      boolean("active").notNull().default(true),
+  created_by:  uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  created_at:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at:  timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ─── Engagement: bookmarks + topic subs + comments (Phase 2-3) ───────────
+// resource_type is a tagged-union discriminator; we can't FK to one of two
+// tables in Postgres, so cleanup of orphan rows happens at app-level.
+export const resourceBookmarks = pgTable("resource_bookmarks", {
+  id:            uuid("id").primaryKey().defaultRandom(),
+  user_id:       uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  resource_type: text("resource_type").notNull(),                        // 'paper' | 'ejournal'
+  resource_id:   uuid("resource_id").notNull(),
+  created_at:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("resource_bookmarks_user_resource_uq").on(t.user_id, t.resource_type, t.resource_id),
+  index("resource_bookmarks_user_idx").on(t.user_id, t.created_at),
+]);
+
+export const resourceTopicSubscriptions = pgTable("resource_topic_subscriptions", {
+  id:         uuid("id").primaryKey().defaultRandom(),
+  user_id:    uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  topic_id:   uuid("topic_id").notNull().references(() => resourceTopics.id, { onDelete: "cascade" }),
+  created_at: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("resource_topic_subs_user_topic_uq").on(t.user_id, t.topic_id),
+  index("resource_topic_subs_topic_idx").on(t.topic_id),
+]);
+
+export const resourceComments = pgTable("resource_comments", {
+  id:                uuid("id").primaryKey().defaultRandom(),
+  resource_type:     text("resource_type").notNull(),
+  resource_id:       uuid("resource_id").notNull(),
+  user_id:           uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  body:              text("body").notNull(),
+  // Self-reference for one-level replies. Cascade on the parent so a
+  // deleted thread vanishes entirely; UI flattens past depth 1.
+  parent_comment_id: uuid("parent_comment_id"),
+  status:            text("status").notNull().default("visible"),         // 'visible' | 'hidden' | 'deleted'
+  hidden_by:         uuid("hidden_by").references(() => users.id, { onDelete: "set null" }),
+  hidden_at:         timestamp("hidden_at", { withTimezone: true }),
+  created_at:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at:        timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("resource_comments_resource_idx").on(t.resource_type, t.resource_id, t.created_at),
+  index("resource_comments_user_idx").on(t.user_id),
+]);
+
+// ─── CPE quizzes (Phase 3) ───────────────────────────────────────────────
+export const resourceQuizzes = pgTable("resource_quizzes", {
+  id:                  uuid("id").primaryKey().defaultRandom(),
+  paper_id:            uuid("paper_id").notNull().unique().references(() => paperPresentations.id, { onDelete: "cascade" }),
+  pass_threshold:      integer("pass_threshold").notNull().default(4),
+  question_count:      integer("question_count").notNull().default(5),
+  cpe_credit_minutes:  integer("cpe_credit_minutes").notNull().default(30),
+  cooldown_hours:      integer("cooldown_hours").notNull().default(24),
+  is_published:        boolean("is_published").notNull().default(false),
+  created_by:          uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  created_at:          timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at:          timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const resourceQuizQuestions = pgTable("resource_quiz_questions", {
+  id:          uuid("id").primaryKey().defaultRandom(),
+  quiz_id:     uuid("quiz_id").notNull().references(() => resourceQuizzes.id, { onDelete: "cascade" }),
+  sort_order:  integer("sort_order").notNull().default(0),
+  text:        text("text").notNull(),
+  explanation: text("explanation"),
+  created_at:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("resource_quiz_questions_quiz_idx").on(t.quiz_id, t.sort_order)]);
+
+export const resourceQuizOptions = pgTable("resource_quiz_options", {
+  id:          uuid("id").primaryKey().defaultRandom(),
+  question_id: uuid("question_id").notNull().references(() => resourceQuizQuestions.id, { onDelete: "cascade" }),
+  sort_order:  integer("sort_order").notNull().default(0),
+  text:        text("text").notNull(),
+  is_correct:  boolean("is_correct").notNull().default(false),
+  created_at:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("resource_quiz_options_q_idx").on(t.question_id, t.sort_order)]);
+
+export const resourceQuizAttempts = pgTable("resource_quiz_attempts", {
+  id:           uuid("id").primaryKey().defaultRandom(),
+  quiz_id:      uuid("quiz_id").notNull().references(() => resourceQuizzes.id, { onDelete: "cascade" }),
+  user_id:      uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  score:        integer("score").notNull(),
+  passed:       boolean("passed").notNull(),
+  // Captured for audit: { [question_id]: option_id }
+  answers:      jsonb("answers").notNull().default({}),
+  started_at:   timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  completed_at: timestamp("completed_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("resource_quiz_attempts_user_idx").on(t.user_id, t.completed_at),
+  index("resource_quiz_attempts_quiz_user_idx").on(t.quiz_id, t.user_id, t.completed_at),
+]);
 
 export const galleryAlbums = pgTable(
   "gallery_albums",
