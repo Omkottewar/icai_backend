@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, asc, eq, gt, gte, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
   events,
@@ -8,9 +8,17 @@ import {
   memberProfiles,
   studentProfiles,
   dashboardLayouts,
+  announcements,
+  resourceBookmarks,
+  paperPresentations,
+  ejournalIssues,
+  committees,
+  files,
+  users,
 } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { currentFy } from "../lib/fy.js";
+import { storage } from "../lib/storage.js";
 
 export const dashboardRouter = Router();
 
@@ -115,13 +123,31 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
     const upcomingEvents = await getUpcomingEvents(user.id, now);
 
     if (user.primary_role === "member") {
-      const [profile] = await db
-        .select()
+      // Profile + phone in one round-trip so the dashboard payload has
+      // everything the edit drawer needs without a follow-up fetch.
+      const [profileRow] = await db
+        .select({
+          user_id: memberProfiles.user_id,
+          mrn: memberProfiles.mrn,
+          is_fca: memberProfiles.is_fca,
+          cop_status: memberProfiles.cop_status,
+          cop_number: memberProfiles.cop_number,
+          is_practising: memberProfiles.is_practising,
+          gender: memberProfiles.gender,
+          member_since: memberProfiles.member_since,
+          areas_of_practice: memberProfiles.areas_of_practice,
+          address: memberProfiles.address,
+          city: memberProfiles.city,
+          pincode: memberProfiles.pincode,
+          phone: users.phone,
+        })
         .from(memberProfiles)
+        .innerJoin(users, eq(users.id, memberProfiles.user_id))
         .where(
           and(eq(memberProfiles.user_id, user.id), isNull(memberProfiles.deleted_at)),
         )
         .limit(1);
+      const profile = profileRow ?? null;
 
       const fy = currentFy(now);
 
@@ -146,6 +172,175 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
       const structured = Number(cpeRows.find((r) => r.type === "structured")?.hours ?? 0);
       const unstructured = Number(cpeRows.find((r) => r.type === "unstructured")?.hours ?? 0);
 
+      // Run the four "extras" in parallel — they're independent reads and
+      // each is cheap, so the request stays well under 100ms.
+      const [
+        eventsAttendedFyRow,
+        bookmarkCountRow,
+        bookmarkRows,
+        announcementRows,
+        registeredEventIdRows,
+      ] = await Promise.all([
+        // Events attended in current FY (drives stat tile).
+        db.select({ count: sql<number>`count(*)::int`.as("count") })
+          .from(eventRegistrations)
+          .innerJoin(events, eq(events.id, eventRegistrations.event_id))
+          .where(and(
+            eq(eventRegistrations.user_id, user.id),
+            eq(eventRegistrations.status, "attended"),
+            isNull(eventRegistrations.deleted_at),
+            gte(events.starts_at, fy.start),
+            lt(events.starts_at, fy.end),
+          )),
+        // Total saved papers/issues count for the stats row.
+        db.select({ count: sql<number>`count(*)::int`.as("count") })
+          .from(resourceBookmarks)
+          .where(eq(resourceBookmarks.user_id, user.id)),
+        // Three most-recent bookmarks for the My Library teaser.
+        db.select({
+            id: resourceBookmarks.id,
+            resource_type: resourceBookmarks.resource_type,
+            resource_id: resourceBookmarks.resource_id,
+            created_at: resourceBookmarks.created_at,
+          })
+          .from(resourceBookmarks)
+          .where(eq(resourceBookmarks.user_id, user.id))
+          .orderBy(desc(resourceBookmarks.created_at))
+          .limit(3),
+        // Active announcements scoped to "all" or "members".
+        db.select({
+            id: announcements.id,
+            title: announcements.title,
+            body: announcements.body,
+            link_url: announcements.link_url,
+            starts_at: announcements.starts_at,
+          })
+          .from(announcements)
+          .where(and(
+            isNull(announcements.deleted_at),
+            inArray(announcements.audience, ["all", "members"]),
+            lte(announcements.starts_at, now),
+            or(isNull(announcements.ends_at), gt(announcements.ends_at, now)),
+          ))
+          .orderBy(asc(announcements.display_order), desc(announcements.created_at))
+          .limit(3),
+        // Event ids the user is already registered for (used to suggest
+        // *other* upcoming events).
+        db.select({ event_id: eventRegistrations.event_id })
+          .from(eventRegistrations)
+          .where(and(
+            eq(eventRegistrations.user_id, user.id),
+            isNull(eventRegistrations.deleted_at),
+            inArray(eventRegistrations.status, ["registered", "waitlisted", "attended"]),
+          )),
+      ]);
+
+      // Hydrate bookmark rows with title + cover for the dashboard teaser.
+      const paperIds = bookmarkRows.filter((b) => b.resource_type === "paper").map((b) => b.resource_id);
+      const journalIds = bookmarkRows.filter((b) => b.resource_type === "ejournal").map((b) => b.resource_id);
+      const [paperHits, journalHits] = await Promise.all([
+        paperIds.length === 0 ? Promise.resolve([] as any[]) :
+          db.select({
+              id: paperPresentations.id, slug: paperPresentations.slug,
+              title: paperPresentations.title, speaker_name: paperPresentations.speaker_name,
+              cover_path: files.storage_path,
+            })
+            .from(paperPresentations)
+            .leftJoin(files, eq(files.id, paperPresentations.cover_file_id))
+            .where(inArray(paperPresentations.id, paperIds)),
+        journalIds.length === 0 ? Promise.resolve([] as any[]) :
+          db.select({
+              id: ejournalIssues.id, slug: ejournalIssues.slug,
+              title: ejournalIssues.title, issue_label: ejournalIssues.issue_label,
+              cover_path: files.storage_path,
+            })
+            .from(ejournalIssues)
+            .leftJoin(files, eq(files.id, ejournalIssues.cover_file_id))
+            .where(inArray(ejournalIssues.id, journalIds)),
+      ]);
+      const paperMap = new Map<string, any>(paperHits.map((p) => [p.id, p]));
+      const journalMap = new Map<string, any>(journalHits.map((j) => [j.id, j]));
+      const recentBookmarks = bookmarkRows
+        .map((b) => {
+          if (b.resource_type === "paper") {
+            const p = paperMap.get(b.resource_id);
+            if (!p) return null;
+            return {
+              bookmark_id: b.id, resource_type: "paper" as const,
+              slug: p.slug, title: p.title, subtitle: p.speaker_name,
+              cover_url: p.cover_path ? storage().url(p.cover_path) : null,
+            };
+          }
+          const j = journalMap.get(b.resource_id);
+          if (!j) return null;
+          return {
+            bookmark_id: b.id, resource_type: "ejournal" as const,
+            slug: j.slug, title: j.title, subtitle: j.issue_label,
+            cover_url: j.cover_path ? storage().url(j.cover_path) : null,
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      // Suggested upcoming events the user isn't already on. Audience scope
+      // includes 'all' + 'members'. We exclude every event they've ever
+      // touched (registered/waitlisted/attended) so the list is genuinely
+      // new to them.
+      //
+      // Personalisation: when the member has `areas_of_practice` filled in
+      // ("GST", "Direct Tax", …) we score each candidate by how well its
+      // committee code matches one of those areas (case-insensitive). The
+      // top 3 highest-scoring rows come back; ties break by date. Members
+      // without areas of practice just get the next-3-chronological — same
+      // behaviour as before.
+      const registeredIds = registeredEventIdRows.map((r) => r.event_id);
+      const areas = (profile?.areas_of_practice ?? []).filter((a): a is string => !!a);
+      const suggestedConds = [
+        isNull(events.deleted_at),
+        eq(events.status, "published"),
+        gt(events.starts_at, now),
+        inArray(events.audience, ["all", "members"] as any),
+      ];
+      if (registeredIds.length > 0) {
+        suggestedConds.push(notInArray(events.id, registeredIds));
+      }
+      // `match_score` is 1 when a committee code matches one of the
+      // member's areas of practice (lower(code) IN (lower(area), ...)),
+      // 0 otherwise. Sort by it desc, then by date asc.
+      //
+      // Two important details about the empty case:
+      //   • We *omit* the score from ORDER BY when areas is empty. A bare
+      //     literal `0` in ORDER BY is interpreted by Postgres as
+      //     "ordinal column position 0" (positions start at 1) and the
+      //     query errors with 42P10 — we hit that bug in dev before
+      //     guarding here.
+      //   • We *omit* the score from SELECT too in that case so the row
+      //     shape stays clean; the frontend doesn't read it anyway.
+      const personalised = areas.length > 0;
+      const matchScoreSql = personalised
+        ? sql<number>`case when lower(${committees.code}) in (${sql.join(areas.map((a) => sql`lower(${a})`), sql`, `)}) then 1 else 0 end`
+        : null;
+      const baseCols = {
+        id: events.id, slug: events.slug, title: events.title,
+        starts_at: events.starts_at, cpe_hours: events.cpe_hours,
+        mode: events.mode, venue: events.venue,
+        committee_code: committees.code,
+      };
+      const suggestedEvents = await (personalised
+        ? db
+            .select({ ...baseCols, match_score: matchScoreSql!.as("match_score") })
+            .from(events)
+            .leftJoin(committees, eq(committees.id, events.committee_id))
+            .where(and(...suggestedConds))
+            .orderBy(desc(matchScoreSql!), asc(events.starts_at))
+            .limit(3)
+        : db
+            .select(baseCols)
+            .from(events)
+            .leftJoin(committees, eq(committees.id, events.committee_id))
+            .where(and(...suggestedConds))
+            .orderBy(asc(events.starts_at))
+            .limit(3));
+
       return res.json({
         role: "member",
         profile: profile
@@ -155,9 +350,13 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
               cop_status: profile.cop_status,
               cop_number: profile.cop_number,
               is_practising: profile.is_practising,
+              gender: profile.gender,
               member_since: profile.member_since,
+              address: profile.address,
               city: profile.city,
               pincode: profile.pincode,
+              areas_of_practice: profile.areas_of_practice,
+              phone: profile.phone,
             }
           : null,
         cpe: {
@@ -171,6 +370,11 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
           three_year_block_target: 120,
         },
         upcomingEvents,
+        eventsAttendedFy: eventsAttendedFyRow[0]?.count ?? 0,
+        bookmarksCount: bookmarkCountRow[0]?.count ?? 0,
+        recentBookmarks,
+        announcements: announcementRows,
+        suggestedEvents,
         recentUdins: [],
       });
     }

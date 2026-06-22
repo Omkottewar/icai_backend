@@ -110,7 +110,7 @@ function rejectUpgrade(socket: Duplex, status: number, reason: string): void {
 }
 
 function onSocketOpen(ws: WebSocket, eventId: string, userId: string): void {
-  joinRoom(eventId, ws);
+  joinRoom(eventId, ws, userId);
 
   // Welcome frame so the client UI can show presence without an extra REST call.
   try {
@@ -139,9 +139,30 @@ function onSocketOpen(ws: WebSocket, eventId: string, userId: string): void {
   }, 25_000);
 
   ws.on("message", (raw) => {
-    // The client only sends keepalive blips (e.g. `{type:"ping"}`). We accept
-    // and ignore everything else so a misbehaving client can't crash us.
-    void raw;
+    // Clients send three things over WS:
+    //   1. {type:"ping"} — keepalive blips; we acknowledge implicitly
+    //      by not closing the socket.
+    //   2. {type:"typing", channel_id} — typing indicator. Relay to the
+    //      room so others can render a "X is typing…" hint. We DON'T
+    //      validate channel membership for typing — the registration
+    //      gate already covers it and typing is harmless if mistargeted.
+    //   3. Anything else — silently dropped so a misbehaving client
+    //      can't crash the server.
+    try {
+      const text = typeof raw === "string" ? raw : raw.toString("utf8");
+      if (text.length > 512) return;          // typing payloads are tiny
+      const frame = JSON.parse(text);
+      if (frame?.type === "typing" && typeof frame.channel_id === "string") {
+        broadcast(eventId, {
+          type: "typing",
+          channel_id: frame.channel_id,
+          user_id: userId,
+          at: Date.now(),
+        });
+      }
+    } catch {
+      /* unparseable — ignore */
+    }
   });
 
   ws.on("close", () => {
@@ -158,6 +179,4 @@ function onSocketOpen(ws: WebSocket, eventId: string, userId: string): void {
     clearInterval(heartbeat);
     leaveRoom(eventId, ws);
   });
-
-  void userId; // currently unused beyond auth; preserved for future read receipts
 }

@@ -3,6 +3,7 @@ import { and, asc, desc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm
 import { db } from "../../../db/client.js";
 import {
   users, roles, userRoleAssignments, branches, committees,
+  checklistInstances, checklistInstanceSectionAssignments,
 } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
@@ -335,5 +336,152 @@ usersAdminRouter.get("/_meta/lookups", async (_req, res, next) => {
       .where(eq(committees.active, true))
       .orderBy(asc(committees.name));
     res.json({ roles: rs, branches: bs, committees: cs });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── GET /api/admin/users/:id/open-checklists ───────────────────────────
+// Lists every non-approved checklist instance where this user is currently
+// the assigned filler, the assigned reviewer, or the assignee for a
+// section. Used by the user-detail drawer to surface lingering work that
+// should be reassigned when a role is revoked — otherwise the ex-treasurer
+// keeps seeing "5 pending" on their dashboard for assignments that were
+// implicitly tied to a role they no longer hold.
+usersAdminRouter.get("/:id/open-checklists", async (req: AuthedRequest, res, next) => {
+  try {
+    const userId = String(req.params.id);
+
+    // Direct user assignments (fill / review). These are the two columns
+    // that drive the "is this assigned to me?" check on the member side.
+    const direct = await db
+      .select({
+        instance_id: checklistInstances.id,
+        title:       checklistInstances.title,
+        status:      checklistInstances.status,
+        role:        sql<string>`case
+          when ${checklistInstances.assigned_fill_user_id}   = ${userId} then 'fill'
+          when ${checklistInstances.assigned_review_user_id} = ${userId} then 'review'
+          else 'unknown'
+        end`.as("role"),
+        updated_at:  checklistInstances.updated_at,
+      })
+      .from(checklistInstances)
+      .where(and(
+        isNull(checklistInstances.deleted_at),
+        sql`${checklistInstances.status} <> 'approved'`,
+        or(
+          eq(checklistInstances.assigned_fill_user_id, userId),
+          eq(checklistInstances.assigned_review_user_id, userId),
+        ),
+      ));
+
+    // Per-section assignments. Several rows may map to the same instance
+    // (one user owns multiple sections) so we DISTINCT-ify by instance id
+    // for the count surfaced to the admin.
+    const sectionRows = await db
+      .select({
+        instance_id: checklistInstances.id,
+        title:       checklistInstances.title,
+        status:      checklistInstances.status,
+        section_count: sql<number>`count(*)::int`.as("section_count"),
+        updated_at:  checklistInstances.updated_at,
+      })
+      .from(checklistInstanceSectionAssignments)
+      .innerJoin(checklistInstances, eq(checklistInstances.id, checklistInstanceSectionAssignments.instance_id))
+      .where(and(
+        eq(checklistInstanceSectionAssignments.assignee_id, userId),
+        isNull(checklistInstances.deleted_at),
+        sql`${checklistInstances.status} <> 'approved'`,
+      ))
+      .groupBy(checklistInstances.id, checklistInstances.title, checklistInstances.status, checklistInstances.updated_at);
+
+    res.json({
+      // `direct` carries one row per (instance, role) combination — a user
+      // can be both filler and reviewer on the same instance (unusual but
+      // possible). The frontend renders one row per direct entry.
+      direct,
+      sections: sectionRows,
+      total: direct.length + sectionRows.length,
+    });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/users/:id/reassign-checklists ──────────────────────
+// Bulk-reassign every non-approved checklist where this user appears as
+// filler, reviewer, or section assignee to a different user. Use cases:
+//   • Office bearer rotation — incoming treasurer takes over outgoing
+//     treasurer's open work.
+//   • Member resignation or leave — owner reroutes work.
+//
+// Body: { to_user_id: uuid }. The target user is sanity-checked (must
+// exist, not deleted) but we do NOT enforce that they hold the same role
+// codes — that's an explicit admin choice. The 'approved' filter is
+// hard-coded so closed work is never silently rewritten.
+usersAdminRouter.post("/:id/reassign-checklists", async (req: AuthedRequest, res, next) => {
+  try {
+    const fromUserId = String(req.params.id);
+    const toUserId   = trim(req.body?.to_user_id);
+    if (!toUserId)             throw new ApiError(400, "to_user_id is required");
+    if (toUserId === fromUserId) throw new ApiError(400, "Pick a different target user");
+
+    // Confirm the target user exists and is not soft-deleted.
+    const [target] = await db
+      .select({ id: users.id, name: users.name })
+      .from(users)
+      .where(and(eq(users.id, toUserId), isNull(users.deleted_at)))
+      .limit(1);
+    if (!target) throw new ApiError(404, "Target user not found");
+
+    // Three independent updates inside one transaction so the user's
+    // dashboard refresh after reassign is consistent.
+    const result = await db.transaction(async (tx) => {
+      const fillUpdated = await tx
+        .update(checklistInstances)
+        .set({ assigned_fill_user_id: toUserId, updated_at: new Date() })
+        .where(and(
+          eq(checklistInstances.assigned_fill_user_id, fromUserId),
+          isNull(checklistInstances.deleted_at),
+          sql`${checklistInstances.status} <> 'approved'`,
+        ))
+        .returning({ id: checklistInstances.id });
+
+      const reviewUpdated = await tx
+        .update(checklistInstances)
+        .set({ assigned_review_user_id: toUserId, updated_at: new Date() })
+        .where(and(
+          eq(checklistInstances.assigned_review_user_id, fromUserId),
+          isNull(checklistInstances.deleted_at),
+          sql`${checklistInstances.status} <> 'approved'`,
+        ))
+        .returning({ id: checklistInstances.id });
+
+      // Section assignments: only flip rows whose parent instance is still
+      // open. We restrict by instance status via a sub-select rather than
+      // a join because UPDATE … FROM is awkward in drizzle and the row
+      // count is small.
+      const sectionUpdated = await tx
+        .update(checklistInstanceSectionAssignments)
+        .set({ assignee_id: toUserId, updated_at: new Date() })
+        .where(and(
+          eq(checklistInstanceSectionAssignments.assignee_id, fromUserId),
+          sql`${checklistInstanceSectionAssignments.instance_id} in (
+            select id from checklist_instances
+            where deleted_at is null and status <> 'approved'
+          )`,
+        ))
+        .returning({ id: checklistInstanceSectionAssignments.id });
+
+      return {
+        fillCount:    fillUpdated.length,
+        reviewCount:  reviewUpdated.length,
+        sectionCount: sectionUpdated.length,
+      };
+    });
+
+    res.json({
+      ok: true,
+      to_user: { id: target.id, name: target.name },
+      ...result,
+      total: result.fillCount + result.reviewCount + result.sectionCount,
+    });
   } catch (err) { handleApiError(err, res, next); }
 });

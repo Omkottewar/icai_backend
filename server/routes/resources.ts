@@ -126,10 +126,17 @@ resourcesRouter.get("/papers", async (req, res, next) => {
       if (topicIds.length === 0) {
         return res.json({ items: [], total: 0, page, pageSize });
       }
+      // Drizzle's `sql` tag expands a JS array into a comma-separated
+      // parameter list (`($1, $2, ...)`), NOT a single array-typed bind
+      // — so `ANY(${arr})` becomes `ANY(($1, $2))` which Postgres
+      // rejects: 42809 "op ANY/ALL requires array on right side" for
+      // two+ items and 22P02 "malformed array literal" for one. The
+      // safe fix is an explicit IN-list built with sql.join.
+      const topicIdList = sql.join(topicIds.map((id) => sql`${id}::uuid`), sql`, `);
       conds.push(sql`EXISTS (
         SELECT 1 FROM ${paperTopics}
         WHERE ${paperTopics.paper_id} = ${paperPresentations.id}
-          AND ${paperTopics.topic_id} = ANY(${topicIds})
+          AND ${paperTopics.topic_id} IN (${topicIdList})
       )`);
     }
 

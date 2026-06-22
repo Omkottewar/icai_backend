@@ -93,9 +93,20 @@ mockTestsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
       throw new ApiError(400, "paper_no must be between 1 and 8");
     }
 
+    // Hybrid-engine fields (migration 0040).
+    const description = trim(req.body?.description) || null;
+    const practice_paper_file_id = trim(req.body?.practice_paper_file_id) || null;
+    const answer_key_file_id = trim(req.body?.answer_key_file_id) || null;
+    const max_score = req.body?.max_score != null ? Math.max(1, Math.trunc(Number(req.body.max_score))) : 100;
+    const registration_close_at = req.body?.registration_close_at
+      ? new Date(String(req.body.registration_close_at))
+      : null;
+
     const [row] = await db.insert(mockTests).values({
       title, level, scheduled_at, series_name, venue,
       group_no, paper_no, duration_mins, capacity, fee_paise,
+      description, practice_paper_file_id, answer_key_file_id,
+      max_score, registration_close_at,
       created_by: req.user?.id ?? null,
     }).returning();
     res.status(201).json({ item: row });
@@ -118,6 +129,16 @@ mockTestsAdminRouter.patch("/:id", async (req, res, next) => {
     if ("capacity" in req.body) patch.capacity = req.body.capacity == null ? null : Math.trunc(Number(req.body.capacity));
     if (req.body?.fee_paise != null) patch.fee_paise = Math.trunc(Number(req.body.fee_paise));
     if (req.body?.status && STATUSES.includes(req.body.status)) patch.status = req.body.status;
+    // Hybrid-engine fields.
+    if ("description" in req.body) patch.description = trim(req.body.description) || null;
+    if ("practice_paper_file_id" in req.body) patch.practice_paper_file_id = trim(req.body.practice_paper_file_id) || null;
+    if ("answer_key_file_id" in req.body) patch.answer_key_file_id = trim(req.body.answer_key_file_id) || null;
+    if (req.body?.max_score != null) patch.max_score = Math.max(1, Math.trunc(Number(req.body.max_score)));
+    if ("registration_close_at" in req.body) {
+      patch.registration_close_at = req.body.registration_close_at
+        ? new Date(String(req.body.registration_close_at))
+        : null;
+    }
 
     const [row] = await db.update(mockTests)
       .set(patch as any)
@@ -160,5 +181,112 @@ mockTestsAdminRouter.get("/:id/registrations", async (req, res, next) => {
       .where(eq(mockTestRegistrations.mock_test_id, id))
       .orderBy(desc(mockTestRegistrations.registered_at));
     res.json({ rows });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/mock-tests/:id/marks ────────────────────────────────
+//
+// Bulk-update scores + status on a test's registrations. WICASA grades
+// the papers offline and uses this endpoint to push the marks in one go.
+//
+// Body shape: { entries: [{ registration_id, score, status }] }
+//   • score:  integer ≥ 0 and ≤ max_score (per parent test). Null/empty
+//             clears the previously-entered score.
+//   • status: 'attended' | 'absent' | 'registered' | 'cancelled'.
+//
+// We intentionally don't auto-flip status to "attended" just because a
+// score was entered — WICASA may want to record a score for someone who
+// gets marked "absent" later (e.g. disputed attendance). Status is the
+// authoritative attendance signal.
+mockTestsAdminRouter.post("/:id/marks", async (req, res, next) => {
+  try {
+    const id = need(trim(req.params.id), "Mock test ID");
+    const entries = Array.isArray(req.body?.entries) ? req.body.entries : null;
+    if (!entries) throw new ApiError(400, "Body.entries must be an array");
+
+    const [parent] = await db.select({ id: mockTests.id, max_score: mockTests.max_score })
+      .from(mockTests)
+      .where(and(eq(mockTests.id, id), isNull(mockTests.deleted_at)))
+      .limit(1);
+    if (!parent) throw new ApiError(404, "Mock test not found");
+
+    const allowed = new Set(["registered", "attended", "absent", "cancelled"]);
+
+    let updated = 0;
+    await db.transaction(async (tx) => {
+      for (const raw of entries) {
+        const regId = trim(raw?.registration_id);
+        if (!regId) continue;
+        const patch: Record<string, unknown> = {};
+
+        if ("score" in raw) {
+          const v = raw.score;
+          if (v === null || v === "" || v === undefined) {
+            patch.score = null;
+          } else {
+            const n = Math.trunc(Number(v));
+            if (!Number.isFinite(n) || n < 0) throw new ApiError(400, `Score must be ≥ 0 for ${regId}`);
+            if (n > parent.max_score) throw new ApiError(400, `Score exceeds max_score (${parent.max_score})`);
+            patch.score = n;
+          }
+        }
+        if ("status" in raw) {
+          if (!allowed.has(raw.status)) throw new ApiError(400, `Invalid status '${raw.status}'`);
+          patch.status = raw.status;
+          if (raw.status === "attended" && !raw.attended_at) {
+            patch.attended_at = new Date();
+          }
+        }
+        if (Object.keys(patch).length === 0) continue;
+
+        const [done] = await tx.update(mockTestRegistrations)
+          .set(patch)
+          .where(and(
+            eq(mockTestRegistrations.id, regId),
+            eq(mockTestRegistrations.mock_test_id, id),
+          ))
+          .returning({ id: mockTestRegistrations.id });
+        if (done) updated += 1;
+      }
+    });
+
+    res.json({ ok: true, updated });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/mock-tests/:id/publish-results ──────────────────────
+//
+// Sets the parent test's `result_published_at` and flips status to
+// 'completed'. Students will start seeing their scores + the answer key
+// (if uploaded) immediately after this. Idempotent — calling twice
+// doesn't overwrite the first timestamp.
+mockTestsAdminRouter.post("/:id/publish-results", async (req, res, next) => {
+  try {
+    const id = need(trim(req.params.id), "Mock test ID");
+    const [row] = await db.update(mockTests)
+      .set({
+        result_published_at: sql`COALESCE(result_published_at, NOW())`,
+        status: "completed",
+        updated_at: new Date(),
+      })
+      .where(and(eq(mockTests.id, id), isNull(mockTests.deleted_at)))
+      .returning();
+    if (!row) throw new ApiError(404, "Mock test not found");
+    res.json({ ok: true, item: row });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/mock-tests/:id/unpublish-results ────────────────────
+// Reverse the publish action — for when admin spots an error in the
+// marks and needs to retract before re-publishing.
+mockTestsAdminRouter.post("/:id/unpublish-results", async (req, res, next) => {
+  try {
+    const id = need(trim(req.params.id), "Mock test ID");
+    const [row] = await db.update(mockTests)
+      .set({ result_published_at: null, updated_at: new Date() })
+      .where(and(eq(mockTests.id, id), isNull(mockTests.deleted_at)))
+      .returning();
+    if (!row) throw new ApiError(404, "Mock test not found");
+    res.json({ ok: true, item: row });
   } catch (err) { handleApiError(err, res, next); }
 });

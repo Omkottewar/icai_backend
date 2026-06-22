@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, boolean, timestamp, date, integer, jsonb, AnyPgColumn,
+  pgTable, uuid, text, boolean, timestamp, date, integer, jsonb, bigint, AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import {
   userRoleEnum, userStatusEnum, localeEnum, genderEnum,
@@ -50,6 +50,10 @@ export const users = pgTable("users", {
   notify_email:  boolean("notify_email").notNull().default(true),
   notify_sms:    boolean("notify_sms").notNull().default(false),
   notify_push:   boolean("notify_push").notNull().default(true),
+  // Running total of bytes this user has uploaded into the event chat.
+  // Kept on the user row (not summed from `files`) so the per-upload
+  // quota check stays O(1).
+  chat_bytes_used: bigint("chat_bytes_used", { mode: "number" }).notNull().default(0),
   created_at:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updated_at:    timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   deleted_at:    timestamp("deleted_at", { withTimezone: true }),

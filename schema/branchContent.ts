@@ -313,6 +313,13 @@ export const officeBearers = pgTable(
     tenure_end:    date("tenure_end"),
     sort_order:    integer("sort_order").notNull().default(0),
     hidden:        boolean("hidden").notNull().default(false),
+    // Optional link to a real user account. When set together with a
+    // role_code that maps to an ACL role (chairman, vice_chairman,
+    // secretary, treasurer, managing_committee), the office-bearer
+    // admin endpoint keeps a matching user_role_assignment row in sync
+    // — so removing/hiding an office bearer also revokes their portal
+    // access. See backend/server/routes/admin/officeBearers.ts.
+    linked_user_id: uuid("linked_user_id").references(() => users.id, { onDelete: "set null" }),
     created_at:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updated_at:    timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

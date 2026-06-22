@@ -19,6 +19,9 @@ const queryClient = postgres(url, {
   connect_timeout: 10,
 });
 
-export const db = drizzle(queryClient, { schema, logger: process.env.NODE_ENV !== "production" });
+// Query logging is opt-in via DEBUG_SQL=1 — by default we stay quiet and
+// let errors propagate to the [api error] handler. The per-query "Query:
+// ..." spam was drowning out genuine signal in the dev console.
+export const db = drizzle(queryClient, { schema, logger: process.env.DEBUG_SQL === "1" });
 export type DB = typeof db;
 export { schema };

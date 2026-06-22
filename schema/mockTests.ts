@@ -2,6 +2,7 @@ import { pgTable, uuid, text, integer, timestamp, index } from "drizzle-orm/pg-c
 import { studentLevelEnum } from "./enums";
 import { users } from "./identity";
 import { branches } from "./identity";
+import { files } from "./files";
 
 // ─── Mock Tests ───────────────────────────────────────────────────────────────
 //
@@ -30,6 +31,18 @@ export const mockTests = pgTable(
     fee_paise:      integer("fee_paise").notNull().default(0),
     status:         text("status").notNull().default("scheduled"),
     // scheduled | open_for_registration | closed | completed | cancelled
+    // ── Hybrid-engine columns (migration 0040) ──────────────────────────
+    // The branch runs the actual test on paper at the venue, but the
+    // portal handles registration, practice-paper distribution, and
+    // result entry/release.
+    description:           text("description"),
+    practice_paper_file_id: uuid("practice_paper_file_id").references(() => files.id, { onDelete: "set null" }),
+    answer_key_file_id:    uuid("answer_key_file_id").references(() => files.id, { onDelete: "set null" }),
+    max_score:             integer("max_score").notNull().default(100),
+    // null until WICASA explicitly publishes; students only see their
+    // score after this timestamp is set.
+    result_published_at:   timestamp("result_published_at", { withTimezone: true }),
+    registration_close_at: timestamp("registration_close_at", { withTimezone: true }),
     created_by:     uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     created_at:     timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updated_at:     timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
