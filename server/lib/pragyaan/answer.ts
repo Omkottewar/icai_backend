@@ -18,7 +18,7 @@
 // swallow the "undefined_table" error and carry on. The conversation +
 // messages are the durable record; analytics is best-effort.
 
-import { sql } from "drizzle-orm";
+import { sql, asc } from "drizzle-orm";
 import { db } from "../../../db/client.js";
 import { kbConversations, kbMessages, kbQueryLog } from "../../../schema/index.js";
 import { getProvider } from "./provider.js";
@@ -27,6 +27,15 @@ import type { RetrievedChunk } from "./retrieval.js";
 import { buildMessages, detectLang, noAnswerMessage } from "./prompt.js";
 import type { Lang } from "./prompt.js";
 import type { KbScope } from "./scope.js";
+import { pragyaanConfig } from "./config.js";
+import { condenseQuestion } from "./condense.js";
+import type { PriorTurn } from "./condense.js";
+import { rerank } from "./rerank.js";
+import { fastInputCheck } from "./safety.js";
+import { getCachedAnswer, setCachedAnswer } from "./cache.js";
+import { toolSchemasFor, executeTool, toolsForContext } from "./tools.js";
+import type { ToolContext } from "./tools.js";
+import { suggestFollowUps } from "./followups.js";
 
 /** A citation surfaced to the client and stored on the assistant message. */
 export interface Citation {
@@ -67,6 +76,8 @@ export interface AnswerResult {
   conversationId: string;
   messageId: string;
   citations: Citation[];
+  /** Suggested follow-up questions, rendered as clickable chips. */
+  followUps: string[];
   noAnswer: boolean;
   lang: Lang;
 }
@@ -186,6 +197,31 @@ async function ensureConversation(input: {
 }
 
 /**
+ * Load the last N turns of an existing conversation, oldest first. Used
+ * to give the condenser context for rewriting follow-up questions.
+ * Returns [] for new conversations or on any DB error (non-fatal).
+ */
+async function loadPriorTurns(
+  conversationId: string | null,
+  limit = 6,
+): Promise<PriorTurn[]> {
+  if (!conversationId) return [];
+  try {
+    const rows = await db
+      .select({ role: kbMessages.role, content: kbMessages.content })
+      .from(kbMessages)
+      .where(sql`${kbMessages.conversation_id} = ${conversationId}`)
+      .orderBy(asc(kbMessages.created_at))
+      .limit(limit);
+    return rows
+      .filter((r) => r.role === "user" || r.role === "assistant")
+      .map((r) => ({ role: r.role as "user" | "assistant", content: r.content }));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Orchestrate a single answer turn. Returns an async generator that yields
  * `{ delta }` token slices as the model streams, then returns an AnswerResult.
  *
@@ -208,7 +244,51 @@ export async function* answerQuestion(
   const roleLabel = input.roleLabel ?? (input.userId ? "user" : "visitor");
   const scopeSet = [...input.scopes];
 
-  const { chunks, topSimilarity, noAnswer } = await retrieve(question, input.scopes);
+  // ─── Safety pre-check ───────────────────────────────────────────────────
+  //
+  // Rule-based fast-fail. Prompt-injection patterns get a canned refusal
+  // before we ever embed or call the LLM. The LLM-backed `llmInputCheck`
+  // is deliberately NOT wired by default — it adds ~200ms to every
+  // question. Re-enable from a config flag if abuse patterns evolve.
+  const safety = fastInputCheck(question);
+
+  // ─── Multi-turn condensation ────────────────────────────────────────────
+  //
+  // For follow-ups in an existing conversation, rewrite the question
+  // into a self-contained query before retrieval, so vector search has
+  // the referent ("the GST workshop") instead of just the pronoun
+  // ("and what's the fee?"). The condenser falls back to the original
+  // question on any error.
+  let retrievalQuery = question;
+  if (!safety.block) {
+    const priorTurns = await loadPriorTurns(input.conversationId ?? null);
+    if (priorTurns.length > 0) {
+      retrievalQuery = await condenseQuestion(question, priorTurns, input.conversationId);
+    }
+  }
+
+  // ─── Retrieve (hybrid) + rerank ─────────────────────────────────────────
+  //
+  // Skip retrieval entirely on a safety block. We over-fetch the candidate
+  // pool (fetchK=20) and then let the LLM reranker pick the top-K — this
+  // is what makes hybrid+rerank deliver materially better grounding than
+  // raw cosine top-K.
+  const RERANK_POOL = 20;
+  let retrieved: { chunks: RetrievedChunk[]; topSimilarity: number | null; noAnswer: boolean } =
+    { chunks: [], topSimilarity: null, noAnswer: true };
+  if (!safety.block) {
+    retrieved = await retrieve(retrievalQuery, input.scopes, {
+      topK: pragyaanConfig.topK,
+      fetchK: RERANK_POOL,
+    });
+    if (retrieved.chunks.length > 1) {
+      retrieved.chunks = await rerank(retrievalQuery, retrieved.chunks, pragyaanConfig.topK);
+    } else {
+      retrieved.chunks = retrieved.chunks.slice(0, pragyaanConfig.topK);
+    }
+  }
+
+  const { chunks, topSimilarity, noAnswer } = retrieved;
 
   const conversationId = await ensureConversation({
     conversationId: input.conversationId,
@@ -225,6 +305,28 @@ export async function* answerQuestion(
     role: "user",
     content: question,
   });
+
+  // ─── Safety block path ──────────────────────────────────────────────────
+  if (safety.block) {
+    yield { delta: safety.block };
+    const [assistant] = await db
+      .insert(kbMessages)
+      .values({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: safety.block,
+        citations: [],
+        model: provider.chatModel,
+        latency_ms: Date.now() - started,
+      })
+      .returning({ id: kbMessages.id });
+    await logQuery({
+      conversationId, question, lang, roleLabel, scopeSet,
+      noAnswer: true, topSimilarity: null, citationCount: 0,
+      model: provider.chatModel,
+    });
+    return { conversationId, messageId: assistant!.id, citations: [], followUps: [], noAnswer: true, lang };
+  }
 
   // ─── No-answer path ─────────────────────────────────────────────────────
   if (noAnswer || chunks.length === 0) {
@@ -255,18 +357,66 @@ export async function* answerQuestion(
       model: provider.chatModel,
     });
 
-    return { conversationId, messageId: assistant!.id, citations: [], noAnswer: true, lang };
+    return { conversationId, messageId: assistant!.id, citations: [], followUps: [], noAnswer: true, lang };
   }
 
-  // ─── Grounded answer path ───────────────────────────────────────────────
+  // ─── Answer-cache check ─────────────────────────────────────────────────
+  //
+  // Same question + same scope set within the last few minutes returns
+  // the previously-computed answer. This pays for itself on any spike
+  // (notification linking to an FAQ, a class of students all asking
+  // the same starter). Cache key includes scope so we never serve a
+  // member's answer to a visitor or vice-versa.
+  const cached = getCachedAnswer(question, input.scopes, lang);
+  if (cached) {
+    yield { delta: cached.text };
+    const [assistant] = await db
+      .insert(kbMessages)
+      .values({
+        conversation_id: conversationId,
+        role: "assistant",
+        content: cached.text,
+        citations: cached.citations,
+        model: provider.chatModel,
+        latency_ms: Date.now() - started,
+      })
+      .returning({ id: kbMessages.id });
+    await logQuery({
+      conversationId, question, lang, roleLabel, scopeSet,
+      noAnswer: false, topSimilarity, citationCount: cached.citations.length,
+      model: provider.chatModel,
+    });
+    const followUpsCached = await suggestFollowUps({
+      question, answer: cached.text, lang,
+    });
+    return { conversationId, messageId: assistant!.id, citations: cached.citations, followUps: followUpsCached, noAnswer: false, lang };
+  }
+
+  // ─── Grounded answer path with tool calling ─────────────────────────────
+  //
+  // Build the grounded prompt from RAG sources, then let the model
+  // optionally invoke read-only tools (list_upcoming_events,
+  // my_registered_events, etc.) to ground answers in live data the
+  // ingested corpus may be stale on. Tool-call traffic is hidden — only
+  // the final text content reaches the user.
   const { messages, usedSources } = buildMessages({ question, lang, sources: chunks });
   const citations = toCitations(usedSources);
 
+  const toolCtx: ToolContext = { userId: input.userId ?? null, scopes: input.scopes };
+  const toolSchemas = toolSchemasFor(toolCtx);
+
+  // If toolSchemas is empty (somehow no tools visible) we still want
+  // the regular stream; provider falls back to generateStream internally.
   let answerText = "";
   let tokensIn: number | null = null;
   let tokensOut: number | null = null;
 
-  for await (const part of provider.generateStream(messages)) {
+  for await (const part of provider.generateStreamWithTools(
+    messages,
+    toolSchemas,
+    async (call) => executeTool(call.name, call.arguments, toolCtx),
+    { maxToolRounds: 3 },
+  )) {
     if (part.delta) {
       answerText += part.delta;
       yield { delta: part.delta };
@@ -276,6 +426,17 @@ export async function* answerQuestion(
       tokensOut = part.usage.out;
     }
   }
+
+  // Persist to answer cache for the next caller. Only real answers
+  // (non-empty, non-no-answer) — see cache.ts setCachedAnswer guards.
+  setCachedAnswer(question, input.scopes, lang, {
+    text: answerText,
+    citations,
+    noAnswer: false,
+  });
+  // Suppress an unused-variable warning if the model uses tools but
+  // doesn't visibly inspect this set; the schemas were already passed in.
+  void toolsForContext;
 
   const [assistant] = await db
     .insert(kbMessages)
@@ -303,5 +464,11 @@ export async function* answerQuestion(
     model: provider.chatModel,
   });
 
-  return { conversationId, messageId: assistant!.id, citations, noAnswer: false, lang };
+  // Follow-up suggestions: a cheap LLM call to generate 3 short
+  // related questions, rendered as clickable chips. Runs AFTER the
+  // main answer finished streaming so first-token latency is
+  // unaffected; the user reads while chips populate ~300 ms later.
+  const followUps = await suggestFollowUps({ question, answer: answerText, lang });
+
+  return { conversationId, messageId: assistant!.id, citations, followUps, noAnswer: false, lang };
 }

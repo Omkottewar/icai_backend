@@ -18,6 +18,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
 import { pragyaanConfig } from "./config.js";
 import { getProvider } from "./provider.js";
+import { getCachedEmbedding, setCachedEmbedding } from "./cache.js";
 import type { KbScope } from "./scope.js";
 
 /** One retrieved chunk with its parent-source metadata and similarity. */
@@ -45,8 +46,15 @@ export interface RetrievedChunk {
 }
 
 export interface RetrieveOptions {
-  /** Override the per-query fan-out (default PRAGYAAN_TOP_K). */
+  /** Override the final result size (default PRAGYAAN_TOP_K). */
   topK?: number;
+  /**
+   * Over-fetch candidate pool size for the reranker. Set to (e.g.) 20
+   * so the reranker has room to elevate items that ranked low in raw
+   * hybrid scoring but actually answer the question. Defaults to topK
+   * (no over-fetch — equivalent to the pre-rerank behavior).
+   */
+  fetchK?: number;
 }
 
 export interface RetrieveResult {
@@ -92,6 +100,7 @@ export async function retrieve(
   opts: RetrieveOptions = {},
 ): Promise<RetrieveResult> {
   const topK = opts.topK ?? pragyaanConfig.topK;
+  const fetchK = Math.max(opts.fetchK ?? topK, topK);
   const scopeList = [...scopes];
 
   // Fail-closed: no question or no allowed scope ⇒ nothing is retrievable.
@@ -100,7 +109,14 @@ export async function retrieve(
   }
 
   const provider = getProvider();
-  const qvec = await provider.embedQuery(question);
+  // Cache the query embedding — identical questions are common (a
+  // notification linking 50 users to the same FAQ, a popular starter
+  // re-fired). Saves an OpenAI embeddings round-trip and ~20ms.
+  let qvec = getCachedEmbedding(question);
+  if (!qvec) {
+    qvec = await provider.embedQuery(question);
+    if (qvec.length > 0) setCachedEmbedding(question, qvec);
+  }
   const qliteral = toVectorLiteral(qvec);
 
   // Build `ARRAY['public'::kb_scope, …]` with each scope bound as a parameter
@@ -113,11 +129,76 @@ export async function retrieve(
     sql`, `,
   );
 
-  // pgvector ANN search. The scope filter + governance gate run BEFORE the
-  // similarity ranking, so out-of-scope or ungated chunks never surface.
-  // `${qliteral}::vector` binds the literal and casts it; the scope filter is
-  // the per-element-cast `ARRAY[…]` built above.
+  // ── Hybrid search via Reciprocal Rank Fusion ──────────────────────
+  //
+  // Pure vector search misses proper-noun queries ("CA Karan Sharma",
+  // "Form 26AS") because rare tokens are under-represented in embedding
+  // training data. Pure keyword search misses semantic paraphrase
+  // ("how to register" vs "registration steps"). We combine both via
+  // RRF:
+  //
+  //   rrf_score(chunk) = Σ_searches 1 / (60 + rank_in_search)
+  //
+  // ...with the standard k=60 constant from the original paper.
+  //
+  // SHAPE: the two score-CTEs (vec_scores / fts_scores) carry ONLY the
+  // chunk id + numeric scoring columns — no uuid metadata. We GROUP BY
+  // id to sum per-branch RRF contributions (Postgres has no MAX(uuid),
+  // so dragging source_id through the aggregation would fail). The
+  // outer SELECT then JOINs back to kb_chunks + kb_sources once per
+  // surviving id to hydrate the metadata the caller actually needs.
+  //
+  // Each branch over-fetches 3× the requested fetchK so the fusion has
+  // overlap to elevate items that only one branch ranked well.
+  const fetchPerBranch = Math.max(fetchK * 3, 20);
+
   const rows = (await db.execute(sql`
+    WITH vec_scores AS (
+      SELECT
+        c.id,
+        1 - (c.embedding <=> ${qliteral}::vector) AS similarity,
+        ROW_NUMBER() OVER (ORDER BY c.embedding <=> ${qliteral}::vector) AS rnk
+      FROM kb_chunks c
+      JOIN kb_sources s ON s.id = c.source_id
+      WHERE c.scope = ANY(ARRAY[${scopeArray}])
+        AND c.embedding IS NOT NULL
+        AND s.status = 'indexed'
+        AND s.retired_at IS NULL
+        AND s.approved_at IS NOT NULL
+        AND (s.retention_expires_at IS NULL OR s.retention_expires_at > now())
+      ORDER BY c.embedding <=> ${qliteral}::vector
+      LIMIT ${fetchPerBranch}
+    ),
+    fts_scores AS (
+      SELECT
+        c.id,
+        ROW_NUMBER() OVER (
+          ORDER BY ts_rank_cd(to_tsvector('english', c.content), websearch_to_tsquery('english', ${question})) DESC
+        ) AS rnk
+      FROM kb_chunks c
+      JOIN kb_sources s ON s.id = c.source_id
+      WHERE c.scope = ANY(ARRAY[${scopeArray}])
+        AND to_tsvector('english', c.content) @@ websearch_to_tsquery('english', ${question})
+        AND s.status = 'indexed'
+        AND s.retired_at IS NULL
+        AND s.approved_at IS NOT NULL
+        AND (s.retention_expires_at IS NULL OR s.retention_expires_at > now())
+      ORDER BY ts_rank_cd(to_tsvector('english', c.content), websearch_to_tsquery('english', ${question})) DESC
+      LIMIT ${fetchPerBranch}
+    ),
+    combined AS (
+      SELECT id,
+             MAX(similarity)::float AS similarity,
+             SUM(rrf)::float        AS rrf_score
+      FROM (
+        SELECT id, similarity::float AS similarity, (1.0 / (60 + rnk))::float AS rrf
+        FROM vec_scores
+        UNION ALL
+        SELECT id, NULL::float       AS similarity, (1.0 / (60 + rnk))::float AS rrf
+        FROM fts_scores
+      ) x
+      GROUP BY id
+    )
     SELECT
       c.id,
       c.content,
@@ -128,17 +209,12 @@ export async function retrieve(
       s.url,
       s.origin_kind,
       s.origin_id,
-      1 - (c.embedding <=> ${qliteral}::vector) AS similarity
-    FROM kb_chunks c
+      COALESCE(combined.similarity, 0)::float AS similarity
+    FROM combined
+    JOIN kb_chunks  c ON c.id = combined.id
     JOIN kb_sources s ON s.id = c.source_id
-    WHERE c.scope = ANY(ARRAY[${scopeArray}])
-      AND c.embedding IS NOT NULL
-      AND s.status = 'indexed'
-      AND s.retired_at IS NULL
-      AND s.approved_at IS NOT NULL
-      AND (s.retention_expires_at IS NULL OR s.retention_expires_at > now())
-    ORDER BY c.embedding <=> ${qliteral}::vector
-    LIMIT ${topK}
+    ORDER BY combined.rrf_score DESC
+    LIMIT ${fetchK}
   `)) as unknown as Iterable<RetrievalRow>;
 
   const chunks: RetrievedChunk[] = [];
@@ -157,7 +233,14 @@ export async function retrieve(
     });
   }
 
-  const topSimilarity = chunks.length > 0 ? chunks[0]!.similarity : null;
+  // Top similarity is computed from the vector-search similarity (kept
+  // verbatim on each row for the no-answer gate). RRF reordering may
+  // surface a chunk with slightly lower cosine but stronger keyword
+  // match — that's fine for noAnswer purposes; what matters is whether
+  // SOMETHING relevant was found.
+  const topSimilarity = chunks.length > 0
+    ? chunks.reduce((m, c) => Math.max(m, c.similarity), 0)
+    : null;
   const noAnswer = topSimilarity == null || topSimilarity < pragyaanConfig.minSimilarity;
 
   return { chunks, topSimilarity, noAnswer };

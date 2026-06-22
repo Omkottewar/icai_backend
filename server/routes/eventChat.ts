@@ -451,19 +451,19 @@ eventChatRouter.get("/:id/chat/channels/:cid/messages", requireUser, async (req:
     const hydrated = (await hydrateMessages(rows as any)).map(stripIfDeleted);
     const ordered = hydrated.reverse();
 
-    // A5 — ETag derived from the newest created_at + row count. Same
-    // input → same tag, so the visibility-change refetch path gets a
-    // 304 and skips the body parse + hydration. Cache-Control kept
-    // `private` because the page is per-user-permission scoped.
-    const newest = ordered[ordered.length - 1];
-    const etag = `W/"${cid}:${ordered.length}:${newest?.created_at?.toISOString?.() ?? newest?.created_at ?? ""}"`;
-    if (req.headers["if-none-match"] === etag) {
-      res.status(304).end();
-      return;
-    }
-    res.set("ETag", etag);
-    res.set("Cache-Control", "private, max-age=10");
-
+    // No ETag / Cache-Control here. The previous ETag was keyed on
+    // (channel_id, row_count, newest_created_at) — none of which change
+    // when a reaction is added/removed, a message is edited, or a pin
+    // is toggled. That caused the periodic refresh to serve a 304 with
+    // stale state on top of the user's optimistic chip → the chip
+    // appeared to "snap back." A correct cache key would need to
+    // include max(reaction.created_at) + max(updated_at) + max(pinned_at),
+    // which is more SQL than the saved bandwidth is worth on a page
+    // that returns ~25 messages.
+    //
+    // Tell intermediaries explicitly not to cache so a misconfigured
+    // proxy doesn't reintroduce the same bug.
+    res.set("Cache-Control", "no-store");
     res.json({ messages: ordered });
   } catch (err) { handleApiError(err, res, next); }
 });

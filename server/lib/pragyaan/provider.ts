@@ -31,6 +31,26 @@ export interface GenerateChunk {
   usage?: { in: number; out: number };
 }
 
+/**
+ * Function-calling schema for an exposed tool. Shape mirrors OpenAI's
+ * Chat Completions `tools` parameter (one object per available function).
+ */
+export interface ToolSchema {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+}
+
+/**
+ * Callback the provider invokes when the model emits a tool call.
+ * Returns the JSON-stringified result that gets appended back to the
+ * conversation as a `role: "tool"` message.
+ */
+export type ToolExecutor = (call: { name: string; arguments: string }) => Promise<string>;
+
 export interface PragyaanProvider {
   /** Embed a batch of texts (e.g. chunks at ingest). Order preserved. */
   embedTexts(texts: string[]): Promise<number[][]>;
@@ -40,6 +60,23 @@ export interface PragyaanProvider {
   generateStream(
     messages: ChatMsg[],
     opts?: { maxTokens?: number },
+  ): AsyncIterable<GenerateChunk>;
+  /**
+   * Stream a chat completion that may invoke tools mid-conversation.
+   * The provider runs the tool-call loop internally: when the model
+   * requests one or more tools, the provider invokes `executor`,
+   * appends the results, and resumes generation. Only final
+   * `content` deltas are yielded — the caller doesn't see the
+   * intermediate tool-call traffic.
+   *
+   * Implementations may fall back to plain generateStream (no tool
+   * support) when `tools` is empty.
+   */
+  generateStreamWithTools(
+    messages: ChatMsg[],
+    tools: ToolSchema[],
+    executor: ToolExecutor,
+    opts?: { maxTokens?: number; maxToolRounds?: number },
   ): AsyncIterable<GenerateChunk>;
   /** Which driver is active. */
   readonly mode: "openai" | "dev-echo";
@@ -109,6 +146,124 @@ class OpenAIProvider implements PragyaanProvider {
       }
     }
   }
+
+  // Tool-calling agentic stream. Loops until the model produces a
+  // final text response or maxToolRounds is exhausted. Each round may
+  // contain multiple parallel tool calls; we execute them concurrently
+  // and append all results before the next round.
+  async *generateStreamWithTools(
+    messages: ChatMsg[],
+    tools: ToolSchema[],
+    executor: ToolExecutor,
+    opts?: { maxTokens?: number; maxToolRounds?: number },
+  ): AsyncIterable<GenerateChunk> {
+    if (tools.length === 0) {
+      yield* this.generateStream(messages, opts);
+      return;
+    }
+    const maxRounds = Math.max(1, opts?.maxToolRounds ?? 3);
+    // We mutate a working copy of the messages array — appending the
+    // assistant's tool_calls message and the role:tool replies before
+    // each next round.
+    const working: any[] = messages.map((m) => ({ ...m }));
+    let totalIn = 0;
+    let totalOut = 0;
+
+    for (let round = 0; round < maxRounds; round++) {
+      const stream = await this.client.chat.completions.create({
+        model: this.chatModel,
+        messages: working as any,
+        tools,
+        // Let the model decide whether a tool is needed.
+        tool_choice: "auto",
+        stream: true,
+        stream_options: { include_usage: true },
+        ...(opts?.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+      });
+
+      // Collect any tool_calls assembled across deltas. The streaming
+      // shape sends tool_call fragments keyed by index — same id may
+      // arrive in pieces.
+      interface ToolCallAcc {
+        id?: string;
+        name: string;
+        args: string;
+      }
+      const toolCalls = new Map<number, ToolCallAcc>();
+      let finishReason: string | null = null;
+      let sawContent = false;
+
+      for await (const part of stream) {
+        const choice = part.choices?.[0];
+        const delta = choice?.delta;
+
+        // Text deltas → yield to caller immediately (UX wants the
+        // tokens flowing). If the model is going to call a tool,
+        // OpenAI sends tool_calls separately and content stays empty.
+        if (delta?.content) {
+          sawContent = true;
+          yield { delta: delta.content };
+        }
+
+        // Tool-call accumulation across stream chunks.
+        const tcs = (delta as any)?.tool_calls;
+        if (Array.isArray(tcs)) {
+          for (const tc of tcs) {
+            const idx = typeof tc.index === "number" ? tc.index : 0;
+            const acc = toolCalls.get(idx) ?? { name: "", args: "" };
+            if (tc.id) acc.id = tc.id;
+            if (tc.function?.name) acc.name += tc.function.name;
+            if (tc.function?.arguments) acc.args += tc.function.arguments;
+            toolCalls.set(idx, acc);
+          }
+        }
+
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+        if (part.usage) {
+          totalIn += part.usage.prompt_tokens ?? 0;
+          totalOut += part.usage.completion_tokens ?? 0;
+        }
+      }
+
+      // No tool calls (and no need for another round) → emit usage + exit.
+      if (toolCalls.size === 0 || sawContent && finishReason !== "tool_calls") {
+        if (totalIn || totalOut) yield { usage: { in: totalIn, out: totalOut } };
+        return;
+      }
+
+      // Build the assistant message that recorded the tool_calls, then
+      // execute each tool and append the results.
+      const calls = [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+      working.push({
+        role: "assistant",
+        tool_calls: calls.map((c, i) => ({
+          id: c.id ?? `call_${round}_${i}`,
+          type: "function",
+          function: { name: c.name, arguments: c.args || "{}" },
+        })),
+        content: "",
+      });
+
+      const results = await Promise.all(
+        calls.map((c) => executor({ name: c.name, arguments: c.args || "{}" })),
+      );
+      results.forEach((res, i) => {
+        const c = calls[i]!;
+        working.push({
+          role: "tool",
+          tool_call_id: c.id ?? `call_${round}_${i}`,
+          content: res,
+        });
+      });
+      // Loop into the next round so the model can integrate tool
+      // output into its final answer.
+    }
+
+    // Ran out of rounds — emit a brief notice instead of an empty
+    // response so the user knows something happened.
+    yield { delta: "I gathered the data but couldn't compose a final answer in time. Please try rephrasing your question." };
+    if (totalIn || totalOut) yield { usage: { in: totalIn, out: totalOut } };
+  }
 }
 
 // ─── Dev-echo driver ──────────────────────────────────────────────────────────
@@ -136,6 +291,17 @@ class DevEchoProvider implements PragyaanProvider {
 
   async embedQuery(text: string): Promise<number[]> {
     return pseudoEmbedding(text, this.dimensions);
+  }
+
+  async *generateStreamWithTools(
+    messages: ChatMsg[],
+    _tools: ToolSchema[],
+    _executor: ToolExecutor,
+    _opts?: { maxTokens?: number; maxToolRounds?: number },
+  ): AsyncIterable<GenerateChunk> {
+    // Dev-echo doesn't follow function-calling instructions — fall
+    // through to the canned-quote response.
+    yield* this.generateStream(messages);
   }
 
   async *generateStream(messages: ChatMsg[]): AsyncIterable<GenerateChunk> {

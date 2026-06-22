@@ -514,7 +514,7 @@ export async function buildPublicDocs(): Promise<PublicDoc[]> {
         originKind: "event",
         originId: r.id,
         sourceType: "event_material",
-        url: `/events/${r.slug}`,
+        url: `/#/events/${r.slug}`,
       });
     }
   }
@@ -601,7 +601,7 @@ export async function buildPublicDocs(): Promise<PublicDoc[]> {
         originKind: "office_bearer",
         originId: r.id,
         sourceType: "internal_doc",
-        url: "/about",
+        url: "/#/about",
       });
     }
   }
@@ -815,8 +815,17 @@ function humanizeSlug(slug: string): string {
 
 // Map a public site slug to its on-site deep link (best-effort).
 function aboutOrHomeLink(slug: string): string {
-  if (slug.startsWith("about_")) return "/about";
-  return "/";
+  // Hash-routed SPA — paths without `/#/` get a server SPA-fallback that
+  // dumps the user on the home page. The about page is the closest
+  // useful landing for chairman/secretary/about-style slots; everything
+  // else (home_hero, etc.) doesn't have a dedicated detail page so we
+  // leave it pointing at the home route. The frontend Citations
+  // component additionally rebuilds URLs from origin_kind, so even
+  // older ingested rows with broken paths render to the right place.
+  if (slug.startsWith("about_") || slug.includes("chairman") || slug.includes("message")) {
+    return "/#/about";
+  }
+  return "/#/";
 }
 
 // site_content rows are keyed by a text slug, but kb_sources.origin_id is a

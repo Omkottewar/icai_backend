@@ -190,6 +190,7 @@ pragyaanRouter.post("/chat", optionalAuth, chatLimiter, async (req: AuthedReques
       conversationId: result.conversationId,
       messageId: result.messageId,
       citations: result.citations,
+      follow_ups: result.followUps,
       noAnswer: result.noAnswer,
       lang: result.lang,
     });
