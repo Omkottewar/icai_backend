@@ -101,12 +101,15 @@ mockTestsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
     const registration_close_at = req.body?.registration_close_at
       ? new Date(String(req.body.registration_close_at))
       : null;
+    // Online-attempt opt-in (migration 0047). Defaults to false so
+    // existing paper-at-venue tests don't surprise anyone.
+    const supports_online = !!req.body?.supports_online;
 
     const [row] = await db.insert(mockTests).values({
       title, level, scheduled_at, series_name, venue,
       group_no, paper_no, duration_mins, capacity, fee_paise,
       description, practice_paper_file_id, answer_key_file_id,
-      max_score, registration_close_at,
+      max_score, registration_close_at, supports_online,
       created_by: req.user?.id ?? null,
     }).returning();
     res.status(201).json({ item: row });
@@ -139,6 +142,7 @@ mockTestsAdminRouter.patch("/:id", async (req, res, next) => {
         ? new Date(String(req.body.registration_close_at))
         : null;
     }
+    if ("supports_online" in req.body) patch.supports_online = !!req.body.supports_online;
 
     const [row] = await db.update(mockTests)
       .set(patch as any)

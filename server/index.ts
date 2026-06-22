@@ -35,6 +35,7 @@ import { runNotificationHealthcheck } from "./lib/notifyHealthcheck.js";
 import { publicJobsRouter } from "./routes/jobs.js";
 import { membersRouter } from "./routes/members.js";
 import { mockTestsRouter } from "./routes/mockTests.js";
+import { mockTestAttemptsRouter } from "./routes/mockTestAttempts.js";
 import { notificationsRouter } from "./routes/notifications.js";
 import { pushRouter } from "./routes/push.js";
 import { checklistTasksRouter } from "./routes/checklistTasks.js";
@@ -89,6 +90,9 @@ app.use("/api/employer", employerRouter);
 app.use("/api/jobs", publicJobsRouter);
 app.use("/api/members", membersRouter);
 app.use("/api/mock-tests", mockTestsRouter);
+// Attempt lifecycle (start / save answer / submit / review). Mounted at
+// /api so the routes can use both /mock-tests/:id/attempt and /attempts/:id.
+app.use("/api", mockTestAttemptsRouter);
 app.use("/api/notifications", notificationsRouter);
 app.use("/api/push", pushRouter);
 app.use("/api/checklist-tasks", checklistTasksRouter);

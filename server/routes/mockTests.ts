@@ -51,6 +51,7 @@ function publicShape(
     // Answer key only shown after results are published — pre-publish
     // the file might be uploaded by WICASA but isn't ready to share.
     answer_key_url:     showKey ? (row.answer_key_url ?? null) : null,
+    supports_online:    !!row.supports_online,
   };
 }
 

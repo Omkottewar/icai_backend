@@ -16,6 +16,7 @@ import { refundsAdminRouter } from "./refunds.js";
 import { billsAdminRouter } from "./bills.js";
 import { iutTransfersAdminRouter } from "./iutTransfers.js";
 import { mockTestsAdminRouter } from "./mockTests.js";
+import { mockTestQuestionsAdminRouter } from "./mockTestQuestions.js";
 import { mentorshipAdminRouter } from "./mentorship.js";
 import { articleshipMatchesAdminRouter } from "./articleshipMatches.js";
 import { exportsAdminRouter } from "./exports.js";
@@ -48,6 +49,9 @@ adminRouter.use("/refunds", refundsAdminRouter);
 adminRouter.use("/bills", billsAdminRouter);
 adminRouter.use("/iut-transfers", iutTransfersAdminRouter);
 adminRouter.use("/mock-tests", mockTestsAdminRouter);
+// Question bank + attempts under the same prefix — separate router so the
+// nested resource files stay focused.
+adminRouter.use("/", mockTestQuestionsAdminRouter);
 adminRouter.use("/mentorship", mentorshipAdminRouter);
 adminRouter.use("/articleship-matches", articleshipMatchesAdminRouter);
 adminRouter.use("/exports", exportsAdminRouter);
