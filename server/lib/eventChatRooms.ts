@@ -26,6 +26,16 @@ export function joinRoom(eventId: EventId, ws: WebSocket, userId: string): void 
     room = new Set();
     ROOMS.set(eventId, room);
   }
+  // A user reconnecting before their old socket's 'close' fires would
+  // otherwise leave the stale member in the room. Drop any prior
+  // entries for this userId whose socket is already CLOSED/CLOSING —
+  // active duplicates (genuine multi-tab) are kept. Both presence
+  // (roomSize) and getOnlineUserIds rely on this to avoid double-counts.
+  for (const m of room) {
+    if (m.userId === userId && (m.ws.readyState === 2 /* CLOSING */ || m.ws.readyState === 3 /* CLOSED */)) {
+      room.delete(m);
+    }
+  }
   room.add({ ws, userId });
 }
 

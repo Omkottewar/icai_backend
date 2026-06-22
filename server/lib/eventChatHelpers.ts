@@ -28,18 +28,44 @@ import { getOnlineUserIds } from "./eventChatRooms.js";
 // memory footprint is bounded by active-user count, not total messages.
 
 const BUCKETS = new Map<string, number[]>();
+// Hard ceiling on distinct rate-limit keys held in memory. Each key is
+// (action:userId:eventId) — for a busy event with ~500 attendees and 4
+// actions that's ~2k keys, so the cap mostly catches abuse vectors that
+// craft unique keys. When we cross the cap we sweep buckets whose
+// newest tick is older than the longest window (60s) — i.e. inactive —
+// in insertion order until we're back under. Inserting an existing
+// active user just bumps their tick, so legitimate traffic survives.
+const BUCKETS_MAX = 10_000;
+const MAX_WINDOW_MS = 60_000;
+let lastSweepAt = 0;
+
+function sweepBucketsIfNeeded(now: number) {
+  if (BUCKETS.size < BUCKETS_MAX) return;
+  // Don't sweep more than once per second under sustained pressure —
+  // each sweep is O(n) over the map.
+  if (now - lastSweepAt < 1000) return;
+  lastSweepAt = now;
+  const inactiveCutoff = now - MAX_WINDOW_MS;
+  for (const [k, arr] of BUCKETS) {
+    if (arr.length === 0 || arr[arr.length - 1]! < inactiveCutoff) {
+      BUCKETS.delete(k);
+      if (BUCKETS.size < BUCKETS_MAX) break;
+    }
+  }
+}
 
 export interface RateLimit { max: number; windowMs: number; }
 
 export function checkRate(key: string, limit: RateLimit): { allowed: boolean; retryAfterMs: number } {
   const now = Date.now();
   const cutoff = now - limit.windowMs;
+  sweepBucketsIfNeeded(now);
   let arr = BUCKETS.get(key);
   if (!arr) { arr = []; BUCKETS.set(key, arr); }
   // Prune anything older than the window.
-  while (arr.length > 0 && arr[0] < cutoff) arr.shift();
+  while (arr.length > 0 && arr[0]! < cutoff) arr.shift();
   if (arr.length >= limit.max) {
-    return { allowed: false, retryAfterMs: arr[0] + limit.windowMs - now };
+    return { allowed: false, retryAfterMs: arr[0]! + limit.windowMs - now };
   }
   arr.push(now);
   return { allowed: true, retryAfterMs: 0 };
