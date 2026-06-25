@@ -1,0 +1,35 @@
+{
+  "_note": "Sample fixture — demonstrates a run end-to-end without a live database. Use with: python translate.py --source-file locales/en.sample.json --dry-run",
+
+  "chairman_message.quote": "The ICAI Nagpur Branch has been a pillar of **excellence** for Chartered Accountants across Central India. Our commitment to professional development is unwavering, and we continue to serve our members with dedication.",
+  "chairman_message.name": "CA Ramesh Sharma",
+  "chairman_message.role_line": "Chairman, Nagpur Branch · 2025–26",
+
+  "home_hero.tagline": "**Empowering** Chartered Accountants across Nagpur and Central India.",
+
+  "home_leadership_banner.eyebrow": "Leadership",
+  "home_leadership_banner.headline": "Dedicated to your professional growth",
+  "home_leadership_banner.body": "The Nagpur Branch of ICAI is committed to providing world-class facilities and resources to its members. We offer [reading rooms](https://icainagpur.org/rooms), regular seminars, and networking opportunities throughout the year.",
+
+  "home_branch_premises.body": "Our branch premises span modern infrastructure designed for learning and collaboration. Visit us at our Civil Lines office for the best CA study environment in Nagpur.",
+  "home_branch_premises.stats.0.k": "80 seats",
+  "home_branch_premises.stats.0.v": "READING ROOM",
+  "home_branch_premises.stats.1.k": "4,200+ titles",
+  "home_branch_premises.stats.1.v": "LIBRARY",
+
+  "_note_hero_stats": "k is the numeric figure (5000+, 8500+...) — not translatable. Only v (the label) is translated.",
+  "home_hero_stats.stats.0.v": "Members",
+  "home_hero_stats.stats.1.v": "Students",
+  "home_hero_stats.stats.2.v": "Events / yr",
+  "home_hero_stats.stats.3.v": "Established",
+
+  "about_vision.body": "To be the foremost Institute of Chartered Accountants committed to ethical conduct and excellence in accounting, finance, and allied professions.",
+
+  "about_mission.body": "To develop world-class Chartered Accountants in India through education, rigorous training, and continuous research, while upholding the highest standards of professional integrity.",
+
+  "about_history.body": "The Nagpur Branch of ICAI was established in **1952**. Since then, it has grown to become one of the largest and most active branches in Central India.\n\nOver the decades, the branch has produced thousands of Chartered Accountants who have made significant contributions to commerce, industry, and public service across the region.",
+
+  "settings.branch_address": "Plot No. 123, CA Road, Civil Lines, Nagpur – 440 001, Maharashtra",
+  "settings.branch_hours": "Mon–Sat: 10:30 AM – 6:00 PM",
+  "settings.footer_disclaimer": "© 2024 ICAI Nagpur Branch. All rights reserved. The Institute of Chartered Accountants of India."
+}

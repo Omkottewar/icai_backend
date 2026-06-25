@@ -1,0 +1,33 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Translation pipeline dependencies
+# Install inside the existing transenv (or a fresh venv).
+#
+# STEP 1 — PyTorch CPU build (must be installed FIRST with the whl URL):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# STEP 2 — remaining packages:
+#   pip install -r requirements-translate.txt
+# ──────────────────────────────────────────────────────────────────────────────
+
+# HuggingFace model runner
+transformers>=4.37.0
+# Required by IndicTrans2 custom tokeniser code
+sentencepiece>=0.1.99
+sacremoses>=0.1.1
+# Needed by transformers for mixed-precision / device_map helpers on some versions
+accelerate>=0.27.0
+
+# IndicTrans2 preprocessing toolkit (IndicProcessor)
+# Try PyPI first:
+IndicTransToolkit>=0.2.0
+# If PyPI fails:
+#   pip install git+https://github.com/VarunGumma/IndicTransToolkit.git
+
+# Sentence tokeniser (NLTK punkt — downloaded automatically on first run)
+nltk>=3.8.1
+
+# PostgreSQL driver
+psycopg2-binary>=2.9.9
+
+# Load .env file
+python-dotenv>=1.0.0

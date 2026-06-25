@@ -4,6 +4,7 @@ import { db } from "../../../db/client.js";
 import { announcements } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { scheduleTranslation } from "../../lib/runTranslate.js";
 
 export const announcementsAdminRouter = Router();
 
@@ -64,6 +65,7 @@ announcementsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
       ...parsed,
       created_by: req.user?.id ?? null,
     }).returning();
+    scheduleTranslation();
     res.json({ item: row });
   } catch (err) { handleApiError(err, res, next); }
 });
@@ -78,6 +80,7 @@ announcementsAdminRouter.patch("/:id", async (req, res, next) => {
       .where(eq(announcements.id, id))
       .returning();
     if (!row) throw new ApiError(404, "Announcement not found");
+    scheduleTranslation();
     res.json({ item: row });
   } catch (err) { handleApiError(err, res, next); }
 });
@@ -92,6 +95,7 @@ announcementsAdminRouter.delete("/:id", async (req, res, next) => {
       .where(and(eq(announcements.id, id), isNull(announcements.deleted_at)))
       .returning();
     if (!row) throw new ApiError(404, "Announcement not found");
+    scheduleTranslation();
     res.json({ ok: true });
   } catch (err) { handleApiError(err, res, next); }
 });

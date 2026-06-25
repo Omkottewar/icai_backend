@@ -4,10 +4,11 @@ import { siteContent, siteSettings } from "../../../schema/index.js";
 import { isValidSlug, isValidSettingKey, isValidCommitteeSlug } from "../../../lib/siteContentSlots.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
+import { scheduleTranslation } from "../../lib/runTranslate.js";
 
 export const siteAdminRouter = Router();
 
-// â”€â”€â”€ PUT /api/admin/site/content/:slug â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── PUT /api/admin/site/content/:slug ───────────────────────────────────────
 // Replaces the JSON payload for a single slot. Slug must match the fixed
 // enum in src/lib/siteContentSlots.ts; anything else 400s so typos in the
 // admin UI don't quietly create orphan rows.
@@ -34,13 +35,16 @@ siteAdminRouter.put("/content/:slug", async (req: AuthedRequest, res, next) => {
     })
     .returning();
 
+    // Kick off translation in the background — response is already sent.
+    scheduleTranslation();
+
     res.json(row);
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// â”€â”€â”€ PUT /api/admin/site/settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── PUT /api/admin/site/settings ────────────────────────────────────────────
 // Accepts a partial flat object and upserts each known key. Unknown keys
-// are silently ignored â€” never persisted â€” so the admin form can't seed
+// are silently ignored — never persisted — so the admin form can't seed
 // arbitrary key/value rows.
 siteAdminRouter.put("/settings", async (req: AuthedRequest, res, next) => {
   try {
@@ -75,11 +79,14 @@ siteAdminRouter.put("/settings", async (req: AuthedRequest, res, next) => {
       }
     });
 
+    // Kick off translation in the background — response is already sent.
+    scheduleTranslation();
+
     res.json({ updated: accepted.length });
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// â”€â”€â”€ GET /api/admin/site/content â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── GET /api/admin/site/content ─────────────────────────────────────────────
 // Same as the public read, but includes updated_by + updated_at metadata
 // the admin table needs. Admin auth already enforced by the parent router.
 siteAdminRouter.get("/content", async (_req, res, next) => {
@@ -89,7 +96,7 @@ siteAdminRouter.get("/content", async (_req, res, next) => {
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// â”€â”€â”€ GET /api/admin/site/settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── GET /api/admin/site/settings ────────────────────────────────────────────
 siteAdminRouter.get("/settings", async (_req, res, next) => {
   try {
     const rows = await db.select().from(siteSettings);
@@ -98,4 +105,3 @@ siteAdminRouter.get("/settings", async (_req, res, next) => {
     res.json(out);
   } catch (err) { handleApiError(err, res, next); }
 });
-
