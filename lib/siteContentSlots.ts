@@ -132,6 +132,19 @@ export const SITE_SLOTS = {
       { key: "view_all_label", label: "View-all link label (e.g. \"All resources →\")", kind: "text" },
     ],
   },
+  home_wicasa_card: {
+    label: "Home — WICASA student-wing card labels",
+    page:  "Home",
+    fields: [
+      { key: "eyebrow",             label: "Eyebrow (e.g. \"STUDENT WING\")",                kind: "text" },
+      { key: "title",               label: "Title (e.g. \"WICASA — Nagpur Branch\")",        kind: "text" },
+      { key: "body",                label: "Description paragraph",                          kind: "markdown" },
+      { key: "updates_heading",     label: "Updates list heading (e.g. \"New updates\")",    kind: "text" },
+      { key: "suggestions_heading", label: "Suggestions list heading",                       kind: "text" },
+      { key: "signin_hint",         label: "Sign-in hint shown to logged-out students",      kind: "text" },
+      { key: "resources_label",     label: "Bottom resources link label",                    kind: "text" },
+    ],
+  },
   about_vision: {
     label: "About — Vision",
     page:  "About",
