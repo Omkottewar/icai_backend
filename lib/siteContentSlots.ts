@@ -39,30 +39,30 @@ export const SITE_SLOTS = {
     ],
   },
   home_hero: {
-    label: "Home hero tagline",
+    label: "Home — Top tagline (under \"Nagpur Branch of ICAI\")",
     page:  "Home",
     fields: [
       { key: "tagline", label: "Tagline", kind: "markdown" },
     ],
   },
   home_hero_stats: {
-    label: "Home hero stats",
+    label: "Home — Stat cards (5,000+ Members / 8,500+ Students / etc.)",
     page:  "Home",
     fields: [
       { key: "stats", label: "Stats (4 cards)", kind: "stats", hint: "Label + value pairs — e.g. Members → 5,000+" },
     ],
   },
   home_leadership_banner: {
-    label: "Leadership banner",
+    label: "Home — \"Nurturing excellence\" hero (Established under the Chartered Accountants Act, 1949)",
     page:  "Home",
     fields: [
-      { key: "eyebrow",  label: "Eyebrow",  kind: "text" },
-      { key: "headline", label: "Headline", kind: "text", hint: "Line breaks render as <br>" },
-      { key: "body",     label: "Body",     kind: "markdown" },
+      { key: "eyebrow",  label: "Eyebrow (green text — e.g. \"ESTABLISHED UNDER THE CHARTERED ACCOUNTANTS ACT, 1949\")", kind: "text" },
+      { key: "headline", label: "Headline (large blue title — e.g. \"Nurturing excellence in professional services for Central India.\")", kind: "text", hint: "Line breaks render as <br>" },
+      { key: "body",     label: "Body (paragraph under the headline)", kind: "markdown" },
     ],
   },
   home_branch_premises: {
-    label: "Branch premises section",
+    label: "Home — Branch premises section (Reading room, Library stats)",
     page:  "Home",
     fields: [
       { key: "body",  label: "Description", kind: "markdown" },

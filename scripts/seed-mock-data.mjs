@@ -254,35 +254,68 @@ const EMPLOYER_NAMES = [
   "Central Engineering Works","Maharashtra Mineral Co.",
 ];
 
+// One row per (committee_code, title-template). Committee codes MUST match
+// the codes in seed-committees-nagpur.mjs / the seed_committee_leadership.py
+// script — bad codes silently fall through to a random committee and the
+// event ends up wearing the wrong jersey.
 const EVENT_TITLE_TEMPLATES = [
-  ["GST", "GST Annual Return — Practical Workshop"],
-  ["GST", "GSTR-9 / 9C — Reconciliation Deep Dive"],
-  ["GST", "Recent Notifications in GST & Departmental Notices"],
+  // GST Study Group
+  ["GST_SG", "GST Annual Return — Practical Workshop"],
+  ["GST_SG", "GSTR-9 / 9C — Reconciliation Deep Dive"],
+  ["GST_SG", "Recent Notifications in GST & Departmental Notices"],
   ["GST_SG", "GST Litigation — Best Practices & Case Studies"],
+  // Direct Tax Study Group
   ["DT_SG", "Income Tax Return — AY {fy} Walkthrough"],
   ["DT_SG", "Capital Gains under the New Tax Regime"],
   ["DT_SG", "Faceless Assessment — Practical Pitfalls"],
   ["DT_SG", "TDS / TCS Compliance Refresher"],
+  // Audit & Emerging Areas of Practice
   ["AUDIT_EAP", "Forensic Audit Masterclass with Live Case Studies"],
   ["AUDIT_EAP", "SA Updates — What Auditors Must Know"],
   ["AUDIT_EAP", "Internal Financial Controls — Documentation Essentials"],
   ["AUDIT_EAP", "Auditing Estimates & Going Concern — SA 540 & SA 570"],
+  // Committee on Information Technology
   ["CIT", "AI & Automation in CA Practice"],
   ["CIT", "Excel Power Query for the Practising CA"],
   ["CIT", "Data Analytics in Audit — Tools & Techniques"],
+  ["CIT", "Cybersecurity Essentials for CA Firms"],
+  // Study Group on BFSI
   ["BFSI_SG", "Bank Branch Audit — Closing & LFAR"],
   ["BFSI_SG", "Concurrent Audit of Banks — Hands-on Session"],
+  ["BFSI_SG", "NBFC Compliance & Auditor Responsibilities"],
+  // IBC Study Group
   ["IBC_SG", "Insolvency Resolution Process — Case Studies"],
+  ["IBC_SG", "Liquidation under IBC — Practical Aspects"],
+  ["IBC_SG", "Pre-pack Insolvency for MSMEs"],
+  // RERA Study Group
   ["RERA_SG", "RERA Compliance & Project Annual Audits"],
+  ["RERA_SG", "RERA Quarterly Filings — Walkthrough"],
+  ["RERA_SG", "Promoter Obligations & MahaRERA Order Studies"],
+  // Corporate Law Group
   ["CORP_LAW", "Companies Act — Recent Amendments & MCA Filings"],
   ["CORP_LAW", "Secretarial Standards & Board Practices"],
+  ["CORP_LAW", "FEMA & ODI Compliance for CAs"],
+  // Fellowship Committee
   ["FELLOWSHIP", "Members' Networking Meet & Cultural Evening"],
+  ["FELLOWSHIP", "Annual Members' Family Picnic"],
+  ["FELLOWSHIP", "CA Day Celebrations & Felicitation Ceremony"],
+  // Women Excellence & Young Members (WICASA)
   ["WICASA", "Mock Test Series — Group I & II"],
   ["WICASA", "Career Counseling for CA Students"],
   ["WICASA", "Articleship Orientation Programme"],
+  ["WICASA", "Women in CA — Panel Discussion & Networking"],
+  // Study Group on Cooperatives
   ["COOP_SG", "Co-operative Society Audit — Procedural Refresher"],
+  ["COOP_SG", "Urban Co-operative Bank Audit — Special Aspects"],
+  ["COOP_SG", "Co-operative Housing Society Compliance"],
+  // Study Group on Subsidies & Incentives
   ["SUBSIDIES_SG", "MSME Subsidies & Government Incentives Update"],
+  ["SUBSIDIES_SG", "PLI Scheme — Eligibility & Application Walkthrough"],
+  ["SUBSIDIES_SG", "State Industrial Policy — Practical Subsidy Filings"],
+  // Committee for Members in Industry & Business (CMIB)
   ["CMIB", "CA in Industry — Reporting Beyond Numbers"],
+  ["CMIB", "FP&A Essentials for the CA in Industry"],
+  ["CMIB", "Treasury & Working Capital Management Workshop"],
 ];
 
 const VENUES_IN_PERSON = [
