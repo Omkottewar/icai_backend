@@ -18,6 +18,9 @@ import type { Request, Response, NextFunction } from "express";
 // Hardcoded production frontend origins. Baked in so the backend works
 // without depending on Render env vars. Glob `*` is supported.
 const FRONTEND_ORIGINS = [
+  // Custom production domain — bare + www variants.
+  "https://icainagpur.in",
+  "https://www.icainagpur.in",
   // Vercel preview + production deploys for icai-frontend
   "https://icai-frontend-*-om-kottewars-projects.vercel.app",
   "https://icai-frontend.vercel.app",
