@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, integer, numeric, timestamp,
+  pgTable, uuid, text, integer, numeric, timestamp, boolean,
 } from "drizzle-orm/pg-core";
 import {
   eventAudienceEnum, eventModeEnum, eventStatusEnum,
@@ -27,6 +27,8 @@ export const events = pgTable("events", {
   ends_at:              timestamp("ends_at", { withTimezone: true }).notNull(),
   cpe_hours:            numeric("cpe_hours", { precision: 4, scale: 1 }).notNull().default("0"),
   fee_paise:            integer("fee_paise").notNull().default(0),
+  gst_applicable:       boolean("gst_applicable").notNull().default(false),
+  gst_percent:          numeric("gst_percent", { precision: 4, scale: 2 }).notNull().default("18.00"),
   capacity:             integer("capacity"),            // NULL = unlimited
   registered_count:     integer("registered_count").notNull().default(0),  // Fix #4 — atomic seat tracking
   status:               eventStatusEnum("status").notNull().default("draft"),

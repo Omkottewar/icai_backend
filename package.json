@@ -16,6 +16,10 @@
     "db:check": "drizzle-kit check",
     "storage:migrate": "node scripts/migrate-uploads-to-supabase.mjs",
     "storage:migrate:dry": "node scripts/migrate-uploads-to-supabase.mjs --dry-run",
+    "vapid:generate": "node scripts/generate-vapid.mjs",
+    "icai:import-directory": "tsx scripts/import-icai-directory.ts",
+    "seed:mock": "node scripts/seed-mock-data.mjs",
+    "seed:mock:clean": "node scripts/clean-mock-data.mjs",
     "pragyaan:ingest": "tsx scripts/ingest-public.mjs",
     "pragyaan:ingest:dry": "tsx scripts/ingest-public.mjs --dry-run"
   },
@@ -33,10 +37,12 @@
     "nodemailer": "^6.9.16",
     "openai": "^6.43.0",
     "pdf-parse": "^2.4.5",
+    "pdfkit": "^0.19.1",
     "postgres": "^3.4.5",
     "sharp": "^0.35.1",
     "web-push": "^3.6.7",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
@@ -45,6 +51,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.10.5",
     "@types/nodemailer": "^6.4.17",
+    "@types/pdfkit": "^0.17.6",
     "@types/web-push": "^3.6.4",
     "drizzle-kit": "^0.30.1",
     "tsx": "^4.19.2",

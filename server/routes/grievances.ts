@@ -30,6 +30,7 @@ import {
 } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { sendEmail } from "../lib/email.js";
+import { verifyRecaptcha } from "../lib/recaptcha.js";
 
 export const grievancesRouter = Router();
 
@@ -104,6 +105,18 @@ grievancesRouter.get("/subjects", async (_req, res, next) => {
 // Public form submission. Returns { ticket_no } on success.
 grievancesRouter.post("/", submissionLimiter, async (req, res, next) => {
   try {
+    // reCAPTCHA v3 — token is sent in the body as `recaptcha_token`. The
+    // verifier silently passes when no secret is configured (dev) and fails
+    // closed in production. action="grievance_submit" must match the frontend.
+    const captcha = await verifyRecaptcha(
+      typeof req.body?.recaptcha_token === "string" ? req.body.recaptcha_token : undefined,
+      "grievance_submit",
+      (req.ip ?? req.socket.remoteAddress) || undefined,
+    );
+    if (!captcha.ok) {
+      throw new ApiError(400, "Could not verify you are human. Please refresh and try again.");
+    }
+
     const name    = need(trim(req.body?.name),    "Name");
     const email   = need(trim(req.body?.email),   "Email").toLowerCase();
     const subject = need(trim(req.body?.subject), "Subject");

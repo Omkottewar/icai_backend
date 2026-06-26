@@ -38,6 +38,8 @@ import {
   annualReports,
   paperPresentations,
   officeBearers,
+  ejournalIssues,
+  icaiLinkCards,
   files,
 } from "../../../schema/index.js";
 import { storage } from "../storage.js";
@@ -361,6 +363,8 @@ export interface PublicDoc {
 
 // Site-content slots whose body is public, renderable prose worth indexing.
 // Image-only / roster slots (about_committee_members) carry no text.
+// The faq_* slots back the Pragyaan starter chips — every starter question
+// must have a matching Q&A here so the bot can ground its reply.
 const PUBLIC_SITE_SLOTS = new Set<string>([
   "chairman_message",
   "home_hero",
@@ -370,6 +374,10 @@ const PUBLIC_SITE_SLOTS = new Set<string>([
   "about_vision",
   "about_mission",
   "about_history",
+  "faq_branch_services",
+  "faq_for_members",
+  "faq_for_students",
+  "faq_for_employers",
 ]);
 
 /** Postgres "undefined_table" (relation does not exist) — table not present. */
@@ -606,7 +614,72 @@ export async function buildPublicDocs(): Promise<PublicDoc[]> {
     }
   }
 
+  // ── Committees (standalone reference docs) ────────────────────────────────
+  // The committee name is already joined onto events; this section ingests
+  // each active committee's charter/description as its own kb_source so the
+  // bot can answer "what does the Direct Tax Committee do?" without an event
+  // being involved. Inactive committees are skipped — past-only committees
+  // shouldn't surface in suggestions.
+  {
+    const rows = await db
+      .select({
+        id: committees.id,
+        code: committees.code,
+        name: committees.name,
+        description: committees.description,
+      })
+      .from(committees)
+      .where(eq(committees.active, true));
+    for (const r of rows) {
+      const text = [r.name, r.description ?? ""].filter(Boolean).join("\n\n").trim();
+      if (!text) continue;
+      docs.push({
+        title: `Committee — ${r.name}`,
+        text,
+        originKind: "committee",
+        originId: r.id,
+        sourceType: "internal_doc",
+        // No public detail page yet — the About page lists committees.
+        url: "/#/about",
+      });
+    }
+  }
+
+  // ── ICAI link cards (curated external deep-links) ─────────────────────────
+  // Quick-link cards on the Resources page pointing at icai.org / wirc-icai
+  // / GST portal / etc. The url field IS the citation target — the bot can
+  // say "see the ICAI CPE Portal [n]" with a real outbound link.
+  {
+    const rows = await db
+      .select({
+        id: icaiLinkCards.id,
+        category: icaiLinkCards.category,
+        title: icaiLinkCards.title,
+        description: icaiLinkCards.description,
+        url: icaiLinkCards.url,
+      })
+      .from(icaiLinkCards)
+      .where(eq(icaiLinkCards.active, true));
+    for (const r of rows) {
+      // Skip the mock seed rows so the bot doesn't cite them after launch.
+      if (/^\[MOCK\]/i.test(r.title)) continue;
+      const parts: string[] = [r.title];
+      if (r.category) parts.push(`Category: ${r.category}`);
+      if (r.description) parts.push("", r.description);
+      parts.push("", `Link: ${r.url}`);
+      docs.push({
+        title: r.title,
+        text: parts.join("\n"),
+        originKind: "icai_link",
+        originId: r.id,
+        sourceType: "url",
+        url: r.url,
+      });
+    }
+  }
+
   // ── PDF-backed resources: newsletters / annual reports / paper presentations
+  //    + e-journal issues
   await collectPdfDocs(docs);
 
   // ── Optional tables the spec mentions but that don't exist here yet
@@ -674,6 +747,41 @@ async function collectPdfDocs(docs: PublicDoc[]): Promise<void> {
         originId: r.id,
         sourceType: "internal_doc",
         url: fileLink(r.pdf_path),
+      });
+    }
+  }
+
+  // E-journal issues (quarterly publication) — only published, non-hidden
+  // rows are public. The editorial summary + PDF body get indexed; the
+  // citation deep-links to the in-app issue page (slug-routed).
+  {
+    const rows = await db
+      .select({
+        id: ejournalIssues.id,
+        slug: ejournalIssues.slug,
+        title: ejournalIssues.title,
+        issue_label: ejournalIssues.issue_label,
+        issue_year: ejournalIssues.issue_year,
+        editorial_summary: ejournalIssues.editorial_summary,
+        pdf_path: files.storage_path,
+      })
+      .from(ejournalIssues)
+      .leftJoin(files, eq(files.id, ejournalIssues.pdf_file_id))
+      .where(and(eq(ejournalIssues.status, "published"), eq(ejournalIssues.hidden, false)));
+    for (const r of rows) {
+      const pdfText = r.pdf_path ? await pdfTextFor(r.pdf_path) : "";
+      const parts: string[] = [r.title, `Issue: ${r.issue_label}`];
+      if (r.editorial_summary) parts.push("", r.editorial_summary);
+      if (pdfText) parts.push("", pdfText);
+      const text = parts.filter(Boolean).join("\n").trim();
+      if (!text) continue;
+      docs.push({
+        title: `${r.title} — ${r.issue_label}`,
+        text,
+        originKind: "ejournal_issue",
+        originId: r.id,
+        sourceType: "newsletter",
+        url: `/#/resources/journal/${r.slug}`,
       });
     }
   }
@@ -806,6 +914,11 @@ async function probeTable(
 // "about_history" → "About — History"; "home_hero" → "Home Hero". Used for
 // site_content doc titles.
 function humanizeSlug(slug: string): string {
+  if (slug.startsWith("faq_")) {
+    // faq_branch_services → "FAQ — Branch services"
+    const rest = slug.slice(4).replace(/_/g, " ");
+    return `FAQ — ${rest.charAt(0).toUpperCase()}${rest.slice(1)}`;
+  }
   const pretty = slug
     .split("_")
     .map((w) => (w ? w[0]!.toUpperCase() + w.slice(1) : w))

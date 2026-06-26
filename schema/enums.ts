@@ -38,6 +38,11 @@ export const checklistInstanceActionEnum = pgEnum("checklist_instance_action", [
   // 'rejected_final' — terminal reject that also cancels the linked event.
   // Added in migration 0026 alongside the /reject-final endpoint.
   "rejected_final",
+  // 'edited' — emitted by PUT /:id/questions when the instance's question
+  // list is modified. Added in migration 0054.
+  "edited",
+  // 'deleted' — soft-delete audit row. Added in migration 0057.
+  "deleted",
 ]);
 
 export const forumThreadTagEnum = pgEnum("forum_thread_tag", [

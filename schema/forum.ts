@@ -3,10 +3,12 @@ import { forumThreadTagEnum } from "./enums";
 import { users } from "./identity";
 import { events } from "./events";
 import { committees } from "./committees";
+import { mockTests } from "./mockTests";
 
 // ─── forum_threads ────────────────────────────────────────────────────────
-// Top of a discussion. Scoped to an event OR a committee (DB enforces the
-// CHECK constraint forum_threads_scope_check — at least one must be set).
+// Top of a discussion. Scoped to an event, a committee, OR a mock test
+// (DB enforces the CHECK constraint forum_threads_scope_check — at least
+// one must be set). See migration 0052.
 export const forumThreads = pgTable("forum_threads", {
   id:           uuid("id").primaryKey().defaultRandom(),
   title:        text("title").notNull(),
@@ -14,6 +16,7 @@ export const forumThreads = pgTable("forum_threads", {
   tag:          forumThreadTagEnum("tag").notNull().default("discussion"),
   event_id:     uuid("event_id").references(() => events.id, { onDelete: "set null" }),
   committee_id: uuid("committee_id").references(() => committees.id, { onDelete: "set null" }),
+  mock_test_id: uuid("mock_test_id").references(() => mockTests.id, { onDelete: "cascade" }),
   created_by:   uuid("created_by").notNull().references(() => users.id),
   created_at:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updated_at:   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -127,6 +130,11 @@ export const forumPosts = pgTable("forum_posts", {
   mention_user_ids: uuid("mention_user_ids").array().notNull().default([]),
   pinned_at:        timestamp("pinned_at", { withTimezone: true }),
   edited_at:        timestamp("edited_at", { withTimezone: true }),
+  // Q&A resolution marker — only meaningful on top-level posts in a
+  // channel.kind = 'qa' channel. NULL = open question, non-NULL = answered
+  // (with audit who/when). See migration 0051.
+  answered_at:      timestamp("answered_at", { withTimezone: true }),
+  answered_by:      uuid("answered_by").references(() => users.id, { onDelete: "set null" }),
   created_by:       uuid("created_by").notNull().references(() => users.id),
   created_at:       timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updated_at:       timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

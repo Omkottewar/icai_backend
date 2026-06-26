@@ -1,10 +1,11 @@
 import { Router } from "express";
-import { and, asc, desc, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, sql, lt, inArray } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { mockTests, mockTestRegistrations, files, studentProfiles } from "../../schema/index.js";
+import { mockTests, mockTestRegistrations, files, studentProfiles, forumThreads, forumPosts, users } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { ApiError, handleApiError, trim } from "../lib/apiError.js";
 import { storage } from "../lib/storage.js";
+import { loadUserPermissions } from "../auth/permissions.js";
 
 // Public + authenticated mock-test endpoints used by the student-facing
 // portal. The admin-side CRUD lives in routes/admin/mockTests.ts; here we
@@ -99,7 +100,7 @@ mockTestsRouter.get("/", async (req, res, next) => {
       const fileRows = await db
         .select({ id: files.id, storage_path: files.storage_path })
         .from(files)
-        .where(sql`${files.id} = ANY(${fileIds})`);
+        .where(inArray(files.id, fileIds));
       for (const f of fileRows) {
         fileMap.set(f.id, f.storage_path ? storage().url(f.storage_path) : null);
       }
@@ -107,15 +108,39 @@ mockTestsRouter.get("/", async (req, res, next) => {
 
     // Per-row registered count so the listing UI can show
     // "X / capacity registered" without N+1.
-    const regCountRows = rows.length === 0 ? [] : await db
+    //
+    // NOTE: We use `inArray()` (Drizzle helper) rather than a literal
+    // `sql\`col = ANY(${jsArray})\`` because the latter expands the JS
+    // array into a parenthesised comma list `($1, $2, ...)` which
+    // Postgres parses as a record / tuple, not an array — failing with
+    // 42809 "op ANY/ALL (array) requires array on right side". The
+    // `inArray` helper emits `col IN (...)` which is equivalent and safe.
+    const testIds = rows.map((r) => r.id);
+    const regCountRows = testIds.length === 0 ? [] : await db
       .select({
         mock_test_id: mockTestRegistrations.mock_test_id,
         n: sql<number>`count(*) filter (where status <> 'cancelled')::int`.as("n"),
       })
       .from(mockTestRegistrations)
-      .where(sql`${mockTestRegistrations.mock_test_id} = ANY(${rows.map((r) => r.id)})`)
+      .where(inArray(mockTestRegistrations.mock_test_id, testIds))
       .groupBy(mockTestRegistrations.mock_test_id);
     const regCount = new Map(regCountRows.map((r) => [r.mock_test_id, r.n]));
+
+    // Per-row discussion comment count — drives the "Discuss (N)" pill on
+    // the test card without an N+1 fetch when the listing renders.
+    const commentCountRows = testIds.length === 0 ? [] : await db
+      .select({
+        mock_test_id: forumThreads.mock_test_id,
+        n: sql<number>`count(${forumPosts.id}) filter (where ${forumPosts.deleted_at} is null)::int`.as("n"),
+      })
+      .from(forumThreads)
+      .leftJoin(forumPosts, eq(forumPosts.thread_id, forumThreads.id))
+      .where(and(
+        inArray(forumThreads.mock_test_id, testIds),
+        isNull(forumThreads.deleted_at),
+      ))
+      .groupBy(forumThreads.mock_test_id);
+    const commentCount = new Map(commentCountRows.map((r) => [r.mock_test_id, r.n]));
 
     res.json({
       rows: rows.map((r) => ({
@@ -125,6 +150,7 @@ mockTestsRouter.get("/", async (req, res, next) => {
           answer_key_url:     r.answer_key_file_id     ? fileMap.get(r.answer_key_file_id)     ?? null : null,
         }, { showAnswerKey: r.result_published_at != null }),
         registered_count: regCount.get(r.id) ?? 0,
+        comment_count:    commentCount.get(r.id) ?? 0,
       })),
     });
   } catch (err) { handleApiError(err, res, next); }
@@ -174,7 +200,7 @@ mockTestsRouter.get("/my", requireUser, async (req: AuthedRequest, res, next) =>
     if (keyFileIds.length > 0) {
       const keyRows = await db.select({ id: files.id, storage_path: files.storage_path })
         .from(files)
-        .where(sql`${files.id} = ANY(${keyFileIds})`);
+        .where(inArray(files.id, keyFileIds));
       for (const k of keyRows) {
         if (k.storage_path) keyMap.set(k.id, storage().url(k.storage_path));
       }
@@ -230,7 +256,7 @@ mockTestsRouter.get("/:id", async (req: AuthedRequest, res, next) => {
     if (fileIds.length > 0) {
       const fileRows = await db.select({ id: files.id, storage_path: files.storage_path })
         .from(files)
-        .where(sql`${files.id} = ANY(${fileIds})`);
+        .where(inArray(files.id, fileIds));
       for (const f of fileRows) {
         fileMap.set(f.id, f.storage_path ? storage().url(f.storage_path) : null);
       }
@@ -291,6 +317,14 @@ mockTestsRouter.post("/:id/register", requireUser, async (req: AuthedRequest, re
   try {
     const id = trim(req.params.id);
     if (!id) throw new ApiError(400, "Mock test id is required");
+
+    // Role gate — mock tests are a CA-student feature (catalogue §1.3).
+    // Members, employers and other roles cannot register. Admins are
+    // allowed through for testing / WICASA-side previews.
+    const role = req.user!.primary_role;
+    if (role !== "student" && role !== "admin") {
+      throw new ApiError(403, "Mock tests are available to CA students only");
+    }
 
     const result = await db.transaction(async (tx) => {
       const [row] = await tx.select().from(mockTests)
@@ -364,6 +398,164 @@ mockTestsRouter.delete("/:id/register", requireUser, async (req: AuthedRequest, 
       ))
       .returning();
     if (!updated) throw new ApiError(404, "You are not registered for this mock test");
+    res.json({ ok: true });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ════════════════════════════════════════════════════════════════════════
+//  DISCUSSION THREADS (per mock test)
+// ════════════════════════════════════════════════════════════════════════
+// One forum thread per mock_test (enforced by the partial UNIQUE index in
+// migration 0052), lazy-created on first POST. Anyone can read; logged-in
+// users can post; the author or a branch admin can soft-delete a post.
+
+const MAX_COMMENT_LEN = 2000;
+const COMMENTS_PAGE_SIZE = 30;
+
+async function getOrCreateThread(mockTestId: string, creatorId: string) {
+  const [existing] = await db
+    .select()
+    .from(forumThreads)
+    .where(and(
+      eq(forumThreads.mock_test_id, mockTestId),
+      isNull(forumThreads.deleted_at),
+    ))
+    .limit(1);
+  if (existing) return existing;
+
+  // Confirm the mock test actually exists (soft-deleted excluded) before
+  // we create a thread that points at it.
+  const [test] = await db
+    .select({ id: mockTests.id, title: mockTests.title })
+    .from(mockTests)
+    .where(and(eq(mockTests.id, mockTestId), isNull(mockTests.deleted_at)))
+    .limit(1);
+  if (!test) throw new ApiError(404, "Mock test not found");
+
+  const [row] = await db.insert(forumThreads).values({
+    title:        `Discussion: ${test.title}`,
+    body:         "Auto-created discussion thread for this mock test.",
+    tag:          "discussion",
+    mock_test_id: mockTestId,
+    created_by:   creatorId,
+  }).returning();
+  return row;
+}
+
+// ─── GET /api/mock-tests/:id/thread ──────────────────────────────────────
+// Returns the comment list for a mock test. Public — anyone can read.
+// `before` (ISO timestamp) paginates older. Caps at COMMENTS_PAGE_SIZE per
+// page so a runaway thread doesn't blow the response budget.
+mockTestsRouter.get("/:id/thread", async (req, res, next) => {
+  try {
+    const id = trim(req.params.id);
+    if (!id) throw new ApiError(400, "Mock test id is required");
+
+    const [thread] = await db
+      .select()
+      .from(forumThreads)
+      .where(and(
+        eq(forumThreads.mock_test_id, id),
+        isNull(forumThreads.deleted_at),
+      ))
+      .limit(1);
+
+    if (!thread) {
+      // No thread yet — empty payload, not a 404. Lets the UI render the
+      // composer without an extra round-trip after the first comment.
+      return res.json({ thread: null, posts: [], has_more: false });
+    }
+
+    const before = trim(req.query.before);
+    const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize) || COMMENTS_PAGE_SIZE));
+    const conds = [
+      eq(forumPosts.thread_id, thread.id),
+      isNull(forumPosts.deleted_at),
+    ];
+    if (before) {
+      const beforeDate = new Date(before);
+      if (Number.isNaN(beforeDate.getTime())) throw new ApiError(400, "before must be an ISO timestamp");
+      conds.push(lt(forumPosts.created_at, beforeDate));
+    }
+
+    const rows = await db
+      .select({
+        id:          forumPosts.id,
+        body:        forumPosts.body,
+        created_by:  forumPosts.created_by,
+        created_at:  forumPosts.created_at,
+        edited_at:   forumPosts.edited_at,
+        author_name: users.name,
+      })
+      .from(forumPosts)
+      .innerJoin(users, eq(users.id, forumPosts.created_by))
+      .where(and(...conds))
+      .orderBy(desc(forumPosts.created_at))
+      .limit(pageSize + 1);
+
+    const has_more = rows.length > pageSize;
+    const posts = (has_more ? rows.slice(0, pageSize) : rows).reverse();
+
+    res.json({ thread: { id: thread.id, created_at: thread.created_at }, posts, has_more });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/mock-tests/:id/thread/posts ───────────────────────────────
+// Add a comment. Login required. Lazy-creates the thread.
+mockTestsRouter.post("/:id/thread/posts", requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const id = trim(req.params.id);
+    if (!id) throw new ApiError(400, "Mock test id is required");
+    const body = trim(req.body?.body);
+    if (!body) throw new ApiError(400, "Comment body is required");
+    if (body.length > MAX_COMMENT_LEN) {
+      throw new ApiError(400, `Comment exceeds ${MAX_COMMENT_LEN} characters`);
+    }
+
+    const thread = await getOrCreateThread(id, req.user!.id);
+    const [row] = await db.insert(forumPosts).values({
+      thread_id:  thread.id,
+      body,
+      created_by: req.user!.id,
+    }).returning();
+
+    res.status(201).json({
+      post: {
+        id:          row.id,
+        body:        row.body,
+        created_by:  row.created_by,
+        created_at:  row.created_at,
+        edited_at:   row.edited_at,
+        author_name: req.user!.name,
+      },
+    });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── DELETE /api/mock-tests/thread/posts/:postId ─────────────────────────
+// Soft-delete a comment. Author or admin only.
+mockTestsRouter.delete("/thread/posts/:postId", requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const postId = trim(req.params.postId);
+    if (!postId) throw new ApiError(400, "Post id is required");
+
+    const [post] = await db
+      .select({ id: forumPosts.id, created_by: forumPosts.created_by, deleted_at: forumPosts.deleted_at })
+      .from(forumPosts)
+      .where(eq(forumPosts.id, postId))
+      .limit(1);
+    if (!post || post.deleted_at) throw new ApiError(404, "Comment not found");
+
+    if (post.created_by !== req.user!.id) {
+      const perms = await loadUserPermissions(req.user!.id);
+      if (!perms.isAdmin && !perms.isBranchChairman) {
+        throw new ApiError(403, "You can only delete your own comments");
+      }
+    }
+
+    await db.update(forumPosts)
+      .set({ deleted_at: new Date(), updated_at: new Date() })
+      .where(eq(forumPosts.id, postId));
     res.json({ ok: true });
   } catch (err) { handleApiError(err, res, next); }
 });

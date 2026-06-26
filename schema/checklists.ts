@@ -85,15 +85,43 @@ export const checklistInstances = pgTable("checklist_instances", {
   fillIdx:     index("idx_checklist_instances_fill_user").on(t.assigned_fill_user_id),
 }));
 
-export const checklistInstanceResponses = pgTable("checklist_instance_responses", {
-  id:          uuid("id").primaryKey().defaultRandom(),
-  instance_id: uuid("instance_id").notNull().references(() => checklistInstances.id, { onDelete: "cascade" }),
-  question_id: uuid("question_id").notNull().references(() => checklistTemplateQuestions.id, { onDelete: "cascade" }),
-  value:       jsonb("value"),
-  created_at:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updated_at:  timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+// ─── Per-instance questions (migration 0053) ────────────────────────────────
+// Each instance gets its own private copy of the question list at creation
+// time (cloned from the template). Branch staff can then add / remove /
+// re-order / edit questions on this specific instance without affecting the
+// template or any other instance. `source_template_question_id` preserves
+// the lineage for the legacy backfill and lets the UI tag template-sourced
+// items vs event-specific additions.
+export const checklistInstanceQuestions = pgTable("checklist_instance_questions", {
+  id:                          uuid("id").primaryKey().defaultRandom(),
+  instance_id:                 uuid("instance_id").notNull().references(() => checklistInstances.id, { onDelete: "cascade" }),
+  sort_order:                  integer("sort_order").notNull().default(0),
+  type:                        checklistQuestionTypeEnum("type").notNull(),
+  label:                       text("label").notNull(),
+  help_text:                   text("help_text"),
+  required:                    boolean("required").notNull().default(true),
+  config:                      jsonb("config").notNull().default({}),
+  section_owner_role:          text("section_owner_role"),
+  source_template_question_id: uuid("source_template_question_id").references(() => checklistTemplateQuestions.id, { onDelete: "set null" }),
+  created_at:                  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at:                  timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
-  instanceQuestionIdx: uniqueIndex("ux_checklist_responses_instance_question").on(t.instance_id, t.question_id),
+  instanceSortIdx: index("idx_checklist_instance_questions_instance_sort").on(t.instance_id, t.sort_order),
+}));
+
+export const checklistInstanceResponses = pgTable("checklist_instance_responses", {
+  id:                   uuid("id").primaryKey().defaultRandom(),
+  instance_id:          uuid("instance_id").notNull().references(() => checklistInstances.id, { onDelete: "cascade" }),
+  // Legacy column — kept nullable for backward compat during the transition
+  // to per-instance questions. New code paths write only instance_question_id.
+  question_id:          uuid("question_id").references(() => checklistTemplateQuestions.id, { onDelete: "cascade" }),
+  instance_question_id: uuid("instance_question_id").references(() => checklistInstanceQuestions.id, { onDelete: "cascade" }),
+  value:                jsonb("value"),
+  created_at:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at:           timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  instanceQuestionIdx:  uniqueIndex("ux_checklist_responses_instance_question").on(t.instance_id, t.question_id),
+  instanceIQuestionIdx: uniqueIndex("ux_checklist_responses_instance_iquestion").on(t.instance_id, t.instance_question_id),
 }));
 
 // ─── Per-section filler assignments (migration 0035) ────────────────────────
@@ -103,16 +131,19 @@ export const checklistInstanceResponses = pgTable("checklist_instance_responses"
 // and can edit every section regardless — these rows ADD edit rights for
 // specific sections, they don't restrict the chairman.
 export const checklistInstanceSectionAssignments = pgTable("checklist_instance_section_assignments", {
-  id:                   uuid("id").primaryKey().defaultRandom(),
-  instance_id:          uuid("instance_id").notNull().references(() => checklistInstances.id, { onDelete: "cascade" }),
-  section_question_id:  uuid("section_question_id").notNull().references(() => checklistTemplateQuestions.id, { onDelete: "cascade" }),
-  assignee_id:          uuid("assignee_id").references(() => users.id, { onDelete: "set null" }),
-  created_at:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updated_at:           timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  id:                           uuid("id").primaryKey().defaultRandom(),
+  instance_id:                  uuid("instance_id").notNull().references(() => checklistInstances.id, { onDelete: "cascade" }),
+  // Legacy column — kept nullable for backward compat with migration 0053.
+  section_question_id:          uuid("section_question_id").references(() => checklistTemplateQuestions.id, { onDelete: "cascade" }),
+  instance_section_question_id: uuid("instance_section_question_id").references(() => checklistInstanceQuestions.id, { onDelete: "cascade" }),
+  assignee_id:                  uuid("assignee_id").references(() => users.id, { onDelete: "set null" }),
+  created_at:                   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updated_at:                   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
-  instanceSectionIdx: uniqueIndex("ux_checklist_section_assignments_instance_section").on(t.instance_id, t.section_question_id),
-  instanceIdx:        index("idx_checklist_section_assignments_instance").on(t.instance_id),
-  assigneeIdx:        index("idx_checklist_section_assignments_assignee").on(t.assignee_id),
+  instanceSectionIdx:  uniqueIndex("ux_checklist_section_assignments_instance_section").on(t.instance_id, t.section_question_id),
+  instanceISectionIdx: uniqueIndex("ux_checklist_section_assignments_instance_isection").on(t.instance_id, t.instance_section_question_id),
+  instanceIdx:         index("idx_checklist_section_assignments_instance").on(t.instance_id),
+  assigneeIdx:         index("idx_checklist_section_assignments_assignee").on(t.assignee_id),
 }));
 
 export const checklistInstanceReviews = pgTable("checklist_instance_reviews", {

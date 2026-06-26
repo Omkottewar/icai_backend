@@ -43,6 +43,14 @@ usersAdminRouter.get("/", async (req, res, next) => {
     const q = trim(req.query.q);
     const status = trim(req.query.status);
     const primary_role = trim(req.query.primary_role);
+    // Comma-separated list of role codes (e.g. "mcm,committee_chairman,branch_chairman").
+    // When supplied, restrict the result to users who currently hold ANY of
+    // those roles via `user_role_assignments`. Used by the checklist filler
+    // picker to keep the dropdown limited to MCM-eligible people.
+    const role_codes = trim(req.query.role_codes)
+      .split(",")
+      .map((c) => c.trim())
+      .filter((c) => c.length > 0);
     const page = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize) || 25));
     const offset = (page - 1) * pageSize;
@@ -52,6 +60,22 @@ usersAdminRouter.get("/", async (req, res, next) => {
     if (primary_role && PRIMARY_ROLES.includes(primary_role as any)) conds.push(eq(users.primary_role, primary_role as any));
     if (q) {
       conds.push(or(ilike(users.name, `%${q}%`), ilike(users.email, `%${q}%`))!);
+    }
+    if (role_codes.length > 0) {
+      // EXISTS subquery — restrict to users with at least one active
+      // assignment to any of the requested role codes. We expand the JS
+      // string array via sql.join into a comma-separated IN-list because
+      // Drizzle's raw `${jsArray}` interpolation produces a parenthesised
+      // tuple which Postgres rejects as the right-hand side of ANY().
+      const codeList = sql.join(role_codes.map((c) => sql`${c}`), sql`, `);
+      conds.push(sql`EXISTS (
+        SELECT 1
+        FROM ${userRoleAssignments} ura
+        INNER JOIN ${roles} r ON r.id = ura.role_id
+        WHERE ura.user_id = ${users.id}
+          AND r.code IN (${codeList})
+          AND (ura.effective_to IS NULL OR ura.effective_to >= CURRENT_DATE)
+      )`);
     }
 
     const rows = await db

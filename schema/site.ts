@@ -1,5 +1,6 @@
 import { pgTable, text, jsonb, uuid, timestamp, integer, index } from "drizzle-orm/pg-core";
 import { users, branches } from "./identity";
+import { files } from "./files";
 
 // ─── Site Content ─────────────────────────────────────────────────────────────
 // Named editorial slots keyed by a small fixed slug. The `data` JSON shape
@@ -44,7 +45,8 @@ export const announcements = pgTable(
     branch_id:     uuid("branch_id").references(() => branches.id, { onDelete: "cascade" }),
     title:         text("title").notNull(),
     body:          text("body"),               // optional long-form for detail view
-    link_url:      text("link_url"),           // optional CTA url
+    link_url:      text("link_url"),           // optional external CTA url (used when no file is attached)
+    file_id:       uuid("file_id").references(() => files.id, { onDelete: "set null" }),  // optional uploaded attachment (PDF)
     audience:      text("audience").notNull().default("all"),  // 'all' | 'members' | 'students' | 'employers'
     starts_at:     timestamp("starts_at", { withTimezone: true }).notNull().defaultNow(),
     ends_at:       timestamp("ends_at", { withTimezone: true }),

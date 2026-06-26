@@ -1,9 +1,13 @@
 import { Router } from "express";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { db } from "../../../db/client.js";
-import { announcements } from "../../../schema/index.js";
+import { announcements, files } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { storage } from "../../lib/storage.js";
+
+const fileUrl = (path: string | null | undefined) =>
+  path ? storage().url(path) : null;
 
 export const announcementsAdminRouter = Router();
 
@@ -25,6 +29,10 @@ function parseBody(input: any) {
   if (link_url && !/^https?:\/\//i.test(link_url)) {
     throw new ApiError(400, "Link URL must start with http:// or https://");
   }
+  // Optional FK into the files table. Caller uploads via /api/admin/files
+  // first, then passes the returned id here. Pass empty string / null to
+  // clear an existing attachment.
+  const file_id  = trim(input.file_id)  || null;
 
   const audience = AUDIENCES.includes(input.audience) ? input.audience : "all";
   const starts_at = parseDate(input.starts_at) ?? new Date();
@@ -37,7 +45,27 @@ function parseBody(input: any) {
     ? Math.trunc(Number(input.display_order))
     : 0;
 
-  return { title, body, link_url, audience, starts_at, ends_at, display_order };
+  return { title, body, link_url, file_id, audience, starts_at, ends_at, display_order };
+}
+
+// Enrich an announcement row with the resolved file URL. Used in both the
+// list response and the single create/update returns so the admin UI can
+// preview the existing attachment.
+async function withFileUrl<T extends { file_id: string | null }>(row: T): Promise<T & { file_url: string | null; file_name: string | null; file_mime_type: string | null }> {
+  if (!row.file_id) {
+    return { ...row, file_url: null, file_name: null, file_mime_type: null };
+  }
+  const [f] = await db
+    .select({ storage_path: files.storage_path, name: files.name, mime_type: files.mime_type })
+    .from(files)
+    .where(eq(files.id, row.file_id))
+    .limit(1);
+  return {
+    ...row,
+    file_url: fileUrl(f?.storage_path) ?? null,
+    file_name: f?.name ?? null,
+    file_mime_type: f?.mime_type ?? null,
+  };
 }
 
 // ─── GET /api/admin/announcements ─────────────────────────────────────────
@@ -52,7 +80,10 @@ announcementsAdminRouter.get("/", async (req, res, next) => {
       .where(includeDeleted ? undefined as any : isNull(announcements.deleted_at))
       .orderBy(desc(announcements.created_at))
       .limit(500);
-    res.json({ items: rows });
+    // Resolve file_id → public URL for each row so the admin list can show
+    // the attached filename / open the existing PDF inline.
+    const items = await Promise.all(rows.map(withFileUrl));
+    res.json({ items });
   } catch (err) { next(err); }
 });
 
@@ -64,7 +95,7 @@ announcementsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
       ...parsed,
       created_by: req.user?.id ?? null,
     }).returning();
-    res.json({ item: row });
+    res.json({ item: await withFileUrl(row) });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -78,7 +109,7 @@ announcementsAdminRouter.patch("/:id", async (req, res, next) => {
       .where(eq(announcements.id, id))
       .returning();
     if (!row) throw new ApiError(404, "Announcement not found");
-    res.json({ item: row });
+    res.json({ item: await withFileUrl(row) });
   } catch (err) { handleApiError(err, res, next); }
 });
 

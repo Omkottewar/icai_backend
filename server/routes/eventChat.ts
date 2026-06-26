@@ -242,6 +242,8 @@ function messageColumns() {
     mention_user_ids: forumPosts.mention_user_ids,
     pinned_at:        forumPosts.pinned_at,
     edited_at:        forumPosts.edited_at,
+    answered_at:      forumPosts.answered_at,
+    answered_by:      forumPosts.answered_by,
     deleted_at:       forumPosts.deleted_at,
     created_by:       forumPosts.created_by,
     author_name:      users.name,
@@ -255,10 +257,11 @@ function messageColumns() {
 async function loadMessageForMutation(eventId: string, messageId: string, userId: string, requireModerator: boolean) {
   const [row] = await db
     .select({
-      id:         forumPosts.id,
-      channel_id: forumPosts.channel_id,
-      created_by: forumPosts.created_by,
-      body:       forumPosts.body,
+      id:             forumPosts.id,
+      channel_id:     forumPosts.channel_id,
+      parent_post_id: forumPosts.parent_post_id,
+      created_by:     forumPosts.created_by,
+      body:           forumPosts.body,
     })
     .from(forumPosts)
     .where(and(
@@ -285,6 +288,7 @@ async function loadEventMeta(eventId: string) {
     .select({
       id:               events.id,
       title:            events.title,
+      starts_at:        events.starts_at,
       registered_count: events.registered_count,
     })
     .from(events)
@@ -292,6 +296,32 @@ async function loadEventMeta(eventId: string) {
     .limit(1);
   if (!row) throw new ApiError(404, "Event not found");
   return row;
+}
+
+// Pre-event visibility rule: the #general free-chat channel is hidden from
+// non-moderator attendees until the event starts. Q&A and announcements
+// stay visible, so the only pre-event surface members see is the moderated
+// Q&A — which matches the catalogue §1.2 promise ("submit questions to the
+// speaker before the event begins") and prevents two near-identical chat
+// surfaces from competing for activity. After event start, both #general
+// and #qa are open. Moderators (admin / branch chairman / chairing
+// committee chairman / magic-link speaker) see #general at all times so
+// they can set context, pin announcements, etc.
+function filterChannelsForViewer<T extends { kind: string }>(
+  channels: T[],
+  event: { starts_at: Date },
+  canModerate: boolean,
+): T[] {
+  if (canModerate) return channels;
+  if (event.starts_at <= new Date()) return channels;
+  return channels.filter((c) => c.kind !== "general");
+}
+
+// Quick predicate — true if the caller is a moderator. Doesn't throw, so
+// safe to use as a branch condition without try/catch.
+async function isModerator(userId: string, eventId: string): Promise<boolean> {
+  try { await assertCanModerate(userId, eventId); return true; }
+  catch { return false; }
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -311,8 +341,15 @@ eventChatRouter.get("/:id/chat", requireUser, async (req: AuthedRequest, res, ne
     const event = await loadEventMeta(eventId);
     await assertRegistered(req.user!.id, eventId);
 
-    const channels = await ensureChannelsForEvent(eventId);
-    const defaultChannel = channels.find((c) => c.kind === "general") ?? channels[0];
+    const allChannels = await ensureChannelsForEvent(eventId);
+    const canMod = await isModerator(req.user!.id, eventId);
+    const channels = filterChannelsForViewer(allChannels, event, canMod);
+    // Default channel = #general if visible (post-event or moderator),
+    // otherwise #qa (pre-event member case), otherwise first available.
+    const defaultChannel =
+      channels.find((c) => c.kind === "general")
+      ?? channels.find((c) => c.kind === "qa")
+      ?? channels[0];
 
     // Last-read map + per-channel last-message timestamp + unread count.
     const reads = await db
@@ -375,12 +412,15 @@ eventChatRouter.get("/:id/chat", requireUser, async (req: AuthedRequest, res, ne
     // set) so the "this message was deleted" marker persists across reloads.
     const newestMsgsRaw = allChannelIds.length === 0 ? [] : await db.execute(sql`
       SELECT id, channel_id, parent_post_id, body, attachments, mention_user_ids,
-             pinned_at, edited_at, deleted_at, created_by, created_at, client_id, author_name
+             pinned_at, edited_at, answered_at, answered_by, deleted_at,
+             created_by, created_at, client_id, author_name
       FROM (
         SELECT p.id, p.channel_id, p.parent_post_id,
                CASE WHEN p.deleted_at IS NULL THEN p.body ELSE '' END AS body,
                CASE WHEN p.deleted_at IS NULL THEN p.attachments ELSE '[]'::jsonb END AS attachments,
-               p.mention_user_ids, p.pinned_at, p.edited_at, p.deleted_at, p.created_by,
+               p.mention_user_ids, p.pinned_at, p.edited_at,
+               p.answered_at, p.answered_by,
+               p.deleted_at, p.created_by,
                p.created_at, p.client_id,
                u.name AS author_name,
                row_number() OVER (PARTITION BY p.channel_id ORDER BY p.created_at DESC) AS rn
@@ -536,6 +576,20 @@ eventChatRouter.post("/:id/chat/channels/:cid/messages", requireUser, async (req
       const perms = await loadUserPermissions(req.user!.id);
       if (!perms.codes.has(channel.post_role_required) && !perms.isAdmin) {
         throw new ApiError(403, `Only ${channel.post_role_required} can post here`);
+      }
+    }
+    // Q&A semantics — keep #qa as a question forum, not a debate channel.
+    // Top-level posts (a question) are open to any registered user.
+    // Replies (an answer) are restricted to moderators (admin / branch
+    // chairman / committee chairman of this event's committee) and to
+    // speakers, who get a magic-link login that grants moderation on
+    // their event only (catalogue §4 lightweight access pattern).
+    if (channel.kind === "qa" && parent_post_id) {
+      try { await assertCanModerate(req.user!.id, eventId); }
+      catch {
+        throw new ApiError(403,
+          "Only the speaker or branch organisers can answer questions in this channel. " +
+          "Members can react to questions to upvote them.");
       }
     }
 
@@ -853,6 +907,52 @@ async function pinHandler(req: AuthedRequest, res: any, next: any, pin: boolean)
 }
 eventChatRouter.post("/:id/chat/messages/:mid/pin", requireUser, (req, res, next) => pinHandler(req as AuthedRequest, res, next, true));
 eventChatRouter.post("/:id/chat/messages/:mid/unpin", requireUser, (req, res, next) => pinHandler(req as AuthedRequest, res, next, false));
+
+// ─── POST /api/events/:id/chat/messages/:mid/answered (and /unanswered) ─
+// Mark a top-level Q&A question as resolved / re-open it. Only meaningful
+// for posts in channel.kind = 'qa'. Restricted to moderators (admin /
+// branch chairman / chairing-committee chairman) — speakers landing via
+// magic-link inherit moderation on their event only.
+async function answeredHandler(req: AuthedRequest, res: any, next: any, mark: boolean) {
+  try {
+    const eventId = need(trim(req.params.id), "Event ID");
+    const mid = need(trim(req.params.mid), "Message ID");
+    await assertRegistered(req.user!.id, eventId);
+    const msg = await loadMessageForMutation(eventId, mid, req.user!.id, /* requireModerator */ true);
+
+    if (msg.parent_post_id) {
+      throw new ApiError(400, "Only top-level questions can be marked answered — replies inherit the question's state");
+    }
+    const channel = await getChannel(eventId, msg.channel_id!);
+    if (channel.kind !== "qa") {
+      throw new ApiError(400, "This action is only available in Q&A channels");
+    }
+
+    const answered_at = mark ? new Date() : null;
+    const answered_by = mark ? req.user!.id : null;
+    await db.update(forumPosts)
+      .set({ answered_at, answered_by, updated_at: new Date() })
+      .where(eq(forumPosts.id, mid));
+
+    logAudit({
+      eventId, actorId: req.user!.id,
+      action: mark ? "message_answered" : "message_unanswered",
+      targetMessageId: mid, targetChannelId: msg.channel_id,
+    });
+
+    broadcast(eventId, {
+      type: mark ? "answered:added" : "answered:removed",
+      channel_id: msg.channel_id,
+      message_id: mid,
+      answered_at,
+      answered_by,
+    });
+
+    res.json({ ok: true, answered_at, answered_by });
+  } catch (err) { handleApiError(err, res, next); }
+}
+eventChatRouter.post("/:id/chat/messages/:mid/answered",   requireUser, (req, res, next) => answeredHandler(req as AuthedRequest, res, next, true));
+eventChatRouter.post("/:id/chat/messages/:mid/unanswered", requireUser, (req, res, next) => answeredHandler(req as AuthedRequest, res, next, false));
 
 // ─── GET /api/events/:id/chat/channels/:cid/pinned ─────────────────────
 eventChatRouter.get("/:id/chat/channels/:cid/pinned", requireUser, async (req: AuthedRequest, res, next) => {

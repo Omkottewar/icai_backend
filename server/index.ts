@@ -31,6 +31,8 @@ import { announcementsRouter } from "./routes/announcements.js";
 import { employerRouter } from "./routes/employer.js";
 import { attachEventChatSocket } from "./lib/eventChatSocket.js";
 import { startEscalationCron } from "./lib/escalations.js";
+import { startPragyaanIngestCron } from "./lib/pragyaan/scheduler.js";
+import { roomsRouter } from "./routes/rooms.js";
 import { runNotificationHealthcheck } from "./lib/notifyHealthcheck.js";
 import { publicJobsRouter } from "./routes/jobs.js";
 import { membersRouter } from "./routes/members.js";
@@ -83,6 +85,7 @@ app.use("/api/committees", publicCommitteesRouter);
 app.use("/api/checklist-templates", checklistTemplatesRouter);
 app.use("/api/checklist-instances", checklistInstancesRouter);
 app.use("/api/branch", branchRouter);
+app.use("/api/rooms", roomsRouter);
 app.use("/api/forum", forumRouter);
 app.use("/api/site", siteRouter);
 app.use("/api/announcements", announcementsRouter);
@@ -132,6 +135,11 @@ attachEventChatSocket(server);
 // Approval-stage escalation: chairperson gets pinged when a stage stays
 // pending more than 3 days past the event's ends_at. See lib/escalations.ts.
 startEscalationCron();
+
+// Pragyaan auto-ingest — re-sweeps the public corpus every 15 minutes so
+// newly published events/announcements/etc. become answerable without a
+// manual `npm run pragyaan:ingest`. See lib/pragyaan/scheduler.ts.
+startPragyaanIngestCron();
 
 // Boot-time notification system sanity check — confirms every template
 // key referenced in code exists + is enabled in DB, and flags missing

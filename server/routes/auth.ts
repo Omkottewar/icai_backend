@@ -27,7 +27,7 @@ import { sameOrigin } from "../middleware/sameOrigin.js";
 import { loginLimiter, signupLimiter, forgotPasswordLimiter } from "../middleware/rateLimit.js";
 import { validatePassword } from "../auth/password.js";
 import { db } from "../../db/client.js";
-import { roles, userRoleAssignments } from "../../schema/index.js";
+import { roles, userRoleAssignments, icaiMemberMaster, siteSettings } from "../../schema/index.js";
 
 export const authRouter = Router();
 
@@ -156,9 +156,50 @@ authRouter.post("/login", loginLimiter, sameOrigin, async (req, res, next) => {
   }
 });
 
-// â”€â”€â”€ POST /api/auth/signup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── GET /api/auth/check-mrn?mrn=… ──────────────────────────────────────────
+// Used by the signup form (member role) to pre-validate the MRN against the
+// imported ICAI directory. Public — no PII returned beyond name + city +
+// firm so the user can confirm "yes that's me" without revealing other
+// directory rows. Returns { ok:true, exists, gating_enabled, profile? }.
+authRouter.get("/check-mrn", async (req, res, next) => {
+  try {
+    const mrn = String(req.query.mrn ?? "").trim();
+    if (!mrn) return res.status(400).json({ error: "missing_mrn" });
+
+    const [flag] = await db
+      .select()
+      .from(siteSettings)
+      .where(eq(siteSettings.key, "signup.mrn_gating_enabled"))
+      .limit(1);
+    const gatingEnabled = flag?.value === "true";
+
+    const [row] = await db
+      .select({
+        mrn: icaiMemberMaster.mrn,
+        name: icaiMemberMaster.name,
+        city: icaiMemberMaster.city,
+        firm_name: icaiMemberMaster.firm_name,
+      })
+      .from(icaiMemberMaster)
+      .where(eq(icaiMemberMaster.mrn, mrn))
+      .limit(1);
+
+    return res.json({
+      ok: true,
+      exists: Boolean(row),
+      gating_enabled: gatingEnabled,
+      profile: row ?? null,
+    });
+  } catch (err) { next(err); }
+});
+
+// ─── POST /api/auth/signup ──────────────────────────────────────────────────
 // Embedded signup. Creates the user in Auth0, then auto-logs them in so we
 // can mint our own session cookie and create the local users row in one shot.
+//
+// MRN gating (Open Question #3): when role=member and the
+// signup.mrn_gating_enabled site setting is 'true', the supplied mrn
+// MUST exist in icai_member_master before we'll let the signup proceed.
 authRouter.post("/signup", signupLimiter, sameOrigin, async (req, res, next) => {
   try {
     const { email, password, name, role } = req.body ?? {};
@@ -173,6 +214,39 @@ authRouter.post("/signup", signupLimiter, sameOrigin, async (req, res, next) => 
     const pwError = validatePassword(password);
     if (pwError) {
       return res.status(400).json({ error: "weak_password", message: pwError });
+    }
+
+    // MRN gate (member role only). The flag is OFF by default so dev signups
+    // keep working; the branch admin flips it on once they've imported the
+    // ICAI directory and verified counts look right.
+    if (parsedRole === "member") {
+      const [flag] = await db
+        .select()
+        .from(siteSettings)
+        .where(eq(siteSettings.key, "signup.mrn_gating_enabled"))
+        .limit(1);
+      if (flag?.value === "true") {
+        const mrn = typeof req.body?.mrn === "string" ? req.body.mrn.trim() : "";
+        if (!mrn) {
+          return res.status(400).json({
+            error: "mrn_required",
+            message: "Membership Number (MRN) is required for member signup.",
+          });
+        }
+        const [exists] = await db
+          .select({ mrn: icaiMemberMaster.mrn })
+          .from(icaiMemberMaster)
+          .where(eq(icaiMemberMaster.mrn, mrn))
+          .limit(1);
+        if (!exists) {
+          return res.status(403).json({
+            error: "mrn_not_found",
+            message:
+              "We can't find this MRN in the Nagpur branch member master. " +
+              "If you believe this is a mistake, please email nagpur@icai.org so the directory can be updated.",
+          });
+        }
+      }
     }
 
     // 1. Create the user in Auth0's DB connection.

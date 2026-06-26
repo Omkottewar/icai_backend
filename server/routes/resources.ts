@@ -317,6 +317,14 @@ const PDF_MAX_BYTES = 15 * 1024 * 1024;
 
 resourcesRouter.post("/upload-pdf", requireUser, async (req: AuthedRequest, res, next) => {
   try {
+    // Role gate — paper upload is the file-staging half of the member-only
+    // paper-submission flow below. Gating the upload too prevents wrong-role
+    // users from filling the paper-submissions bucket with orphan PDFs.
+    const role = req.user!.primary_role;
+    if (role !== "member" && role !== "admin") {
+      throw new ApiError(403, "Paper submission is open to ICAI members only");
+    }
+
     const name     = need(trim(req.body.name), "Filename");
     const mimeType = trim(req.body.mime_type);
     if (mimeType !== "application/pdf") {
@@ -370,6 +378,15 @@ resourcesRouter.post("/upload-pdf", requireUser, async (req: AuthedRequest, res,
 //         topic_ids: [...] }
 resourcesRouter.post("/papers/submit", requireUser, async (req: AuthedRequest, res, next) => {
   try {
+    // Role gate — paper authorship is a member-only feature (catalogue
+    // §1.2 "newsletter contribution"). Students / employers / other roles
+    // can read papers but cannot submit them. Admin allowed for seeding /
+    // backfill of historical papers.
+    const role = req.user!.primary_role;
+    if (role !== "member" && role !== "admin") {
+      throw new ApiError(403, "Paper submission is open to ICAI members only");
+    }
+
     const userId = req.user!.id;
     const title = need(trim(req.body.title), "Title");
     if (title.length > 300) throw new ApiError(400, "Title is too long (max 300 chars)");

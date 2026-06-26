@@ -28,6 +28,13 @@ import { officeBearersAdminRouter } from "./officeBearers.js";
 import { annualReportsAdminRouter } from "./annualReports.js";
 import { grievancesAdminRouter, grievanceRoutesAdminRouter } from "./grievances.js";
 import { resourcesAdminRouter } from "./resources.js";
+import { pragyaanAdminRouter } from "./pragyaan.js";
+import { cpeAdminRouter } from "./cpe.js";
+import { roomsAdminRouter } from "./rooms.js";
+import { bookingsAdminRouter } from "./bookings.js";
+import { cabfAdminRouter } from "./cabf.js";
+import { paymentsAdminRouter } from "./payments.js";
+import { icaiDirectoryAdminRouter } from "./icaiDirectory.js";
 
 export const adminRouter = Router();
 
@@ -64,3 +71,10 @@ adminRouter.use("/annual-reports", annualReportsAdminRouter);
 adminRouter.use("/grievances", grievancesAdminRouter);
 adminRouter.use("/grievance-routes", grievanceRoutesAdminRouter);
 adminRouter.use("/resources", resourcesAdminRouter);
+adminRouter.use("/pragyaan", pragyaanAdminRouter);
+adminRouter.use("/cpe", cpeAdminRouter);
+adminRouter.use("/rooms", roomsAdminRouter);
+adminRouter.use("/bookings", bookingsAdminRouter);
+adminRouter.use("/cabf", cabfAdminRouter);
+adminRouter.use("/payments", paymentsAdminRouter);
+adminRouter.use("/icai-directory", icaiDirectoryAdminRouter);

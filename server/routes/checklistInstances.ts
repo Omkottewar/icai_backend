@@ -3,7 +3,8 @@ import { aliasedTable, and, asc, desc, eq, gte, inArray, isNull, or, sql } from 
 import { db } from "../../db/client.js";
 import {
   checklistTemplates, checklistTemplateQuestions,
-  checklistInstances, checklistInstanceResponses, checklistInstanceReviews,
+  checklistInstances, checklistInstanceQuestions,
+  checklistInstanceResponses, checklistInstanceReviews,
   checklistInstanceApprovals, checklistInstanceSectionAssignments,
   checklistTaskAssignments,
   events, users, roles, userRoleAssignments,
@@ -105,16 +106,22 @@ async function notifyChecklistAssignees(opts: {
   }
 }
 
-/** Build sectionsByUser for an instance by joining section_assignments with template questions. */
+/** Build sectionsByUser for an instance by joining section_assignments with
+ *  the instance's question rows. Reads the instance-question label; rows
+ *  that pre-date migration 0053 are picked up by their backfilled
+ *  instance_section_question_id, so the legacy template-question join is
+ *  no longer required. */
 async function loadSectionsByUser(instance_id: string): Promise<Map<string, string[]>> {
   const rows = await db
     .select({
       assignee_id: checklistInstanceSectionAssignments.assignee_id,
-      label:       checklistTemplateQuestions.label,
+      label:       checklistInstanceQuestions.label,
     })
     .from(checklistInstanceSectionAssignments)
-    .innerJoin(checklistTemplateQuestions,
-      eq(checklistTemplateQuestions.id, checklistInstanceSectionAssignments.section_question_id))
+    .innerJoin(
+      checklistInstanceQuestions,
+      eq(checklistInstanceQuestions.id, checklistInstanceSectionAssignments.instance_section_question_id),
+    )
     .where(eq(checklistInstanceSectionAssignments.instance_id, instance_id));
   const m = new Map<string, string[]>();
   for (const r of rows) {
@@ -213,7 +220,9 @@ async function authorise(instanceId: string, userId: string) {
   // questions only*. The actual per-question gate is in PUT /responses;
   // here we just compute whether the user has a foothold at all.
   const mySectionAssignmentRows = await db
-    .select({ section_question_id: checklistInstanceSectionAssignments.section_question_id })
+    .select({
+      section_question_id: sql<string>`COALESCE(${checklistInstanceSectionAssignments.instance_section_question_id}, ${checklistInstanceSectionAssignments.section_question_id})`.as("section_question_id"),
+    })
     .from(checklistInstanceSectionAssignments)
     .where(and(
       eq(checklistInstanceSectionAssignments.instance_id, instanceId),
@@ -352,11 +361,14 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
     const { row, perms } = await authorise(id, req.user!.id);
     if (!perms.canRead) throw new ApiError(403, "Forbidden");
 
+    // Per-instance question list (cloned from the template at creation
+    // time; mutable through PUT /:id/questions). Replaces the previous
+    // direct read from checklist_template_questions — see migration 0053.
     const questions = await db
       .select()
-      .from(checklistTemplateQuestions)
-      .where(eq(checklistTemplateQuestions.template_id, row.template.id))
-      .orderBy(asc(checklistTemplateQuestions.sort_order));
+      .from(checklistInstanceQuestions)
+      .where(eq(checklistInstanceQuestions.instance_id, id))
+      .orderBy(asc(checklistInstanceQuestions.sort_order));
 
     const responses = await db
       .select()
@@ -377,55 +389,68 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
       .where(eq(checklistInstanceReviews.instance_id, id))
       .orderBy(desc(checklistInstanceReviews.created_at));
 
-    // Flatten responses into a map keyed by question_id for the frontend.
+    // Flatten responses into a map keyed by the instance question id for
+    // the frontend. New writes use `instance_question_id`; the legacy
+    // `question_id` (template-pointed) is kept as a fallback only for any
+    // stray rows that pre-date migration 0053 and weren't backfilled.
     const responseMap: Record<string, unknown> = {};
-    for (const r of responses) responseMap[r.question_id] = r.value;
+    for (const r of responses) {
+      const key = r.instance_question_id ?? r.question_id;
+      if (key) responseMap[key as string] = r.value;
+    }
 
     // For task_list questions, pull the dedicated task rows so the
     // renderer knows the DB id of each task (needed to call /done /
     // /cancel without a save round-trip). Joined with the assignee user
-    // to get a display name.
+    // to get a display name. The grouping key is the instance question id
+    // (matching how `responseMap` is keyed above).
     const taskQuestionIds = questions.filter((q) => q.type === "task_list").map((q) => q.id);
     const tasksByQuestion: Record<string, any[]> = {};
     if (taskQuestionIds.length > 0) {
       const taskAssigneeU = aliasedTable(users, "task_assignee_u");
       const taskRows = await db
         .select({
-          id:           checklistTaskAssignments.id,
-          response_id:  checklistTaskAssignments.response_id,
-          question_id:  checklistInstanceResponses.question_id,
-          description:  checklistTaskAssignments.description,
-          assignee_id:  checklistTaskAssignments.assignee_id,
-          assignee_name: taskAssigneeU.name,
-          assignee_email: taskAssigneeU.email,
-          due_date:     checklistTaskAssignments.due_date,
-          status:       checklistTaskAssignments.status,
-          notes:        checklistTaskAssignments.notes,
-          sort_order:   checklistTaskAssignments.sort_order,
+          id:                   checklistTaskAssignments.id,
+          response_id:          checklistTaskAssignments.response_id,
+          question_id:          checklistInstanceResponses.question_id,
+          instance_question_id: checklistInstanceResponses.instance_question_id,
+          description:          checklistTaskAssignments.description,
+          assignee_id:          checklistTaskAssignments.assignee_id,
+          assignee_name:        taskAssigneeU.name,
+          assignee_email:       taskAssigneeU.email,
+          due_date:             checklistTaskAssignments.due_date,
+          status:               checklistTaskAssignments.status,
+          notes:                checklistTaskAssignments.notes,
+          sort_order:           checklistTaskAssignments.sort_order,
         })
         .from(checklistTaskAssignments)
         .innerJoin(checklistInstanceResponses, eq(checklistInstanceResponses.id, checklistTaskAssignments.response_id))
         .leftJoin(taskAssigneeU, eq(taskAssigneeU.id, checklistTaskAssignments.assignee_id))
         .where(and(
           eq(checklistInstanceResponses.instance_id, id),
-          inArray(checklistInstanceResponses.question_id, taskQuestionIds),
+          inArray(checklistInstanceResponses.instance_question_id, taskQuestionIds),
         ))
         .orderBy(asc(checklistTaskAssignments.sort_order));
       for (const t of taskRows) {
-        if (!tasksByQuestion[t.question_id]) tasksByQuestion[t.question_id] = [];
-        tasksByQuestion[t.question_id].push(t);
+        const key = (t.instance_question_id ?? t.question_id) as string;
+        if (!tasksByQuestion[key]) tasksByQuestion[key] = [];
+        tasksByQuestion[key].push(t);
       }
     }
 
-    // Per-section assignment rows + joined assignee names.
+    // Per-section assignment rows + joined assignee names. The frontend
+    // expects `section_question_id` keyed to the question id it sees in
+    // the questions list — which is now an instance_question id. Migration
+    // 0053 backfills the new column for every existing assignment, so the
+    // COALESCE here is purely a transitional safety net.
     const sectionAssigneeU = aliasedTable(users, "section_assignee_u");
     const sectionAssignments = await db
       .select({
-        id:                   checklistInstanceSectionAssignments.id,
-        section_question_id:  checklistInstanceSectionAssignments.section_question_id,
-        assignee_id:          checklistInstanceSectionAssignments.assignee_id,
-        assignee_name:        sectionAssigneeU.name,
-        assignee_email:       sectionAssigneeU.email,
+        id:                            checklistInstanceSectionAssignments.id,
+        section_question_id:           sql<string>`COALESCE(${checklistInstanceSectionAssignments.instance_section_question_id}, ${checklistInstanceSectionAssignments.section_question_id})`.as("section_question_id"),
+        assignee_id:                   checklistInstanceSectionAssignments.assignee_id,
+        assignee_name:                 sectionAssigneeU.name,
+        assignee_email:                sectionAssigneeU.email,
       })
       .from(checklistInstanceSectionAssignments)
       .leftJoin(sectionAssigneeU, eq(sectionAssigneeU.id, checklistInstanceSectionAssignments.assignee_id))
@@ -597,16 +622,51 @@ checklistInstancesRouter.post("/", async (req: AuthedRequest, res, next) => {
           note: "Auto-released on creation",
         });
       }
+
+      // Clone the template's current question list into the new instance's
+      // private question table. From this point on, edits to this instance's
+      // questions stay on the instance — they will not affect the parent
+      // template or any sibling instance. (See migration 0053 + F19.)
+      const tplQuestions = await tx
+        .select()
+        .from(checklistTemplateQuestions)
+        .where(eq(checklistTemplateQuestions.template_id, tpl.id))
+        .orderBy(asc(checklistTemplateQuestions.sort_order));
+      const templateToInstanceQid = new Map<string, string>();
+      if (tplQuestions.length > 0) {
+        const clonedRows = await tx.insert(checklistInstanceQuestions).values(
+          tplQuestions.map((q) => ({
+            instance_id:                 row.id,
+            sort_order:                  q.sort_order,
+            type:                        q.type,
+            label:                       q.label,
+            help_text:                   q.help_text,
+            required:                    q.required,
+            config:                      q.config,
+            section_owner_role:          q.section_owner_role,
+            source_template_question_id: q.id,
+          })),
+        ).returning({ id: checklistInstanceQuestions.id, source: checklistInstanceQuestions.source_template_question_id });
+        for (const c of clonedRows) {
+          if (c.source) templateToInstanceQid.set(c.source, c.id);
+        }
+      }
+
       // Persist per-section filler assignments (if the admin chose any).
       // Skip rows with assignee_id=null — those just mean "no override,
       // fall back to the primary filler" so there's no value in storing them.
+      // Each row now carries BOTH the legacy template-question id and the
+      // new instance-question id (mapped via the clone table above), so
+      // existing code paths reading the legacy column keep working until
+      // they're migrated.
       const toInsert = validAssignments.filter((a) => a.assignee_id);
       if (toInsert.length > 0) {
         await tx.insert(checklistInstanceSectionAssignments).values(
           toInsert.map((a) => ({
-            instance_id: row.id,
-            section_question_id: a.section_question_id,
-            assignee_id: a.assignee_id!,
+            instance_id:                  row.id,
+            section_question_id:          a.section_question_id,
+            instance_section_question_id: templateToInstanceQid.get(a.section_question_id) ?? null,
+            assignee_id:                  a.assignee_id!,
           })),
         );
       }
@@ -821,21 +881,64 @@ checklistInstancesRouter.patch("/:id", async (req: AuthedRequest, res, next) => 
     if (req.body.assigned_review_user_id  !== undefined) patch.assigned_review_user_id  = trim(req.body.assigned_review_user_id) || null;
     if (Object.keys(patch).length === 0) throw new ApiError(400, "Nothing to update");
 
+    // ── Auto-release on filler assignment ───────────────────────────────
+    // If the instance is still a draft and this PATCH gives it a filler
+    // for the first time, transition it to 'awaiting_fill' (the same
+    // status the dedicated /release endpoint sets). Without this, an
+    // admin who creates a draft with no filler and later patches in an
+    // assignee leaves the checklist invisible to that assignee — they
+    // can't see drafts. The status mirrors what create-time does for the
+    // same input: `hasFiller ? "awaiting_fill" : "draft"`.
+    //
+    // We only auto-release when transitioning from "no filler" to
+    // "has filler". If a draft already had a filler (e.g. via template
+    // fill_role or section assignments) the admin presumably wants the
+    // explicit /release step.
+    let willAutoRelease = false;
+    if (before.instance.status === "draft" && patch.assigned_fill_user_id) {
+      const beforeHadFiller = !!before.instance.assigned_fill_user_id
+        || !!before.template.fill_role;
+      if (!beforeHadFiller) {
+        // Confirm there were no prior section assignments either —
+        // those also count as "has a filler" per the /release endpoint.
+        const [{ section_count }] = await db
+          .select({ section_count: sql<number>`COUNT(*)::int`.as("section_count") })
+          .from(checklistInstanceSectionAssignments)
+          .where(and(
+            eq(checklistInstanceSectionAssignments.instance_id, id),
+            sql`${checklistInstanceSectionAssignments.assignee_id} IS NOT NULL`,
+          ));
+        if ((section_count ?? 0) === 0) {
+          willAutoRelease = true;
+          patch.status = "awaiting_fill";
+        }
+      }
+    }
+
     const [row] = await db.update(checklistInstances).set(patch).where(eq(checklistInstances.id, id)).returning();
     if (req.body.assigned_fill_user_id !== undefined || req.body.assigned_review_user_id !== undefined) {
       await db.insert(checklistInstanceReviews).values({
         instance_id: id, actor_id: req.user!.id, action: "assigned",
       });
     }
+    if (willAutoRelease) {
+      await db.insert(checklistInstanceReviews).values({
+        instance_id: id, actor_id: req.user!.id, action: "released",
+        note: "Auto-released on filler assignment",
+      });
+      // Stage rows are only meaningful for event-bound instances.
+      await ensureApprovalStages(id, !!before.instance.event_id && !!before.event_committee_id);
+    }
 
     // Notify the NEW primary filler if they changed and it's not a draft.
-    // Draft instances will get a notification on release; sending now would
-    // leak a half-set-up checklist into the filler's inbox.
+    // (After an auto-release the status is no longer 'draft', so the
+    // notification fires from the same gate as a normal PATCH on an
+    // already-released instance.)
     const fillerChanged = req.body.assigned_fill_user_id !== undefined
       && patch.assigned_fill_user_id
       && patch.assigned_fill_user_id !== before.instance.assigned_fill_user_id
       && patch.assigned_fill_user_id !== req.user!.id
-      && before.instance.status !== "draft";
+      && (before.instance.status !== "draft" || willAutoRelease);
     if (fillerChanged) {
       const assignerName = await actorName(req.user!.id);
       const eventTitle = !!before.instance.event_id ? (await instanceEventTitle(id)) : null;
@@ -850,6 +953,132 @@ checklistInstancesRouter.patch("/:id", async (req: AuthedRequest, res, next) => 
     }
 
     res.json(row);
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── PUT /api/checklist-instances/:id/questions ───────────────────────────
+// Replace-all editor for the instance's question list. Admin-only — the
+// branch staff who manage events use this to add event-specific items
+// ("Speaker travel booking confirmed?"), remove inapplicable template
+// items, or reword anything mid-prep. Edits stay on the instance and do
+// NOT propagate back to the template.
+//
+// Body:
+//   { questions: [{
+//       id?: uuid,                         // present = update existing row
+//       type: 'section_heading' | 'short_text' | 'long_text' | 'checkbox' |
+//             'single_select' | 'multi_select' | 'date' | 'number' |
+//             'file' | 'task_list' | …                (matches enum)
+//       label: string,
+//       help_text?: string|null,
+//       required: boolean,
+//       config: object,
+//       sort_order: number,
+//       section_owner_role?: string|null   // only meaningful on section_heading
+//   }] }
+//
+// Behaviour:
+//   • Questions with an id matching an existing row → UPDATE in place
+//     (preserves any stored answers in checklist_instance_responses since
+//     the FK is keyed to this question's id).
+//   • Questions without an id → INSERT new (gets a fresh UUID).
+//   • Existing questions whose id is absent from the body → DELETE
+//     (cascades into responses + section_assignments).
+//
+// Allowed only while the instance is editable (awaiting_fill / rejected /
+// draft). Once submitted or approved, the question set is locked.
+checklistInstancesRouter.put("/:id/questions", async (req: AuthedRequest, res, next) => {
+  try {
+    const id = String(req.params.id);
+    const { row, perms } = await authorise(id, req.user!.id);
+    if (!perms.canManage) throw new ApiError(403, "Admin only");
+    if (!["awaiting_fill", "rejected", "draft"].includes(row.instance.status)) {
+      throw new ApiError(400, "Questions can only be edited while the checklist is awaiting fill, rejected, or in draft");
+    }
+
+    const incoming: Array<{
+      id?: string;
+      type: string;
+      label: string;
+      help_text?: string | null;
+      required: boolean;
+      config: Record<string, unknown>;
+      sort_order: number;
+      section_owner_role?: string | null;
+    }> = Array.isArray(req.body?.questions) ? req.body.questions : [];
+
+    if (incoming.length === 0) {
+      throw new ApiError(400, "A checklist must have at least one question");
+    }
+    for (const q of incoming) {
+      if (!q.label || typeof q.label !== "string" || !q.label.trim()) {
+        throw new ApiError(400, "Every question needs a label");
+      }
+      if (!q.type || typeof q.type !== "string") {
+        throw new ApiError(400, "Every question needs a type");
+      }
+    }
+
+    // Snapshot existing rows so we can compute the delete set.
+    const existing = await db
+      .select({ id: checklistInstanceQuestions.id })
+      .from(checklistInstanceQuestions)
+      .where(eq(checklistInstanceQuestions.instance_id, id));
+    const existingIds = new Set(existing.map((r) => r.id));
+    const keptIds = new Set(incoming.filter((q) => q.id).map((q) => q.id as string));
+    const toDelete: string[] = [...existingIds].filter((eid) => !keptIds.has(eid));
+
+    await db.transaction(async (tx) => {
+      // 1) Delete removed rows first. Cascading FK on responses +
+      // section_assignments takes care of their dependent rows.
+      if (toDelete.length > 0) {
+        await tx.delete(checklistInstanceQuestions)
+          .where(and(
+            eq(checklistInstanceQuestions.instance_id, id),
+            inArray(checklistInstanceQuestions.id, toDelete),
+          ));
+      }
+
+      // 2) Update existing + insert new.
+      for (const q of incoming) {
+        const payload = {
+          sort_order:         q.sort_order ?? 0,
+          type:               q.type as any,
+          label:              q.label.trim(),
+          help_text:          q.help_text ?? null,
+          required:           !!q.required,
+          config:             (q.config ?? {}) as any,
+          section_owner_role: q.type === "section_heading" ? (q.section_owner_role ?? null) : null,
+          updated_at:         new Date(),
+        };
+        if (q.id && existingIds.has(q.id)) {
+          await tx.update(checklistInstanceQuestions)
+            .set(payload)
+            .where(and(
+              eq(checklistInstanceQuestions.id, q.id),
+              eq(checklistInstanceQuestions.instance_id, id),
+            ));
+        } else {
+          await tx.insert(checklistInstanceQuestions).values({
+            instance_id: id,
+            ...payload,
+          });
+        }
+      }
+
+      // 3) Touch parent so updated_at advances + audit row.
+      await tx.update(checklistInstances)
+        .set({ updated_at: new Date() })
+        .where(eq(checklistInstances.id, id));
+      await tx.insert(checklistInstanceReviews).values({
+        instance_id: id, actor_id: req.user!.id, action: "edited",
+        note: `Question list updated (${incoming.length} item${incoming.length === 1 ? "" : "s"}${
+          toDelete.length > 0 ? `, ${toDelete.length} removed` : ""
+        })`,
+      });
+    });
+
+    res.json({ ok: true, count: incoming.length, removed: toDelete.length });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -874,17 +1103,20 @@ checklistInstancesRouter.put("/:id/section-assignments", async (req: AuthedReque
         : [];
 
     if (incoming.length > 0) {
+      // section_question_id values now refer to instance question rows
+      // (per migration 0053). Validate against this instance's question
+      // list rather than the template.
       const sectionIds = incoming.map((a) => a.section_question_id);
       const sections = await db
-        .select({ id: checklistTemplateQuestions.id, type: checklistTemplateQuestions.type })
-        .from(checklistTemplateQuestions)
+        .select({ id: checklistInstanceQuestions.id, type: checklistInstanceQuestions.type })
+        .from(checklistInstanceQuestions)
         .where(and(
-          eq(checklistTemplateQuestions.template_id, row.template.id),
-          inArray(checklistTemplateQuestions.id, sectionIds),
+          eq(checklistInstanceQuestions.instance_id, id),
+          inArray(checklistInstanceQuestions.id, sectionIds),
         ));
       const validSet = new Set(sections.filter((s) => s.type === "section_heading").map((s) => s.id));
       if (incoming.some((a) => !validSet.has(a.section_question_id))) {
-        throw new ApiError(400, "One or more section_question_id values aren't section headings on this template");
+        throw new ApiError(400, "One or more section_question_id values aren't section headings on this instance");
       }
     }
 
@@ -893,11 +1125,12 @@ checklistInstancesRouter.put("/:id/section-assignments", async (req: AuthedReque
     // Snapshot the previous assignments so we can fire notifications ONLY
     // for users who are newly assigned (or newly assigned to a section
     // they didn't own before). Querying inside the txn keeps it consistent
-    // with the wipe+recreate below.
+    // with the wipe+recreate below. We snapshot the new instance_question
+    // id so the prevKey matches the incoming format.
     const previous = await db
       .select({
-        assignee_id: checklistInstanceSectionAssignments.assignee_id,
-        section_question_id: checklistInstanceSectionAssignments.section_question_id,
+        assignee_id:         checklistInstanceSectionAssignments.assignee_id,
+        section_question_id: sql<string>`COALESCE(${checklistInstanceSectionAssignments.instance_section_question_id}, ${checklistInstanceSectionAssignments.section_question_id})`.as("section_question_id"),
       })
       .from(checklistInstanceSectionAssignments)
       .where(eq(checklistInstanceSectionAssignments.instance_id, id));
@@ -911,9 +1144,9 @@ checklistInstancesRouter.put("/:id/section-assignments", async (req: AuthedReque
       if (toInsert.length > 0) {
         await tx.insert(checklistInstanceSectionAssignments).values(
           toInsert.map((a) => ({
-            instance_id: id,
-            section_question_id: a.section_question_id,
-            assignee_id: a.assignee_id!,
+            instance_id:                  id,
+            instance_section_question_id: a.section_question_id,
+            assignee_id:                  a.assignee_id!,
           })),
         );
       }
@@ -929,10 +1162,12 @@ checklistInstancesRouter.put("/:id/section-assignments", async (req: AuthedReque
     if (fresh.length > 0 && row.instance.status !== "draft") {
       // Group new sections per user so each gets ONE notification listing
       // all their new sections, not N separate emails.
+      // section_question_id here is now an instance question id, not a
+      // template question id, so we look up labels on the instance side.
       const headings = await db
-        .select({ id: checklistTemplateQuestions.id, label: checklistTemplateQuestions.label })
-        .from(checklistTemplateQuestions)
-        .where(inArray(checklistTemplateQuestions.id, fresh.map((a) => a.section_question_id)));
+        .select({ id: checklistInstanceQuestions.id, label: checklistInstanceQuestions.label })
+        .from(checklistInstanceQuestions)
+        .where(inArray(checklistInstanceQuestions.id, fresh.map((a) => a.section_question_id)));
       const labelById = new Map(headings.map((h) => [h.id, h.label]));
       const newSectionsByUser = new Map<string, string[]>();
       for (const a of fresh) {
@@ -1010,8 +1245,8 @@ checklistInstancesRouter.put("/:id/responses", async (req: AuthedRequest, res, n
     const incoming = (req.body && typeof req.body.responses === "object") ? req.body.responses : {};
     const questions = await db
       .select()
-      .from(checklistTemplateQuestions)
-      .where(eq(checklistTemplateQuestions.template_id, row.template.id));
+      .from(checklistInstanceQuestions)
+      .where(eq(checklistInstanceQuestions.instance_id, id));
 
     // For section-only fillers (perms.canFill === false), we need to know
     // which section each question belongs to. Walk the sorted question list
@@ -1062,12 +1297,14 @@ checklistInstancesRouter.put("/:id/responses", async (req: AuthedRequest, res, n
 
     await db.transaction(async (tx) => {
       for (const p of pairs) {
-        // Upsert the response row.
+        // Upsert the response row. We write to the new
+        // `instance_question_id` column (introduced in migration 0053);
+        // the legacy `question_id` is left unset on new rows.
         const [resp] = await tx
           .insert(checklistInstanceResponses)
-          .values({ instance_id: id, question_id: p.question.id, value: p.value as any })
+          .values({ instance_id: id, instance_question_id: p.question.id, value: p.value as any })
           .onConflictDoUpdate({
-            target: [checklistInstanceResponses.instance_id, checklistInstanceResponses.question_id],
+            target: [checklistInstanceResponses.instance_id, checklistInstanceResponses.instance_question_id],
             set: { value: p.value as any, updated_at: new Date() },
           })
           .returning();
@@ -1164,15 +1401,18 @@ checklistInstancesRouter.post("/:id/submit", async (req: AuthedRequest, res, nex
 
     const questions = await db
       .select()
-      .from(checklistTemplateQuestions)
-      .where(eq(checklistTemplateQuestions.template_id, row.template.id));
+      .from(checklistInstanceQuestions)
+      .where(eq(checklistInstanceQuestions.instance_id, id));
 
     const stored = await db
       .select()
       .from(checklistInstanceResponses)
       .where(eq(checklistInstanceResponses.instance_id, id));
     const byQ: Record<string, unknown> = {};
-    for (const r of stored) byQ[r.question_id] = r.value;
+    for (const r of stored) {
+      const key = r.instance_question_id ?? r.question_id;
+      if (key) byQ[key as string] = r.value;
+    }
 
     const missing: string[] = [];
     for (const q of questions) {
@@ -1363,6 +1603,28 @@ checklistInstancesRouter.post("/:id/reject-final", async (req: AuthedRequest, re
     // Cancel the linked event + close the instance + write the audit row,
     // all in a transaction so a partial state can't leak.
     const result = await db.transaction(async (tx) => {
+      // 0. Guard: if the linked event is already published (e.g. someone
+      //    used the override path earlier) or has already happened, refuse.
+      //    Silently flipping a published event with paid registrations to
+      //    'cancelled' would leave attendees with refund obligations and
+      //    no notification. Force the chairman to cancel the event
+      //    explicitly first.
+      //    Lock the event row to keep the check atomic with the cancel.
+      if (row.instance.event_id) {
+        const [linkedEvent] = await tx
+          .select({ id: events.id, status: events.status })
+          .from(events)
+          .where(eq(events.id, row.instance.event_id))
+          .for("update")
+          .limit(1);
+        if (linkedEvent && (linkedEvent.status === "published" || linkedEvent.status === "completed")) {
+          throw new ApiError(400,
+            `Cannot terminally reject this checklist — its event is already ${linkedEvent.status}. ` +
+            `Cancel the event first (which will notify registered attendees) before rejecting the checklist.`,
+          );
+        }
+      }
+
       // 1. Mark the stage as rejected (the cascade trigger from 0025 will
       //    flip the instance to rejected — but that path leaves the event
       //    in pending_approval. We want a stronger "cancelled" end state).
@@ -1494,17 +1756,46 @@ checklistInstancesRouter.post("/:id/reopen", async (req: AuthedRequest, res, nex
 });
 
 // ─── DELETE /api/checklist-instances/:id ──────────────────────────────────
+// Soft-delete. Refuses if the linked event is already public-facing —
+// deleting a checklist out from under a published/completed event would
+// leave it "naked" (visible to members with no audit trail behind it).
+// Always writes a review row so the timeline shows the delete + actor.
 checklistInstancesRouter.delete("/:id", async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
-    const { perms } = await authorise(id, req.user!.id);
+    const { row: instanceRow, perms } = await authorise(id, req.user!.id);
     if (!perms.canManage) throw new ApiError(403, "Admin only");
 
-    const [row] = await db.update(checklistInstances)
-      .set({ deleted_at: new Date() })
-      .where(eq(checklistInstances.id, id))
-      .returning();
-    if (!row) throw new ApiError(404, "Not found");
+    // Block delete if the linked event is published or completed. Members
+    // would still see the event with no checklist backing it — an orphaned
+    // state we can't recover from cleanly.
+    if (instanceRow.instance.event_id) {
+      const [linkedEvent] = await db
+        .select({ status: events.status })
+        .from(events)
+        .where(eq(events.id, instanceRow.instance.event_id))
+        .limit(1);
+      if (linkedEvent && (linkedEvent.status === "published" || linkedEvent.status === "completed")) {
+        throw new ApiError(400,
+          `Cannot delete this checklist — its event is ${linkedEvent.status}. ` +
+          `Cancel the event first if you really need to remove the checklist.`,
+        );
+      }
+    }
+
+    await db.transaction(async (tx) => {
+      const [row] = await tx.update(checklistInstances)
+        .set({ deleted_at: new Date() })
+        .where(eq(checklistInstances.id, id))
+        .returning();
+      if (!row) throw new ApiError(404, "Not found");
+      await tx.insert(checklistInstanceReviews).values({
+        instance_id: id,
+        actor_id: req.user!.id,
+        action: "deleted",
+        note: trim(req.body?.note) || null,
+      });
+    });
     res.json({ ok: true });
   } catch (err) { handleApiError(err, res, next); }
 });

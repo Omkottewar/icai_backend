@@ -275,12 +275,29 @@ pragyaanRouter.get("/conversations/:id", optionalAuth, async (req: AuthedRequest
 });
 
 // ─── GET /config ──────────────────────────────────────────────────────────────
-// Disclaimer text + supported languages for the chat UI.
-pragyaanRouter.get("/config", (_req, res, next) => {
+// Disclaimer text + supported languages for the chat UI. Disclaimer is
+// editable by chairman via site_settings (key='pragyaan.disclaimer') so it
+// can be tweaked without a redeploy; falls back to the hardcoded DISCLAIMER
+// above when the setting is missing or empty.
+pragyaanRouter.get("/config", async (_req, res, next) => {
   try {
+    let disclaimer = DISCLAIMER;
+    try {
+      const { siteSettings } = await import("../../schema/index.js");
+      const { eq } = await import("drizzle-orm");
+      const { db } = await import("../../db/client.js");
+      const [row] = await db.select({ value: siteSettings.value })
+        .from(siteSettings)
+        .where(eq(siteSettings.key, "pragyaan.disclaimer"))
+        .limit(1);
+      const v = row?.value?.trim();
+      if (v) disclaimer = v;
+    } catch {
+      // Missing table / row — stick with the default.
+    }
     res.set("cache-control", "public, max-age=300");
     res.json({
-      disclaimer: DISCLAIMER,
+      disclaimer,
       languages: [...SUPPORTED_LANGS],
     });
   } catch (err) { handleApiError(err, res, next); }

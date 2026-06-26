@@ -19,3 +19,21 @@ export async function requireUser(req: AuthedRequest, res: Response, next: NextF
   req.user = user;
   next();
 }
+
+/**
+ * Soft auth — attaches req.user if a valid session cookie is present,
+ * but does NOT 401 if missing/invalid. Use this for endpoints that
+ * return different (typically richer) data when the requester is
+ * authenticated but should still respond to anonymous callers.
+ */
+export async function optionalUser(req: AuthedRequest, _res: Response, next: NextFunction) {
+  const token = req.cookies?.[SESSION_COOKIE];
+  if (!token) return next();
+  try {
+    const user = await getUserBySessionToken(token);
+    if (user) req.user = user;
+  } catch {
+    // Bad/expired token — treat as anonymous; do not surface the error.
+  }
+  next();
+}

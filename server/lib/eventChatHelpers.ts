@@ -198,6 +198,8 @@ export type AuditAction =
   | "message_deleted"
   | "message_pinned"
   | "message_unpinned"
+  | "message_answered"
+  | "message_unanswered"
   | "user_muted"
   | "user_unmuted"
   | "channel_frozen"

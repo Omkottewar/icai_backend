@@ -96,6 +96,7 @@ async function getUpcomingEvents(userId: string, now: Date) {
       slug: events.slug,
       title: events.title,
       starts_at: events.starts_at,
+      ends_at: events.ends_at,
       cpe_hours: events.cpe_hours,
       mode: events.mode,
       venue: events.venue,
@@ -116,11 +117,41 @@ async function getUpcomingEvents(userId: string, now: Date) {
     .limit(5);
 }
 
+// Past events the user attended that award CPE — these are eligible for
+// certificate download. Capped at 10 most recent for the dashboard tile;
+// fuller "all certificates" history can come later as a dedicated page.
+async function getRecentCertificates(userId: string) {
+  return db
+    .select({
+      id: events.id,
+      slug: events.slug,
+      title: events.title,
+      starts_at: events.starts_at,
+      cpe_hours: events.cpe_hours,
+    })
+    .from(eventRegistrations)
+    .innerJoin(events, eq(events.id, eventRegistrations.event_id))
+    .where(
+      and(
+        eq(eventRegistrations.user_id, userId),
+        isNull(eventRegistrations.deleted_at),
+        isNull(events.deleted_at),
+        eq(eventRegistrations.status, "attended"),
+        sql`${events.cpe_hours} > 0`,
+      ),
+    )
+    .orderBy(desc(events.starts_at))
+    .limit(10);
+}
+
 dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const user = req.user!;
     const now = new Date();
     const upcomingEvents = await getUpcomingEvents(user.id, now);
+    const recentCertificates = user.primary_role === "member"
+      ? await getRecentCertificates(user.id)
+      : [];
 
     if (user.primary_role === "member") {
       // Profile + phone in one round-trip so the dashboard payload has
@@ -370,6 +401,7 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
           three_year_block_target: 120,
         },
         upcomingEvents,
+        recentCertificates,
         eventsAttendedFy: eventsAttendedFyRow[0]?.count ?? 0,
         bookmarksCount: bookmarkCountRow[0]?.count ?? 0,
         recentBookmarks,

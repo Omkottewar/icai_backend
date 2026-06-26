@@ -88,6 +88,15 @@ mockTestAttemptsRouter.post("/mock-tests/:id/attempt", requireUser, async (req: 
     const id = need(trim(req.params.id), "Mock test id");
     const userId = req.user!.id;
 
+    // Role gate — mock tests are a CA-student feature (catalogue §1.3).
+    // Members, employers etc. cannot start an attempt even if a stale
+    // registration exists. Admins are allowed for testing / WICASA
+    // preview purposes.
+    const role = req.user!.primary_role;
+    if (role !== "student" && role !== "admin") {
+      throw new ApiError(403, "Mock tests are available to CA students only");
+    }
+
     const [test] = await db.select().from(mockTests).where(and(eq(mockTests.id, id), isNull(mockTests.deleted_at))).limit(1);
     if (!test) throw new ApiError(404, "Mock test not found");
     if (!test.supports_online) {
@@ -106,6 +115,23 @@ mockTestAttemptsRouter.post("/mock-tests/:id/attempt", requireUser, async (req: 
       .limit(1);
     if (!reg || reg.status === "cancelled") {
       throw new ApiError(403, "Please register for this mock test before starting an attempt");
+    }
+
+    // If the student has already SUBMITTED (or auto-submitted) an attempt
+    // for this test, block a fresh one. One attempt per registration is
+    // the branch's rule — re-attempts after submission would let students
+    // game the timer + answer key.
+    const [completed] = await db
+      .select({ id: mockTestAttempts.id, status: mockTestAttempts.status })
+      .from(mockTestAttempts)
+      .where(and(
+        eq(mockTestAttempts.mock_test_id, id),
+        eq(mockTestAttempts.user_id, userId),
+        inArray(mockTestAttempts.status, ["submitted", "auto_submitted"]),
+      ))
+      .limit(1);
+    if (completed) {
+      throw new ApiError(400, "You have already submitted an attempt for this mock test");
     }
 
     // Resume an existing in-progress attempt if there is one.
@@ -353,6 +379,21 @@ async function autoSubmitAttempt(attemptId: string) {
       })
       .where(eq(mockTestAttempts.id, attempt.id))
       .returning();
+
+    // Roll the student's registration forward to 'attended'. Without this
+    // the public /mock-tests card kept showing "Take test online" because
+    // mock_test_registrations.status was still 'registered' — which let
+    // the student start a fresh attempt over and over.
+    if (attempt.registration_id) {
+      await tx
+        .update(mockTestRegistrations)
+        .set({ status: "attended", attended_at: new Date() })
+        .where(and(
+          eq(mockTestRegistrations.id, attempt.registration_id),
+          eq(mockTestRegistrations.status, "registered"),
+        ));
+    }
+
     return updated!;
   });
 }

@@ -1,68 +1,79 @@
 import { Router } from "express";
-import { and, eq, ilike, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { users, memberProfiles } from "../../schema/index.js";
-import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
+import { users, memberProfiles, icaiMemberMaster } from "../../schema/index.js";
+import { requireUser, optionalUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { handleApiError, trim, ApiError } from "../lib/apiError.js";
 
 export const membersRouter = Router();
-membersRouter.use(requireUser);
 
 // ─── GET /api/members/directory ───────────────────────────────────────────────
-// Paginated, searchable list of members (primary_role = 'member') with their
-// ICAI MRN and FCA/ACA status. Accessible to any authenticated user.
-membersRouter.get("/directory", async (req, res, next) => {
+// Source: icai_member_master (the official branch roster — ~3,000 rows).
+//
+// Auth policy:
+//   • Anonymous callers get name + mrn + status + city only.
+//   • Authenticated callers also get phone + email + firm_name.
+//
+// `optionalUser` is intentionally applied BEFORE the router-wide requireUser
+// gate so this endpoint is reachable without a session.
+membersRouter.get("/directory", optionalUser, async (req: AuthedRequest, res, next) => {
   try {
     const q        = trim(req.query.q);
+    const status   = trim(req.query.status);                  // 'FCA' | 'ACA' | '' (all)
     const page     = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(10, Number(req.query.pageSize) || 25));
     const offset   = (page - 1) * pageSize;
+    const isAuthed = !!req.user;
 
-    const conds = [
-      isNull(users.deleted_at),
-      eq(users.primary_role, "member"),
-      isNull(memberProfiles.deleted_at),
-    ];
-
+    const conds: any[] = [];
     if (q) {
       conds.push(or(
-        ilike(users.name, `%${q}%`),
-        ilike(memberProfiles.mrn, `%${q}%`),
+        ilike(icaiMemberMaster.name, `%${q}%`),
+        ilike(icaiMemberMaster.mrn,  `%${q}%`),
       )!);
     }
+    if (status === "FCA") conds.push(eq(icaiMemberMaster.fca_flag, true));
+    if (status === "ACA") conds.push(eq(icaiMemberMaster.fca_flag, false));
 
-    const where = and(...conds);
+    const where = conds.length ? and(...conds) : undefined;
 
     const [rows, [{ total }]] = await Promise.all([
       db
         .select({
-          id:     users.id,
-          name:   users.name,
-          mrn:    memberProfiles.mrn,
-          is_fca: memberProfiles.is_fca,
-          city:   memberProfiles.city,
+          mrn:       icaiMemberMaster.mrn,
+          name:      icaiMemberMaster.name,
+          fca_flag:  icaiMemberMaster.fca_flag,
+          city:      icaiMemberMaster.city,
+          // Sensitive fields — only surfaced to authenticated callers.
+          phone:     icaiMemberMaster.phone,
+          email:     icaiMemberMaster.email,
+          firm_name: icaiMemberMaster.firm_name,
         })
-        .from(users)
-        .innerJoin(memberProfiles, eq(memberProfiles.user_id, users.id))
+        .from(icaiMemberMaster)
         .where(where)
-        .orderBy(users.name)
+        .orderBy(asc(icaiMemberMaster.name))
         .limit(pageSize)
         .offset(offset),
 
       db
         .select({ total: sql<number>`count(*)::int` })
-        .from(users)
-        .innerJoin(memberProfiles, eq(memberProfiles.user_id, users.id))
+        .from(icaiMemberMaster)
         .where(where),
     ]);
 
     res.json({
+      authed: isAuthed,
       rows: rows.map((r) => ({
-        id:     r.id,
-        name:   r.name,
-        mrn:    r.mrn,
-        status: r.is_fca ? "FCA" : "ACA",
-        city:   r.city ?? "",
+        id:        r.mrn,                  // MRN doubles as the stable key
+        mrn:       r.mrn,
+        name:      r.name,
+        status:    r.fca_flag ? "FCA" : "ACA",
+        city:      r.city ?? "",
+        // Sensitive fields hidden from anonymous callers — null out
+        // server-side so a curious client can't read them off the wire.
+        phone:     isAuthed ? (r.phone ?? null) : null,
+        email:     isAuthed ? (r.email ?? null) : null,
+        firm_name: isAuthed ? (r.firm_name ?? null) : null,
       })),
       total,
       page,
@@ -70,6 +81,9 @@ membersRouter.get("/directory", async (req, res, next) => {
     });
   } catch (err) { handleApiError(err, res, next); }
 });
+
+// Everything below this point requires a logged-in user.
+membersRouter.use(requireUser);
 
 // ─── PATCH /api/members/profile ─────────────────────────────────────────
 // Update the editable subset of the current member's profile. Fields that
