@@ -138,7 +138,10 @@ jobsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
         location,
         fee_paise: FEE_PAISE[type],
         expires_at,
-        status: "draft",
+        // Admin-created postings auto-publish (mirror of the employer-portal
+        // POST behaviour in routes/employer.ts). Admins can demote to draft
+        // or close via PATCH if they need staging.
+        status: "active",
       })
       .returning();
     res.status(201).json(row);
