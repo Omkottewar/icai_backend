@@ -69,6 +69,69 @@ export const SITE_SLOTS = {
       { key: "stats", label: "Facility stats", kind: "stats", hint: "e.g. READING ROOM → 80 seats" },
     ],
   },
+  home_hero_text: {
+    label: "Home — Hero text (\"Nagpur Branch of ICAI\" + 3 CTA buttons)",
+    page:  "Home",
+    fields: [
+      { key: "badge",            label: "Top badge (e.g. \"Branch of WIRC of ICAI\")", kind: "text" },
+      { key: "title_prefix",     label: "Title prefix (e.g. \"Nagpur Branch of\")",    kind: "text" },
+      { key: "title_highlight",  label: "Title highlight (e.g. \"ICAI\")",             kind: "text", hint: "Coloured part of the headline" },
+      { key: "cta_events_label", label: "Primary CTA — Events button label",           kind: "text" },
+      { key: "cta_ai_label",     label: "Secondary CTA — PrayGyaan AI button label",   kind: "text" },
+      { key: "cta_signup_label", label: "Signup CTA (shown only to logged-out users)", kind: "text" },
+    ],
+  },
+  home_leadership_extras: {
+    label: "Home — Leadership banner CTAs + \"SINCE\" badge",
+    page:  "Home",
+    fields: [
+      { key: "cta_book_label",     label: "First button label (e.g. \"Book CPE Event\")",   kind: "text" },
+      { key: "cta_download_label", label: "Second button label (e.g. \"Download Circulars\")", kind: "text" },
+      { key: "since_label",        label: "Floating badge top line (e.g. \"SINCE\")",        kind: "text" },
+      { key: "since_year",         label: "Floating badge bottom line (e.g. \"1962\")",       kind: "text" },
+    ],
+  },
+  home_services_section: {
+    label: "Home — Services section header (\"Explore the Branch\")",
+    page:  "Home",
+    fields: [
+      { key: "eyebrow", label: "Eyebrow (small uppercase label)", kind: "text" },
+      { key: "title",   label: "Title",                           kind: "text" },
+      { key: "body",    label: "Description",                     kind: "markdown" },
+    ],
+  },
+  home_events_section: {
+    label: "Home — Events / Committees section headings + links",
+    page:  "Home",
+    fields: [
+      { key: "events_eyebrow",          label: "Top eyebrow (e.g. \"EVENTS\")",                              kind: "text" },
+      { key: "events_title",            label: "Top title",                                                  kind: "text" },
+      { key: "events_view_all_label",   label: "View-all link label (e.g. \"View full calendar →\")",        kind: "text" },
+      { key: "upcoming_eyebrow",        label: "Upcoming-events list eyebrow",                               kind: "text" },
+      { key: "committees_eyebrow",      label: "Committees list eyebrow",                                    kind: "text" },
+      { key: "committees_title",        label: "Committees list title",                                      kind: "text" },
+    ],
+  },
+  home_premises_section: {
+    label: "Home — Branch premises wrapper (heading + reading-room CTA)",
+    page:  "Home",
+    fields: [
+      { key: "outer_eyebrow",      label: "Section eyebrow (e.g. \"OUR HOME\")",                           kind: "text" },
+      { key: "outer_title",        label: "Section title (e.g. \"Branch premises & student wing\")",        kind: "text" },
+      { key: "inner_eyebrow",      label: "Card eyebrow (e.g. \"BRANCH PREMISES\")",                       kind: "text" },
+      { key: "inner_title",        label: "Card title (e.g. \"ICAI Bhawan, Dhantoli\")",                   kind: "text" },
+      { key: "reading_room_label", label: "Reading-room CTA label",                                        kind: "text" },
+    ],
+  },
+  home_knowledge_section: {
+    label: "Home — Knowledge hub section (Circulars / Standards / e-Journal)",
+    page:  "Home",
+    fields: [
+      { key: "eyebrow",        label: "Eyebrow",                                kind: "text" },
+      { key: "title",          label: "Title",                                  kind: "text" },
+      { key: "view_all_label", label: "View-all link label (e.g. \"All resources →\")", kind: "text" },
+    ],
+  },
   about_vision: {
     label: "About — Vision",
     page:  "About",
