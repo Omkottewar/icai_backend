@@ -45,6 +45,7 @@ import { resourcesRouter } from "./routes/resources.js";
 import { branchContentRouter } from "./routes/branchContent.js";
 import { grievancesRouter } from "./routes/grievances.js";
 import { pragyaanRouter } from "./routes/pragyaan.js";
+import { studentSuggestionsRouter } from "./routes/studentSuggestions.js";
 
 const app = express();
 
@@ -110,6 +111,7 @@ app.use("/api", branchContentRouter);
 app.use("/api/resources", resourcesRouter);
 app.use("/api/grievances", grievancesRouter);
 app.use("/api/pragyaan", pragyaanRouter);
+app.use("/api/student-suggestions", studentSuggestionsRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {

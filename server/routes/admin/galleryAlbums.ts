@@ -17,13 +17,25 @@ function parseDate(v: unknown): string | null {
 }
 
 const VISIBILITIES = new Set(["public", "members", "private"]);
+const LAYOUTS      = new Set(["grid", "masonry", "story"]);
+const EVENT_TYPES  = new Set(["Technical", "Cultural", "Sports", "Press", "Social", "Visit", "Other"]);
 
 function parseAlbumBody(input: any) {
   const vis = trim(input.visibility);
+  const layout = trim(input.layout);
+  const eventType = trim(input.event_type);
+  // Featured position is 1..4 (1 = hero, 2-4 = sidekick tiles). Anything
+  // else collapses to null so a bad payload can't violate the CHECK
+  // constraint and 500 the admin save.
+  const rawPos = Number(input.featured_position);
+  const featured_position = Number.isFinite(rawPos) && rawPos >= 1 && rawPos <= 4
+    ? Math.trunc(rawPos) : null;
+  const is_featured = !!input.is_featured && featured_position !== null;
   return {
     title:        need(trim(input.title), "Title"),
     event_id:     trim(input.event_id)      || null,
     committee_tag: trim(input.committee_tag) || null,
+    event_type:    EVENT_TYPES.has(eventType) ? eventType : null,
     occurred_on:  parseDate(input.occurred_on),
     description:  trim(input.description)   || null,
     cover_file_id: trim(input.cover_file_id) || null,
@@ -32,6 +44,10 @@ function parseAlbumBody(input: any) {
     sort_order: Number.isFinite(Number(input.sort_order))
                   ? Math.trunc(Number(input.sort_order))
                   : 0,
+    // ── New layout / featured fields (migration 0061) ───────────────
+    is_featured,
+    featured_position,
+    layout: LAYOUTS.has(layout) ? layout : "grid",
   };
 }
 
@@ -56,6 +72,7 @@ galleryAdminRouter.get("/:id", async (req, res, next) => {
       file_id:     galleryPhotos.file_id,
       caption:     galleryPhotos.caption,
       sort_order:  galleryPhotos.sort_order,
+      is_featured: galleryPhotos.is_featured,
       path:        files.storage_path,
       thumb_path:  files.thumb_path,
       alt_text:    files.alt_text,
@@ -68,13 +85,14 @@ galleryAdminRouter.get("/:id", async (req, res, next) => {
     res.json({
       album,
       photos: photos.map((p) => ({
-        id:         p.id,
-        file_id:    p.file_id,
-        caption:    p.caption,
-        sort_order: p.sort_order,
-        url:        adminFileUrl(p.path),
-        thumb_url:  adminFileUrl(p.thumb_path) ?? adminFileUrl(p.path),
-        alt:        p.alt_text ?? '',
+        id:          p.id,
+        file_id:     p.file_id,
+        caption:     p.caption,
+        sort_order:  p.sort_order,
+        is_featured: p.is_featured,
+        url:         adminFileUrl(p.path),
+        thumb_url:   adminFileUrl(p.thumb_path) ?? adminFileUrl(p.path),
+        alt:         p.alt_text ?? '',
       })),
     });
   } catch (err) { handleApiError(err, res, next); }
@@ -158,12 +176,20 @@ galleryAdminRouter.post("/:id/photos", async (req, res, next) => {
 galleryAdminRouter.patch("/:id/photos/:photoId", async (req, res, next) => {
   try {
     const photoId = String(req.params.photoId);
-    const [row] = await db.update(galleryPhotos).set({
-      caption:    trim(req.body.caption) || null,
-      sort_order: Number.isFinite(Number(req.body.sort_order))
-                    ? Math.trunc(Number(req.body.sort_order))
-                    : 0,
-    }).where(eq(galleryPhotos.id, photoId)).returning();
+    // Build the patch incrementally — only update what the caller passed
+    // so a "toggle is_featured" request doesn't accidentally blank the
+    // caption or sort order. Lets the admin row-toggle without re-sending
+    // every field.
+    const patch: Record<string, unknown> = {};
+    if (req.body.caption !== undefined)     patch.caption     = trim(req.body.caption) || null;
+    if (req.body.sort_order !== undefined && Number.isFinite(Number(req.body.sort_order))) {
+      patch.sort_order = Math.trunc(Number(req.body.sort_order));
+    }
+    if (req.body.is_featured !== undefined) patch.is_featured = !!req.body.is_featured;
+    if (Object.keys(patch).length === 0) throw new ApiError(400, "Nothing to update");
+
+    const [row] = await db.update(galleryPhotos).set(patch)
+      .where(eq(galleryPhotos.id, photoId)).returning();
     if (!row) throw new ApiError(404, "Photo not found");
     res.json({ item: row });
   } catch (err) { handleApiError(err, res, next); }

@@ -252,12 +252,59 @@ export const galleryAlbums = pgTable(
     visibility:    text("visibility").notNull().default("public"),
     hidden:        boolean("hidden").notNull().default(false),
     sort_order:    integer("sort_order").notNull().default(0),
+    // ── Layout / featured (migration 0061) ─────────────────────────────
+    // is_featured + featured_position drive the hero strip at the top of
+    // /gallery (1 = hero, 2-4 = sidekick tiles). layout drives how photos
+    // render inside the album: 'grid' (uniform thumbs, default), 'masonry'
+    // (waterfall that respects aspect ratios), or 'story' (full-width
+    // single column with captions between photos).
+    is_featured:       boolean("is_featured").notNull().default(false),
+    featured_position: integer("featured_position"),
+    layout:            text("layout").notNull().default("grid"),
+    // Orthogonal to committee_tag. Lets members filter by event flavour
+    // (Technical / Cultural / Sports / Press / Social / Visit / Other)
+    // independently of which committee organised it. NULL = unfiltered.
+    // See migration 0062.
+    event_type:        text("event_type"),
     created_at:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updated_at:    timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("gallery_albums_committee_idx").on(t.committee_tag),
     index("gallery_albums_occurred_idx").on(t.occurred_on),
+  ],
+);
+
+// Video Gallery — separate from photo albums. Each row is one embeddable
+// video (YouTube/Vimeo/external). Same visibility + featured semantics as
+// gallery_albums so the public page can render a unified feed.
+// See migration 0062.
+export const galleryVideos = pgTable(
+  "gallery_videos",
+  {
+    id:             uuid("id").primaryKey().defaultRandom(),
+    title:          text("title").notNull(),
+    description:    text("description"),
+    provider:       text("provider").notNull().default("youtube"),
+    video_id:       text("video_id").notNull(),
+    video_url:      text("video_url"),
+    poster_file_id: uuid("poster_file_id").references(() => files.id, { onDelete: "set null" }),
+    event_id:       uuid("event_id").references(() => events.id, { onDelete: "set null" }),
+    committee_tag:  text("committee_tag"),
+    event_type:     text("event_type"),
+    occurred_on:    date("occurred_on"),
+    duration_secs:  integer("duration_secs"),
+    visibility:     text("visibility").notNull().default("public"),
+    hidden:         boolean("hidden").notNull().default(false),
+    is_featured:    boolean("is_featured").notNull().default(false),
+    sort_order:     integer("sort_order").notNull().default(0),
+    created_at:     timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updated_at:     timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("gallery_videos_occurred_idx").on(t.occurred_on),
+    index("gallery_videos_committee_idx").on(t.committee_tag),
+    index("gallery_videos_event_type_idx").on(t.event_type),
   ],
 );
 
@@ -269,6 +316,9 @@ export const galleryPhotos = pgTable(
     file_id:     uuid("file_id").notNull().references(() => files.id, { onDelete: "cascade" }),
     caption:     text("caption"),
     sort_order:  integer("sort_order").notNull().default(0),
+    // Bump this photo to a 2× tile inside the masonry layout. No-op for
+    // grid or story layouts. See migration 0061.
+    is_featured: boolean("is_featured").notNull().default(false),
     created_at:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

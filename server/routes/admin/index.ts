@@ -23,6 +23,7 @@ import { exportsAdminRouter } from "./exports.js";
 import { approvalsAdminRouter } from "./approvals.js";
 import { paperPresentationsAdminRouter } from "./paperPresentations.js";
 import { galleryAdminRouter } from "./galleryAlbums.js";
+import { galleryVideosAdminRouter } from "./galleryVideos.js";
 import { newslettersAdminRouter } from "./newsletters.js";
 import { officeBearersAdminRouter } from "./officeBearers.js";
 import { annualReportsAdminRouter } from "./annualReports.js";
@@ -35,6 +36,10 @@ import { bookingsAdminRouter } from "./bookings.js";
 import { cabfAdminRouter } from "./cabf.js";
 import { paymentsAdminRouter } from "./payments.js";
 import { icaiDirectoryAdminRouter } from "./icaiDirectory.js";
+import {
+  studentSuggestionsAdminRouter,
+  studentSuggestionTopicsAdminRouter,
+} from "./studentSuggestions.js";
 
 export const adminRouter = Router();
 
@@ -65,6 +70,7 @@ adminRouter.use("/exports", exportsAdminRouter);
 adminRouter.use("/approvals", approvalsAdminRouter);
 adminRouter.use("/paper-presentations", paperPresentationsAdminRouter);
 adminRouter.use("/gallery-albums", galleryAdminRouter);
+adminRouter.use("/gallery-videos", galleryVideosAdminRouter);
 adminRouter.use("/newsletters", newslettersAdminRouter);
 adminRouter.use("/office-bearers", officeBearersAdminRouter);
 adminRouter.use("/annual-reports", annualReportsAdminRouter);
@@ -78,3 +84,5 @@ adminRouter.use("/bookings", bookingsAdminRouter);
 adminRouter.use("/cabf", cabfAdminRouter);
 adminRouter.use("/payments", paymentsAdminRouter);
 adminRouter.use("/icai-directory", icaiDirectoryAdminRouter);
+adminRouter.use("/student-suggestions", studentSuggestionsAdminRouter);
+adminRouter.use("/student-suggestion-topics", studentSuggestionTopicsAdminRouter);

@@ -5,6 +5,7 @@ import {
   paperPresentations,
   galleryAlbums,
   galleryPhotos,
+  galleryVideos,
   branchNewsletters,
   officeBearers,
   annualReports,
@@ -76,9 +77,13 @@ branchContentRouter.get("/gallery-albums", async (req, res, next) => {
       id:           galleryAlbums.id,
       title:        galleryAlbums.title,
       committee_tag: galleryAlbums.committee_tag,
+      event_type:    galleryAlbums.event_type,
       occurred_on:  galleryAlbums.occurred_on,
       description:  galleryAlbums.description,
       visibility:   galleryAlbums.visibility,
+      is_featured:       galleryAlbums.is_featured,
+      featured_position: galleryAlbums.featured_position,
+      layout:            galleryAlbums.layout,
       cover_path:        files.storage_path,
       cover_thumb_path:  files.thumb_path,
       cover_medium_path: files.medium_path,
@@ -102,21 +107,34 @@ branchContentRouter.get("/gallery-albums", async (req, res, next) => {
       .groupBy(galleryPhotos.album_id);
     const countByAlbum = new Map<string, number>(counts.map((c) => [c.album_id, c.count]));
 
-    res.json({
-      items: rows.map((r) => ({
-        id: r.id,
-        title: r.title,
-        committee_tag: r.committee_tag,
-        occurred_on: r.occurred_on,
-        description: r.description,
-        visibility: r.visibility,
-        cover_url:        fileUrl(r.cover_path),
-        cover_thumb_url:  fileUrl(r.cover_thumb_path)  ?? fileUrl(r.cover_path),
-        cover_medium_url: fileUrl(r.cover_medium_path) ?? fileUrl(r.cover_path),
-        cover_alt:        r.cover_alt ?? '',
-        photo_count: countByAlbum.get(r.id) ?? 0,
-      })),
+    // We send featured (hero strip) and items (everything below) as two
+    // arrays so the frontend doesn't have to filter twice. Featured albums
+    // STAY in `items` too — the page still wants them findable by the
+    // committee filter chips below the hero.
+    const shape = (r: typeof rows[number]) => ({
+      id: r.id,
+      title: r.title,
+      committee_tag: r.committee_tag,
+      event_type: r.event_type,
+      occurred_on: r.occurred_on,
+      description: r.description,
+      visibility: r.visibility,
+      is_featured: r.is_featured,
+      featured_position: r.featured_position,
+      layout: r.layout || "grid",
+      cover_url:        fileUrl(r.cover_path),
+      cover_thumb_url:  fileUrl(r.cover_thumb_path)  ?? fileUrl(r.cover_path),
+      cover_medium_url: fileUrl(r.cover_medium_path) ?? fileUrl(r.cover_path),
+      cover_alt:        r.cover_alt ?? "",
+      photo_count: countByAlbum.get(r.id) ?? 0,
     });
+
+    const items = rows.map(shape);
+    const featured = items
+      .filter((a) => a.is_featured && a.featured_position)
+      .sort((a, b) => (a.featured_position ?? 99) - (b.featured_position ?? 99));
+
+    res.json({ items, featured });
   } catch (err) { next(err); }
 });
 
@@ -135,6 +153,7 @@ branchContentRouter.get("/gallery-albums/:id", async (req, res, next) => {
       occurred_on:  galleryAlbums.occurred_on,
       description:  galleryAlbums.description,
       visibility:   galleryAlbums.visibility,
+      layout:       galleryAlbums.layout,
       cover_path:        coverFiles.storage_path,
       cover_thumb_path:  coverFiles.thumb_path,
       cover_medium_path: coverFiles.medium_path,
@@ -153,6 +172,7 @@ branchContentRouter.get("/gallery-albums/:id", async (req, res, next) => {
       id:           galleryPhotos.id,
       caption:      galleryPhotos.caption,
       sort_order:   galleryPhotos.sort_order,
+      is_featured:  galleryPhotos.is_featured,
       path:         files.storage_path,
       thumb_path:   files.thumb_path,
       medium_path:  files.medium_path,
@@ -168,6 +188,7 @@ branchContentRouter.get("/gallery-albums/:id", async (req, res, next) => {
     res.json({
       album: {
         ...album,
+        layout: album.layout || "grid",
         cover_url:        fileUrl(album.cover_path),
         cover_thumb_url:  fileUrl(album.cover_thumb_path)  ?? fileUrl(album.cover_path),
         cover_medium_url: fileUrl(album.cover_medium_path) ?? fileUrl(album.cover_path),
@@ -176,6 +197,7 @@ branchContentRouter.get("/gallery-albums/:id", async (req, res, next) => {
         id:        p.id,
         caption:   p.caption,
         sort_order: p.sort_order,
+        is_featured: p.is_featured,
         url:       fileUrl(p.path),
         thumb_url: fileUrl(p.thumb_path)  ?? fileUrl(p.path),
         medium_url: fileUrl(p.medium_path) ?? fileUrl(p.path),
@@ -249,6 +271,60 @@ branchContentRouter.get("/gallery-albums/:id/download.zip", async (req, res, nex
     }
     await archive.finalize();
   } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── Video Gallery ───────────────────────────────────────────────────────────
+// List videos with optional ?committee= / ?event_type= / ?year= filters.
+// Same visibility tiers as photo albums (public / members / private).
+branchContentRouter.get("/gallery-videos", async (req, res, next) => {
+  try {
+    const isLoggedIn = !!req.cookies?.session;
+    const allowedVis = isLoggedIn ? ["public", "members"] : ["public"];
+
+    const rows = await db.select({
+      id:            galleryVideos.id,
+      title:         galleryVideos.title,
+      description:   galleryVideos.description,
+      provider:      galleryVideos.provider,
+      video_id:      galleryVideos.video_id,
+      video_url:     galleryVideos.video_url,
+      committee_tag: galleryVideos.committee_tag,
+      event_type:    galleryVideos.event_type,
+      occurred_on:   galleryVideos.occurred_on,
+      duration_secs: galleryVideos.duration_secs,
+      is_featured:   galleryVideos.is_featured,
+      sort_order:    galleryVideos.sort_order,
+      poster_path:        files.storage_path,
+      poster_thumb_path:  files.thumb_path,
+      poster_medium_path: files.medium_path,
+    })
+      .from(galleryVideos)
+      .leftJoin(files, eq(files.id, galleryVideos.poster_file_id))
+      .where(and(
+        eq(galleryVideos.hidden, false),
+        inArray(galleryVideos.visibility, allowedVis),
+      ))
+      .orderBy(asc(galleryVideos.sort_order), desc(galleryVideos.occurred_on));
+
+    res.json({
+      items: rows.map((r) => ({
+        id:            r.id,
+        title:         r.title,
+        description:   r.description,
+        provider:      r.provider,
+        video_id:      r.video_id,
+        video_url:     r.video_url,
+        committee_tag: r.committee_tag,
+        event_type:    r.event_type,
+        occurred_on:   r.occurred_on,
+        duration_secs: r.duration_secs,
+        is_featured:   r.is_featured,
+        poster_url:        fileUrl(r.poster_path),
+        poster_thumb_url:  fileUrl(r.poster_thumb_path)  ?? fileUrl(r.poster_path),
+        poster_medium_url: fileUrl(r.poster_medium_path) ?? fileUrl(r.poster_path),
+      })),
+    });
+  } catch (err) { next(err); }
 });
 
 // ─── Newsletters ─────────────────────────────────────────────────────────────

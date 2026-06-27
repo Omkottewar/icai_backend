@@ -1,56 +1,47 @@
-// Email transport. Uses nodemailer over SMTP — the .env file already has the
-// usual SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / EMAIL_FROM slots.
+// Email transport. Uses the Resend HTTP API (https://resend.com).
+// The verified sending domain for this tenant is icainagpur.in — set in the
+// Resend dashboard alongside the SPF/DKIM/DMARC DNS records on Hostinger.
 //
-// Behaviour when SMTP is not configured:
-//   • In development, mail is logged to stdout and treated as "sent". This
+// Behaviour when RESEND_API_KEY is not configured:
+//   • In development, mail is logged to stdout and treated as "skipped". This
 //     lets the rest of the pipeline (notification rows, delivery audit) run
-//     end-to-end without a real mailbox.
-//   • In production, missing SMTP credentials cause sendEmail() to throw, so
-//     the delivery row is recorded as failed and the admin can see the gap.
+//     end-to-end without a real API key.
+//   • In production, missing credentials cause sendEmail() to return a
+//     "failed" result, so the delivery row is recorded as failed and the
+//     admin can see the gap.
 //
-// nodemailer is loaded lazily so a missing dependency in dev does not crash
-// the import graph at boot.
+// The Resend SDK is loaded lazily so a missing dependency in dev does not
+// crash the import graph at boot.
 
 import "dotenv/config";
 
-let transporterPromise: Promise<any> | null = null;
-let transporterDisabled = false;
+let clientPromise: Promise<any> | null = null;
+let clientDisabled = false;
 
-function smtpConfigured(): boolean {
-  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+function resendConfigured(): boolean {
+  return Boolean(process.env.RESEND_API_KEY);
 }
 
-async function getTransporter() {
-  if (transporterDisabled) return null;
-  if (!smtpConfigured()) return null;
-  if (transporterPromise) return transporterPromise;
+async function getClient() {
+  if (clientDisabled) return null;
+  if (!resendConfigured()) return null;
+  if (clientPromise) return clientPromise;
 
-  transporterPromise = (async () => {
-    let nodemailer: any;
+  clientPromise = (async () => {
+    let Resend: any;
     try {
-      // dynamic import so the module is only required when SMTP is configured.
-      nodemailer = await import("nodemailer");
+      const mod = await import("resend");
+      Resend = mod.Resend;
     } catch (err) {
-      // nodemailer not installed yet — disable until restart so we don't keep
-      // re-throwing on every send.
-      transporterDisabled = true;
+      clientDisabled = true;
       // eslint-disable-next-line no-console
-      console.warn("[email] nodemailer not installed; emails will be logged only");
+      console.warn("[email] resend SDK not installed; emails will be logged only");
       return null;
     }
-    const t = nodemailer.default.createTransport({
-      host:   process.env.SMTP_HOST,
-      port:   Number(process.env.SMTP_PORT ?? 587),
-      secure: Number(process.env.SMTP_PORT ?? 587) === 465,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    });
-    return t;
+    return new Resend(process.env.RESEND_API_KEY);
   })();
 
-  return transporterPromise;
+  return clientPromise;
 }
 
 export type SendEmailInput = {
@@ -65,23 +56,16 @@ export type SendEmailResult =
   | { status: "skipped"; reason: string }
   | { status: "failed"; error: string };
 
-/**
- * Send a single transactional email.
- *
- * Returns a structured result instead of throwing — the caller (notify())
- * records this on the delivery audit row regardless of outcome.
- */
 // Hard blocklist — recipients matching ANY of these domain suffixes are
-// rejected before nodemailer ever sees them, regardless of NODE_ENV. This
-// is belt-and-braces protection against accidentally emailing the real
-// ICAI organisation while developing or after a config flip.
+// rejected before Resend ever sees them, regardless of NODE_ENV. Belt-and-
+// braces protection against accidentally emailing the real ICAI organisation
+// while developing or after a config flip.
 //
-// To send to one of these in production (after you've audited the
-// recipient list), remove the entry or set ALLOW_ICAI_OUTBOUND=1.
+// To send to one of these in production (after auditing the recipient list),
+// remove the entry or set ALLOW_ICAI_OUTBOUND=1.
 //
 // Ordered MOST-SPECIFIC first so the audit log shows the closest match
-// (e.g. "blocked_domain:nagpur.icai.org" instead of the broader
-// "icai.org") — easier triage when reading the deliveries table.
+// (e.g. "blocked_domain:nagpur.icai.org" instead of the broader "icai.org").
 const BLOCKED_DOMAINS = [
   "nagpur.icai.org",
   "wirc-icai.org",
@@ -91,7 +75,6 @@ const BLOCKED_DOMAINS = [
 
 function isBlockedRecipient(addr: string): string | null {
   if (process.env.ALLOW_ICAI_OUTBOUND === "1") return null;
-  // Extract the bare email from "Name <email@host>" or plain "email@host".
   const m = addr.match(/<([^>]+)>|([^\s<>]+@[^\s<>]+)/);
   const email = (m?.[1] ?? m?.[2] ?? addr).toLowerCase().trim();
   const host = email.split("@")[1];
@@ -102,12 +85,18 @@ function isBlockedRecipient(addr: string): string | null {
   return null;
 }
 
+/**
+ * Send a single transactional email.
+ *
+ * Returns a structured result instead of throwing — the caller (notify())
+ * records this on the delivery audit row regardless of outcome.
+ */
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
-  const from = process.env.EMAIL_FROM || "ICAI Nagpur <no-reply@nagpur.icai.org>";
+  const from = process.env.EMAIL_FROM || "ICAI Nagpur <no-reply@icainagpur.in>";
 
-  // Safety net — runs before transport setup so even a totally misconfigured
-  // SMTP path can't slip through. Logs loudly so the admin log makes it
-  // obvious why a delivery was refused.
+  // Safety net — runs before client setup so even a totally misconfigured
+  // path can't slip through. Logs loudly so the admin log makes it obvious
+  // why a delivery was refused.
   const blockedDomain = isBlockedRecipient(input.to);
   if (blockedDomain) {
     // eslint-disable-next-line no-console
@@ -115,23 +104,23 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
     return { status: "skipped", reason: `blocked_domain:${blockedDomain}` };
   }
 
-  const transporter = await getTransporter();
-  if (!transporter) {
+  const client = await getClient();
+  if (!client) {
     if (process.env.NODE_ENV === "production") {
-      return { status: "failed", error: "smtp_not_configured" };
+      return { status: "failed", error: "resend_not_configured" };
     }
     // dev fallback — log and pretend it sent
     // eslint-disable-next-line no-console
     console.log(`[email:dev] from=${from} to=${input.to}\n  subject=${input.subject}\n  body=${input.body.slice(0, 200)}${input.body.length > 200 ? "…" : ""}`);
-    return { status: "skipped", reason: "smtp_not_configured_dev" };
+    return { status: "skipped", reason: "resend_not_configured_dev" };
   }
 
   // Dev safety net — when DEV_EMAIL_OVERRIDE is set (and we're not in
   // production), redirect every outbound email to that single inbox. Keeps
   // test grievances, registrations, escalations, etc. from accidentally
-  // hitting real branch addresses while wiring SMTP up. The original
-  // recipient is prepended to the subject so the override inbox can still
-  // tell who *would have* received each mail.
+  // hitting real branch addresses while wiring up. The original recipient
+  // is prepended to the subject so the override inbox can still tell who
+  // *would have* received each mail.
   const override = process.env.DEV_EMAIL_OVERRIDE;
   const finalTo      = override && process.env.NODE_ENV !== "production" ? override : input.to;
   const finalSubject = override && process.env.NODE_ENV !== "production"
@@ -139,14 +128,20 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
     : input.subject;
 
   try {
-    const info = await transporter.sendMail({
+    const { data, error } = await client.emails.send({
       from,
       to:      finalTo,
       subject: finalSubject,
       text:    input.body,
       html:    input.html,
     });
-    return { status: "sent", messageId: info?.messageId };
+    if (error) {
+      return {
+        status: "failed",
+        error: typeof error === "string" ? error : (error.message || JSON.stringify(error)),
+      };
+    }
+    return { status: "sent", messageId: data?.id };
   } catch (err) {
     return {
       status: "failed",

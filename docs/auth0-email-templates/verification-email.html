@@ -1,0 +1,113 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="color-scheme" content="light only" />
+  <meta name="supported-color-schemes" content="light only" />
+  <title>Verify your email</title>
+  <style>
+    @media only screen and (max-width:600px) {
+      .container { width:100% !important; padding:16px !important; }
+      .cta { padding:14px 24px !important; font-size:15px !important; }
+      h1 { font-size:20px !important; }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;">
+  <span style="display:none;visibility:hidden;mso-hide:all;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">
+    Confirm your email address to activate your account with the Nagpur Branch of WIRC of ICAI.
+  </span>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f5f7;">
+    <tr>
+      <td align="center" style="padding:32px 16px;">
+        <table role="presentation" class="container" width="600" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:12px;border:1px solid #e5e7eb;overflow:hidden;">
+
+          <tr>
+            <td align="center" style="padding:32px 32px 16px 32px;background-color:#ffffff;">
+              <img src="https://ohpjavugvpqjbloxzluf.supabase.co/storage/v1/object/public/public-content/email-assets/icai-nagpur-logo.png" width="72" height="72" alt="ICAI Nagpur" style="display:block;width:72px;height:72px;border-radius:12px;" />
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="padding:0 32px 8px 32px;">
+              <div style="font-size:13px;font-weight:600;color:#3622FF;letter-spacing:0.4px;text-transform:uppercase;">Nagpur Branch of WIRC of ICAI</div>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="padding:8px 32px 16px 32px;">
+              <h1 style="margin:0;font-size:24px;line-height:1.3;font-weight:700;color:#0f172a;">Confirm your email address</h1>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:8px 32px 24px 32px;">
+              <p style="margin:0 0 12px 0;font-size:15px;line-height:1.6;color:#374151;">Hello,</p>
+              <p style="margin:0 0 12px 0;font-size:15px;line-height:1.6;color:#374151;">
+                Thank you for registering with the <strong>Nagpur Branch of WIRC of ICAI</strong>. To activate your account and access the branch portal, please confirm that <strong>{{ user.email }}</strong> is your email address.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="padding:8px 32px 24px 32px;">
+              <!--[if mso]>
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="{{ url }}" style="height:48px;v-text-anchor:middle;width:240px;" arcsize="14%" stroke="f" fillcolor="#3622FF">
+                <w:anchorlock/>
+                <center style="color:#ffffff;font-family:Arial,sans-serif;font-size:16px;font-weight:600;">Verify email address</center>
+              </v:roundrect>
+              <![endif]-->
+              <!--[if !mso]><!-- -->
+              <a href="{{ url }}" class="cta" style="display:inline-block;background-color:#3622FF;color:#ffffff;text-decoration:none;font-weight:600;font-size:16px;padding:14px 32px;border-radius:8px;line-height:1;">Verify email address</a>
+              <!--<![endif]-->
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:0 32px 24px 32px;">
+              <p style="margin:0 0 8px 0;font-size:13px;line-height:1.5;color:#6b7280;">If the button above doesn't work, copy and paste this link into your browser:</p>
+              <p style="margin:0;font-size:12px;line-height:1.5;color:#3622FF;word-break:break-all;"><a href="{{ url }}" style="color:#3622FF;text-decoration:underline;">{{ url }}</a></p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:16px 32px 24px 32px;">
+              <div style="border-top:1px solid #e5e7eb;padding-top:16px;">
+                <p style="margin:0;font-size:12px;line-height:1.5;color:#9ca3af;">
+                  If you didn't create an account with the Nagpur Branch of WIRC of ICAI, you can safely ignore this email — no further action is needed.
+                </p>
+                <p style="margin:8px 0 0 0;font-size:12px;line-height:1.5;color:#9ca3af;">
+                  This verification link will expire in 5 days for your security.
+                </p>
+              </div>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="padding:20px 32px;background-color:#fafafa;border-top:1px solid #e5e7eb;">
+              <p style="margin:0;font-size:12px;line-height:1.5;color:#6b7280;">
+                <strong style="color:#374151;">Nagpur Branch of WIRC of ICAI</strong><br />
+                ICAI Bhawan, 20/1, Behind Vijayanand Society, Dhantoli, Nagpur — 440012<br />
+                <a href="mailto:nagpur@icai.in" style="color:#3622FF;text-decoration:none;">nagpur@icai.in</a>
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="padding:0 32px 24px 32px;background-color:#fafafa;">
+              <p style="margin:0;font-size:11px;line-height:1.5;color:#9ca3af;">
+                This is a transactional email sent to confirm your account registration.<br />
+                Sent from no-reply@icainagpur.in · Please do not reply to this message.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
