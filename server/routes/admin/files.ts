@@ -25,8 +25,14 @@ const VIDEO_MIMES = new Set(["video/mp4", "video/webm", "video/quicktime"]);
 // Per-type size caps. Images are tiny after the sharp pipeline; videos
 // need real headroom. The express.json body limit in server/index.ts must
 // be at least 1.4× whichever is bigger here (base64 overhead).
-const MAX_IMAGE_BYTES = 6 * 1024 * 1024;   // 6 MB
-const MAX_VIDEO_BYTES = 30 * 1024 * 1024;  // 30 MB
+//
+// Note for longer recordings: the in-event banner is meant for short
+// teaser clips (30–90 sec). Full seminar / AGM recordings should be
+// uploaded to YouTube and added via /admin/gallery-videos (Video Gallery,
+// F22) — that path has no size cap and gives members a proper streaming
+// player instead of a download-then-play banner.
+const MAX_IMAGE_BYTES = 6   * 1024 * 1024;   //   6 MB
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;   // 100 MB
 
 // ─── POST /api/admin/files ────────────────────────────────────────────────────
 // Body: { name, mime_type, bucket, data_base64, alt_text? }

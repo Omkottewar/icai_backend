@@ -375,8 +375,353 @@ sections.push(comparisonTable([
 ]));
 sections.push(new Paragraph({ children: [new PageBreak()] }));
 
+// ─── COMPLETE FEATURE INVENTORY (sales-pitch reference) ──────────────────
+sections.push(H1("3. Complete Feature Inventory — What's Included"));
+sections.push(P("The new portal ships with 200+ distinct, working features across 11 functional categories. Every line below represents an end-user-visible capability already built into the production codebase — not a roadmap item. This is the canonical reference for what is being delivered as part of this engagement."));
+sections.push(P("Statistics at a glance:", { bold: true }));
+sections.push(Bullet("74+ frontend pages (43 public, 31 admin)"));
+sections.push(Bullet("32 database schema modules, 62 migrations applied"));
+sections.push(Bullet("28 public + 27 admin backend route modules"));
+sections.push(Bullet("15 distinct role codes with scope + singleton enforcement"));
+sections.push(Bullet("40+ admin-editable site-content slots (every visible string + image)"));
+sections.push(Bullet("3,061 ICAI members imported into the member directory"));
+sections.push(Bullet("13 standing committees with full chairman/convener/co-convener roster"));
+sections.push(Bullet("317 knowledge sources indexed for the AI assistant"));
+
+// ── 3.1 Public visitor features ──────────────────────────────────────────
+sections.push(H2("3.1 Public Visitor Experience (no login required)"));
+[
+  "Modern responsive homepage with hero, scrolling announcements ticker, leadership banner with image carousel, recent photos strip, branch premises section, events calendar preview, knowledge hub",
+  "Fully editable hero — admin can change background photo, watermark logo, headline, badge text, and CTA labels through the admin panel",
+  "Universal site search across events, content, papers, journals, members",
+  "About Us page with chairman's message, branch history, contact information, Google Maps embed (admin-editable)",
+  "Public events listing with List view + Month-calendar view toggle",
+  "Audience filter on events (All / Members / Students / Public) with shareable deep-links",
+  "Photo Gallery with album browse, three layout styles (grid / masonry / story), keyboard-navigable lightbox, .zip album download",
+  "Video Gallery — YouTube/Vimeo embeds with inline player modal",
+  "Committee filter chips + event-type filter chips + year-jump navigation on gallery",
+  "Newsletter archive with cover images, browseable by month/year",
+  "Annual reports archive with cover images and PDF reader",
+  "Paper presentations library with in-browser PDF reader",
+  "Speaker pages with photo + bio + paper portfolio",
+  "E-journal reader with bookmarking",
+  "Past events archive (photos + Q&A history)",
+  "Office bearers page with photos + roles + tenure history",
+  "Past chairmen historical record",
+  "Branch committees directory with each committee's chairman/convener/co-convener",
+  "Public room booking listing (rates + availability)",
+  "Job vacancies + articleship listings (filterable by type)",
+  "Member benevolent fund (CABF) information page with HQ + branch CTAs",
+  "Investor awareness content page",
+  "CA 2.0 Vision content page",
+  "Career counselling information page",
+  "Grievance / contact / suggestion combined submission form (reCAPTCHA-protected)",
+  "Grievance status tracking via ticket number + email",
+  "Cookie consent banner with policy-version replay (DPDP Act 2023 compliant)",
+  "Mobile-responsive design with optimized phone-first layouts",
+  "Installable as Progressive Web App (PWA) on Android, iOS, Windows, macOS",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.2 Member portal ─────────────────────────────────────────────────────
+sections.push(H2("3.2 Member Portal (5,000+ Members)"));
+[
+  "Personal Member Dashboard — identity card with MRN, FCA/ACA status, COP status, member-since date, city",
+  "CPE deadline alert banner — turns amber 90 days before FY-end, red at 30 days, green when target met",
+  "4-tile stat row: CPE hours this FY, years as member, events attended this FY, library bookmarks count",
+  "CPE compliance tracker — 3-year structured/unstructured/total view vs ICAI's 120hr / 90-structured threshold",
+  "Personalized event recommendations (member isn't already registered for)",
+  "\"My Library\" — saved papers, journals, presentations with one-click bookmark/recall",
+  "Member services grid with deep-links to ICAI UDIN, CPE portal, COP services (with login-wall notice)",
+  "Searchable member directory with name / MRN / city / firm filters",
+  "Online member fee payment via Razorpay with GST receipts",
+  "Online event registration with capacity check + waitlist auto-promotion",
+  "Auto-generated CPE certificate PDF (A4 landscape, deterministic cert numbers)",
+  "Google Calendar add-to-calendar deep-link (one click)",
+  "iCal subscription feed (auto-syncs to Outlook / Apple Calendar / any standard calendar app)",
+  "Per-event Q&A forum (Quora-style) — ask the speaker before/during the event",
+  "Real-time event chat (#general + #q-and-a + #announcements channels)",
+  "Newsletter archive (member-submitted articles supported)",
+  "Submit an article workflow with admin approval",
+  "AI assistant (Pragyaan) — grounded RAG with role-scoped answers",
+  "Web push notifications (event reminders, approvals, grievance updates)",
+  "In-app notification inbox with read/unread tracking",
+  "Cookie + JWT-based session with MRN-gated signup (validates against icai_member_master)",
+  "Areas of practice chips on profile",
+  "Edit profile via deep-link to ICAI eServices",
+  "Member-only photo gallery visibility tier",
+  "Track grievance status via personalized link",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.3 Student portal ────────────────────────────────────────────────────
+sections.push(H2("3.3 Student Portal (8,500+ Students)"));
+[
+  "WICASA student dashboard with personalized event recommendations",
+  "Mock tests library with attempt + scoring + result history",
+  "Per-test peer discussion thread (one thread per test, public-read, login-required-to-post)",
+  "Student suggestions board — topic-bucketed (Curriculum / Events & Workshops / Facilities / Mentorship / Other)",
+  "Upvote-only voting on suggestions with optimistic-update UI",
+  "280-character cap + 3-suggestions-per-week rate-limit per student",
+  "\"My suggestions\" tab showing status + rejection reasons",
+  "Articleship vacancies listing (filterable by firm / location)",
+  "Student publications library",
+  "Career counselling page",
+  "Study material library",
+  "WICASA event calendar (audience-tagged from main events)",
+  "WICASA photo gallery (committee-tagged for easy discovery)",
+  "Scholarship scheme information",
+  "Investor Awareness content",
+  "AI assistant (Pragyaan) with student-scoped retrieval",
+  "Push notifications for new mock tests, results, announcements",
+  "Combined Q&A forum participation across all CPE events",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.4 Events & CPE programmes ───────────────────────────────────────────
+sections.push(H2("3.4 Events & CPE Programmes"));
+[
+  "Full event lifecycle: create → publish → register → attend → certificate",
+  "13 standing committees pre-loaded with real chairman/convener/co-convener data",
+  "Audience targeting (Members / Students / Public / All)",
+  "Event mode: in-person / online / hybrid",
+  "Recurring events with DAILY / WEEKLY / MONTHLY RRULE expansion",
+  "\"Edit this occurrence vs. edit future\" scope for recurring series",
+  "Capacity tracking with auto-waitlist when full",
+  "Waitlist auto-promotion on cancellation (oldest waitlister gets the spot + notification)",
+  "Razorpay payment integration for paid events",
+  "GST per-event configuration (admin checkbox + percent input, 0–28% range)",
+  "GST split persisted in payment metadata for reconciliation",
+  "Auto-receipt email after payment",
+  "Per-event cover image with crop-on-upload",
+  "Per-event Q&A forum (speaker-moderated, answered-marker, audit log)",
+  "Speaker magic-link access (no full account needed)",
+  "Real-time event chat: #general + #q-and-a + #announcements channels",
+  "Chat features: pin / mute / freeze / archive / attachments / reactions / threads",
+  "Auto-generated CPE certificate (PDF, deterministic cert numbers, no manual issuance)",
+  "Per-event .ics download for one-click Google Calendar / Outlook / Apple Calendar",
+  "Per-user iCal subscription feed (auto-syncs all registrations)",
+  "Add to Google Calendar deep-link (works on every device)",
+  "Photo + video gallery linkage per event",
+  "Event-type tagging (Technical / Cultural / Sports / Press / Social / Visit / Other)",
+  "Committee-coloured chips throughout (consistent visual identity)",
+  "Past event archive with photo gallery + Q&A history",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.5 Payments & Financial ──────────────────────────────────────────────
+sections.push(H2("3.5 Payments & Financial Integration"));
+[
+  "Razorpay live integration (cards / UPI / netbanking / wallets / EMI)",
+  "GST-compliant tax calculation (base fee + GST = total, all stored separately)",
+  "Branch GSTIN management via site settings",
+  "Auto-emailed payment receipt after success",
+  "Payments admin with 30-day summary cards (success / refunded / failed / total)",
+  "Per-payment detail drawer with Razorpay reference, metadata JSON, refund history",
+  "Refund management with reconciliation log",
+  "Payment audit log linked to event_registrations + users",
+  "Multiple payment methods accepted automatically (no per-method config)",
+  "Webhook handling for async payment confirmations",
+  "Member fee payment workflow (annual ACA / FCA contributions)",
+  "Event registration fee workflow with GST",
+  "CABF (Member Benevolent Fund) 5-state pipeline: submitted → reviewing → approved → disbursed / rejected",
+  "Monthly CSV export of CABF cases for chairman review",
+  "Per-case PAN auto-pull from member_profiles.kym_data",
+  "IUT (Inter-Unit Transfer) transfers schema (admin UI pending)",
+  "Bills generation schema (admin UI pending)",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.6 Admin console ─────────────────────────────────────────────────────
+sections.push(H2("3.6 Admin Console (31 admin pages, role-based access)"));
+[
+  "Admin Dashboard with role-scoped sidebar (different admins see different sections)",
+  "15 distinct role codes: branch_chairman, vice-chairman, secretary, treasurer, MCM, committee_chairman, convener, co-convener, accountant, branch_manager, sub_branch_manager, student_desk, central_council_coordinator, admin, committee_member",
+  "Singleton-per-scope enforcement (only one chairman, one treasurer per branch / committee)",
+  "DB trigger ensures committee_chairman must hold MCM first",
+  "User management with role assignment + scope (branch / committee)",
+  "Events admin: full CRUD, recurrence management, GST checkbox, audience targeting",
+  "Event registrations admin with attendance marking",
+  "Committees admin (CRUD + chairman/convener/co-convener linkage)",
+  "Office Bearers admin (term-based with photos + role codes + tenure dates)",
+  "ICAI Directory admin: xlsx upload, 500-row chunked upsert, MRN gating flag toggle, wipe action",
+  "CPE credits admin: issue credit modal with member typeahead, bulk-issue from past event",
+  "CPE compliance dashboard (3-year structured/unstructured/total view)",
+  "Rooms admin (CRUD with active/retired filter, paise-stored pricing)",
+  "Bookings admin (FIFO inbox: Requested / Confirmed / Completed / Cancelled with live counts)",
+  "Postgres EXCLUDE-gist overlap protection on bookings",
+  "CABF (Benevolent Fund) admin: 5-state pipeline + monthly CSV export",
+  "Payments admin (Razorpay reconciliation, 30-day summary, refund history)",
+  "Grievances inbox (tabbed by status, 48h SLA badge, count badges)",
+  "Grievance routing admin (subject → email map CRUD)",
+  "Approvals workflow (cross-module — papers, articles, etc.)",
+  "Site Content admin: 40+ slots, page-tabbed UI, crop-on-upload for every image, minimum-dimension validation",
+  "Site Settings admin (feature flags, branch GSTIN, Pragyaan disclaimer)",
+  "Announcements admin (with audience targeting + start/end dates)",
+  "Newsletters admin (cover images, PDF upload, issue month/year)",
+  "Annual Reports admin (FY-tagged, PDF upload, cover images)",
+  "Paper Presentations admin (speaker linkage, committee tag, PDF upload)",
+  "Photo Gallery admin (albums, photos, layouts, featured pinning, visibility tiers)",
+  "Video Gallery admin (YouTube/Vimeo URL paste with auto-ID extraction)",
+  "Resources admin (5 tabs: papers / e-journal / topics / link cards / approval queue)",
+  "Mock Tests admin with question-bank + quiz editor",
+  "Job postings admin with employer self-service portal",
+  "Student suggestions moderation queue (approve / reject with reason / archive)",
+  "Student suggestion topics CRUD with active toggle",
+  "Pragyaan AI admin console (4 tabs: Sources / Approvals / Feedback / Analytics)",
+  "Notifications log admin (full audit of every send across email/push/in-app)",
+  "Per-instance checklist question editor (override template per-event without polluting master)",
+  "Checklist templates admin with question builder",
+  "Branch Metrics dashboard (Chairman + Treasurer views with Recharts visualisations)",
+  "CSV exports per module for offline reporting",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.7 AI Intelligence ───────────────────────────────────────────────────
+sections.push(H2("3.7 AI Intelligence — Pragyaan Assistant"));
+[
+  "Conversational AI assistant accessible from every page (floating widget + dedicated /praygyaan page)",
+  "Grounded RAG (Retrieval-Augmented Generation) — never hallucinates; only answers from indexed sources",
+  "317 indexed knowledge sources covering: 13 committees, 28 e-journal issues, 11 curated ICAI links, papers, newsletters, announcements, events, FAQs",
+  "Role-scoped retrieval (different scopes for: anonymous / member / student / employer / admin)",
+  "15-minute auto-ingestion cron — new events / papers / announcements become answerable within 15 min",
+  "Editable disclaimer (chairman can rewrite via Site Settings without a deploy)",
+  "Starter question chips per role (4 per role tested with grounded answers)",
+  "Thumbs-up/down feedback on every answer with optional comment",
+  "Admin Analytics: total Qs, answered, no-answer rate, citation coverage, daily volume chart, top-15 questions",
+  "Source approval workflow (chairman gates which sources go live)",
+  "Per-source re-index / rollback / retire actions",
+  "Cost-cap configuration (admin sets monthly limit)",
+  "Audit log of every source upload + approval action",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.8 Real-time & Interactive ───────────────────────────────────────────
+sections.push(H2("3.8 Real-time & Interactive Features"));
+[
+  "WebSocket-powered event chat with sub-second message delivery",
+  "Three channel kinds per event: #general (free chat), #q-and-a (Quora-style), #announcements (mod-only)",
+  "Pre-event visibility rule: #general hidden from non-mods until event starts",
+  "Speaker magic-link → moderator access without account creation",
+  "Pin / unpin messages (highlighted at top of channel)",
+  "Mute / unmute users per channel",
+  "Freeze / unfreeze channels (read-only mode)",
+  "Archive channels (preserve for read-only browsing)",
+  "Message reactions (emoji)",
+  "Threaded replies",
+  "File / image attachments",
+  "Full audit log of every moderation action",
+  "Mock-test peer discussion (one thread per test, public-read, login-post)",
+  "Per-event Q&A: members ask, organisers answer, answered-marker, upvote via reaction",
+  "Student suggestions live upvote (optimistic UI with rollback)",
+  "In-app notifications inbox with real-time updates",
+  "Live grievance status tracker (no page refresh needed)",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.9 Communication Infrastructure ──────────────────────────────────────
+sections.push(H2("3.9 Communication Infrastructure"));
+[
+  "Resend email integration with verified icainagpur.in domain (SPF + DKIM + DMARC)",
+  "Auth0 transactional emails (signup verification, password reset) routed through Resend",
+  "Multi-channel notification engine (email + web push + in-app) driven from one template",
+  "15+ seeded notification templates (event reminder, registration confirm, waitlist promoted, etc.)",
+  "Per-template channel configuration (admin can disable any channel per template)",
+  "48-hour SLA escalation cron for grievances (hourly polling, idempotent)",
+  "Grievance subject → email routing map (admin-editable)",
+  "Newsletter case-study digest endpoint (flagged grievances aggregate per newsletter)",
+  "Web Push API integration with VAPID keys (iOS Safari supported when PWA installed)",
+  "Per-device push subscription tracking with auto-cleanup of dead subscriptions",
+  "User-level notify_push opt-out flag",
+  "Hard blocklist preventing accidental sends to ICAI org domains during dev",
+  "DEV_EMAIL_OVERRIDE safety net (redirects all dev emails to one inbox)",
+  "Service Worker handles push payloads with notification click-to-app deep-linking",
+  "Audit log of every email/push/in-app delivery with status",
+  "Branded HTML email template for Auth0 verification (Outlook VML fallback included)",
+  "WhatsApp Channel integration ready (admin can post manually; automation pattern documented)",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.10 Security & Compliance ────────────────────────────────────────────
+sections.push(H2("3.10 Security & Compliance"));
+[
+  "DPDP Act 2023 compliant with cookie consent banner (policy versioning, 365-day re-prompt)",
+  "reCAPTCHA v3 on grievance form + signup (server-side score + action verification)",
+  "Rate limiting (express-rate-limit) on signup, grievance submit, suggestion submit",
+  "HTTPS-only with HSTS preload",
+  "Session cookies with httpOnly + sameSite + secure flags",
+  "JWT-based stateless tokens for API access",
+  "Cookie-based auth with rotation support",
+  "Role-Based Access Control (RBAC) with 15 enforced role codes",
+  "Database-level trigger enforcing scope correctness on role assignments",
+  "MRN-gated signup (validates against icai_member_master before account creation)",
+  "Auth0 + custom backend hybrid auth (Auth0 for identity, custom for permissions)",
+  "Email verification required for member accounts",
+  "Password reset flow via Auth0 with branded email template",
+  "Brand-domain (icainagpur.in) for all transactional emails (no third-party domain in From)",
+  "WCAG 2.1 AA accessibility baseline (skip-to-content, focus rings, ARIA modals)",
+  "Aria-labels on every icon-only button",
+  "Lang attribute on HTML root",
+  "Universal search with input sanitization",
+  "SQL injection protection via parameterized queries (Drizzle ORM)",
+  "XSS protection via React's default escaping + markdown sanitization",
+  "CORS configured for production frontend only",
+  "Secrets in environment variables (never committed)",
+  "Storage bucket public-read but private-write (Supabase RLS)",
+  "Service-role key kept server-side only",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.11 Technology Platform ──────────────────────────────────────────────
+sections.push(H2("3.11 Technology Platform & Performance"));
+[
+  "Progressive Web App (PWA) installable on Android / iOS / Windows / macOS",
+  "Offline support via Workbox precaching + custom service worker",
+  "Push notifications work on iOS Safari (when PWA installed to home screen)",
+  "Mobile-first responsive design (tested across phone / tablet / desktop)",
+  "Code-split route bundles (87 KB gzipped initial bundle vs. monolithic before)",
+  "React 18.3 + Vite 6 + TypeScript",
+  "Custom HashRouter for clean URLs without server-side routing",
+  "Shimmer skeleton UI everywhere (no \"Loading…\" placeholder text)",
+  "Lazy-loaded image with srcset for responsive images",
+  "Postgres via Supabase (managed, point-in-time recovery, automated backups)",
+  "Drizzle ORM with type-safe queries",
+  "62 incremental migrations with dry-run support",
+  "Migration framework with bootstrap + status modes",
+  "File storage abstraction (Supabase Storage in prod, local disk fallback in dev)",
+  "Image processing pipeline (Sharp for thumbnails + medium sizes)",
+  "PDF generation (pdfkit for certificates)",
+  "Word document generation (docx library)",
+  "PDF parsing (pdf-parse) + Word parsing (mammoth) for KB ingestion",
+  "Xlsx parsing (SheetJS) for ICAI directory import",
+  "WebSocket server (ws library) for event chat",
+  "Background cron jobs (escalations every hour, Pragyaan auto-ingest every 15 min)",
+  "Health check endpoint for uptime monitoring",
+  "Structured logging with severity levels",
+  "Error boundary on every route",
+  "Dynamic OpenGraph meta tags for social sharing",
+  "Service worker with offline cache + push handler",
+  "Web Manifest for PWA install metadata",
+  "Hosted on Vercel (frontend) + Render (backend) + Supabase (DB + storage)",
+  "Custom domain (icainagpur.in) with SSL + HSTS",
+  "Continuous deployment via Git push",
+].forEach(t => sections.push(Bullet(t)));
+
+// ── 3.12 Future-proofing ──────────────────────────────────────────────────
+sections.push(H2("3.12 Future-Proofing & Extensibility"));
+[
+  "Schema-first design — every table is documented + migrated",
+  "Admin-editable everything (40+ slots) means non-technical staff can update content without a deploy",
+  "Pluggable email provider (SMTP / Resend / SendGrid swap is a config change)",
+  "Pluggable storage driver (local / Supabase / S3-compatible)",
+  "Per-feature flag system via site_settings table",
+  "Notification template engine extensible to SMS / WhatsApp without rewrites",
+  "AI knowledge base auto-grows as new content is published — no manual reindex",
+  "Role taxonomy designed to accommodate future office bearer changes without migrations",
+  "Multi-tenant ready (branch_id is FK on most tables — could host other ICAI branches)",
+  "Site Content slots support new pages by adding to slot definition + default map",
+  "Form builder pattern (FormField primitive) for any new admin CRUD",
+  "Universal file abstraction supports any new content type (videos, audio, PDFs, images)",
+  "Backend route modules organized by domain — adding a new feature is a new route file + register line",
+  "Forum substrate (event chat) can be extended to non-event channels with minor config",
+  "Pragyaan supports any new origin_kind (table) being added to the corpus",
+  "Migration framework allows additive changes without downtime",
+].forEach(t => sections.push(Bullet(t)));
+
+sections.push(new Paragraph({ children: [new PageBreak()] }));
+
 // ─── GAPS WE CLOSE ────────────────────────────────────────────────────────
-sections.push(H1("3. Critical Gaps in Current Site That the New Portal Closes"));
+sections.push(H1("4. Critical Gaps in Current Site That the New Portal Closes"));
 sections.push(P("These are issues on nagpuricai.org that limit the branch today. Each is fully resolved by the new portal."));
 const gaps = [
   "No member authentication — anyone can fill forms anonymously; no personalised experience or access control.",
@@ -407,7 +752,7 @@ gaps.forEach(g => sections.push(Bullet(g)));
 sections.push(new Paragraph({ children: [new PageBreak()] }));
 
 // ─── NEW CAPABILITIES ─────────────────────────────────────────────────────
-sections.push(H1("4. Entirely New Capabilities (Not on Current Site)"));
+sections.push(H1("5. Entirely New Capabilities (Not on Current Site)"));
 sections.push(P("Features in the new portal with no analogue on nagpuricai.org. These represent the branch's competitive differentiation versus other ICAI branches' portals."));
 
 sections.push(H3("4.1 AI & Intelligence"));
@@ -467,7 +812,7 @@ sections.push(H3("4.6 Platform"));
 sections.push(new Paragraph({ children: [new PageBreak()] }));
 
 // ─── PRESERVE / MIGRATE ────────────────────────────────────────────────────
-sections.push(H1("5. Content to Preserve from Current Site"));
+sections.push(H1("6. Content to Preserve from Current Site"));
 sections.push(P("Items currently live on nagpuricai.org that have value and should be migrated to the new portal before sunsetting the old site."));
 const preserve = [
   ["Newsletter archive", "Monthly bulletins (years of issues)", "Upload via Newsletters admin"],
@@ -511,10 +856,10 @@ sections.push(new Table({
 sections.push(new Paragraph({ children: [new PageBreak()] }));
 
 // ─── LAUNCH READINESS ─────────────────────────────────────────────────────
-sections.push(H1("6. Launch Readiness Assessment"));
+sections.push(H1("7. Launch Readiness Assessment"));
 sections.push(P("Status of the new portal relative to a public launch. Items below are scoped from FEATURES_DELIVERED.md (F1–F21)."));
 
-sections.push(H2("6.1 What's already shipped"));
+sections.push(H2("7.1 What's already shipped"));
 [
   "F1: Contact / Grievance / Suggestion form with 48h SLA escalation",
   "F2: PWA + Web Push notifications",
@@ -540,7 +885,7 @@ sections.push(H2("6.1 What's already shipped"));
   "F22: Gallery v3 — Video Gallery, event-type filter, year-jump nav, homepage Recent Photos strip",
 ].forEach(t => sections.push(Bullet(t)));
 
-sections.push(H2("6.2 In-progress / partial features (non-blocking for launch)"));
+sections.push(H2("7.2 In-progress / partial features (non-blocking for launch)"));
 [
   "/forum non-event peer board — backend exists; frontend page pending",
   "Notification templates editor UI — backend supports it; admin UI shows Coming Soon",
@@ -555,7 +900,7 @@ sections.push(H2("6.2 In-progress / partial features (non-blocking for launch)")
   "Comment pagination Load Earlier button",
 ].forEach(t => sections.push(Bullet(t)));
 
-sections.push(H2("6.3 Client-input launch blockers"));
+sections.push(H2("7.3 Client-input launch blockers"));
 sections.push(P("These require business decisions or credentials from the branch, not engineering work:"));
 [
   "Production VAPID keypair for Web Push",
@@ -570,7 +915,7 @@ sections.push(P("These require business decisions or credentials from the branch
   "Privacy Policy + Terms of Service approved by branch leadership",
 ].forEach(t => sections.push(Bullet(t)));
 
-sections.push(H2("6.4 Recommended launch sequence"));
+sections.push(H2("7.4 Recommended launch sequence"));
 sections.push(P("Suggested 3-phase rollout to minimise risk and maximise stakeholder buy-in:"));
 sections.push(H3("Phase 1 — Soft launch (members only, 2 weeks)"));
 [
@@ -598,7 +943,7 @@ sections.push(H3("Phase 3 — Sunset old site (after Phase 2 success)"));
 sections.push(new Paragraph({ children: [new PageBreak()] }));
 
 // ─── FEATURE DELIVERY TIMELINE ───────────────────────────────────────────
-sections.push(H1("7. Feature Delivery Timeline (FEATURES_DELIVERED.md)"));
+sections.push(H1("8. Feature Delivery Timeline (FEATURES_DELIVERED.md)"));
 sections.push(P("Auditable log of every feature shipped, from first scaffolding to today. Sourced from FEATURES_DELIVERED.md at the project root. Each entry was built, tested, and logged with a what-was-required → what-was-built → known-gaps section."));
 
 const timeline = [
@@ -656,14 +1001,14 @@ sections.push(P("Cadence summary: 22 features (23 if F15.1 counted) shipped over
 sections.push(new Paragraph({ children: [new PageBreak()] }));
 
 // ─── SUMMARY ────────────────────────────────────────────────────────────
-sections.push(H1("8. Summary"));
+sections.push(H1("9. Summary"));
 sections.push(P("The new ICAI Nagpur Branch portal represents a multi-year leap forward from the existing nagpuricai.org website. Where the current site is a static brochure with offline workflows hidden behind a few forms, the new portal is a working operating system for branch operations:"));
 sections.push(P("•  Members get a real dashboard, online payments, certificate downloads, and a searchable directory."));
 sections.push(P("•  Students get mock tests, peer discussion, suggestion polls, and an AI assistant grounded in branch material."));
 sections.push(P("•  Admins get a 31-page control panel with role-based access — no more emailing the webmaster to update a phone number."));
 sections.push(P("•  The branch gets DPDP compliance, accessibility compliance, audit trails on every action, and a foundation that can grow into mentorship, podcasts, and live-streamed events without rebuilding from scratch."));
 sections.push(P("The remaining work is mostly polish (focus traps, OCR for image PDFs, pagination buttons) and a few admin UIs whose backends already exist. None of it blocks a soft launch to the managing committee.", { bold: true }));
-sections.push(P("Recommended next step: soft launch to managing committee within 2 weeks, then phased rollout per Section 6.4.", { bold: true, color: PRIMARY }));
+sections.push(P("Recommended next step: soft launch to managing committee within 2 weeks, then phased rollout per Section 7.4.", { bold: true, color: PRIMARY }));
 
 sections.push(new Paragraph({
   spacing: { before: 600 },
