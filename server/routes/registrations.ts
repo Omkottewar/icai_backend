@@ -152,7 +152,7 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
           user_id: user.id,
           template_key: "event_registered",
           vars: eventNotifyVars(event),
-          link_url: `/#/events`,
+          link_url: `/#/dashboard`,
         });
       }
 
@@ -326,7 +326,7 @@ registrationsRouter.post("/:slug/verify-payment", requireUser, async (req: Authe
         user_id: user.id,
         template_key: "event_registered",
         vars: eventNotifyVars(result.event),
-        link_url: `/#/events`,
+        link_url: `/#/dashboard`,
       });
     }
 
@@ -614,7 +614,7 @@ registrationsRouter.post("/:slug/cancel", requireUser, async (req: AuthedRequest
         user_id: result.promoted.user_id,
         template_key: "event_waitlist_promoted",
         vars: eventNotifyVars(result.event),
-        link_url: `/#/events`,
+        link_url: `/#/dashboard`,
       });
     }
 
