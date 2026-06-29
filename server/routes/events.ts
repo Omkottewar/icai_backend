@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, asc, eq, gt, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, lte, or } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { events, committees, files } from "../../schema/index.js";
 import { handleApiError, ApiError, trim } from "../lib/apiError.js";
@@ -14,11 +14,22 @@ publicEventsRouter.get("/", async (req, res, next) => {
   try {
     const audience = trim(req.query.audience);
     const committeeCode = trim(req.query.committee);
+    // ?past=1 returns events that have already finished (ends_at in the
+    // past, falling back to starts_at for legacy rows where ends_at is
+    // null). Default behaviour (no flag) returns upcoming-only — the
+    // original contract every existing caller relies on.
+    const wantsPast = trim(req.query.past) === "1";
+    const now = new Date();
 
     const conds = [
       isNull(events.deleted_at),
       eq(events.status, "published"),
-      gt(events.starts_at, new Date()),
+      wantsPast
+        ? or(
+            lte(events.ends_at, now),
+            and(isNull(events.ends_at), lte(events.starts_at, now)),
+          )
+        : gt(events.starts_at, now),
     ];
     if (audience === "members" || audience === "students" || audience === "all") {
       conds.push(eq(events.audience, audience as any));
@@ -56,7 +67,10 @@ publicEventsRouter.get("/", async (req, res, next) => {
       .leftJoin(committees, eq(committees.id, events.committee_id))
       .leftJoin(files, eq(files.id, events.banner_id))
       .where(and(...conds))
-      .orderBy(asc(events.starts_at));
+      // Upcoming: soonest first (asc) so members see what's next.
+      // Past: most-recent first (desc) so the archive's freshest content
+      // sits at the top — feels like a chronological feed.
+      .orderBy(wantsPast ? desc(events.starts_at) : asc(events.starts_at));
 
     res.json({
       rows: rows.map((r) => ({
