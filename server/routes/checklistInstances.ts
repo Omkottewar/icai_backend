@@ -1,4 +1,4 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 import { aliasedTable, and, asc, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
@@ -20,7 +20,7 @@ import { notifyAsync } from "../lib/notify.js";
 // link URL. Keeping it here (rather than in lib/) so the local imports of
 // users/events/etc are reused.
 
-const checklistLink = (id: string) => `/#/my-checklists?id=${id}`;
+const checklistLink = (id: string) => `/my-checklists?id=${id}`;
 
 /**
  * Fire `checklist_assigned` to one user. `sections` is the optional list of
@@ -1409,9 +1409,9 @@ checklistInstancesRouter.put("/:id/responses", async (req: AuthedRequest, res, n
           event_title: eventTitle,
           task_description: a.description,
           due_date: a.due_date ?? "(no due date)",
-          checklist_link: `${process.env.APP_URL ?? ""}/#/my-checklists?id=${id}`,
+          checklist_link: `${process.env.APP_URL ?? ""}/my-checklists?id=${id}`,
         },
-        link_url: `/#/my-checklists?id=${id}`,
+        link_url: `/my-checklists?id=${id}`,
       });
     }
 

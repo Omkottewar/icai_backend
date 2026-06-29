@@ -1,4 +1,4 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
 import {
@@ -195,9 +195,9 @@ resourcesAdminRouter.post("/papers/:id/approve", async (req: AuthedRequest, res,
         template_key: "paper_submission_approved",
         vars: {
           paper_title: row.title,
-          paper_link:  `${process.env.APP_URL ?? ""}/#/resources/papers/${row.slug}`,
+          paper_link:  `${process.env.APP_URL ?? ""}/resources/papers/${row.slug}`,
         },
-        link_url: `/#/resources/papers/${row.slug}`,
+        link_url: `/resources/papers/${row.slug}`,
       });
     }
 
@@ -231,9 +231,9 @@ resourcesAdminRouter.post("/papers/:id/approve", async (req: AuthedRequest, res,
             resource_type_label: "paper",
             resource_title: row.title,
             author_name:    row.speaker_name,
-            resource_link:  `${process.env.APP_URL ?? ""}/#/resources/papers/${row.slug}`,
+            resource_link:  `${process.env.APP_URL ?? ""}/resources/papers/${row.slug}`,
           },
-          link_url: `/#/resources/papers/${row.slug}`,
+          link_url: `/resources/papers/${row.slug}`,
         });
       }
     }

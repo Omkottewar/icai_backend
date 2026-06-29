@@ -1,4 +1,4 @@
-// Helpers used by the event-chat router. Pulled into a separate file
+﻿// Helpers used by the event-chat router. Pulled into a separate file
 // so eventChat.ts doesn't balloon past readable.
 //
 // Owns:
@@ -183,7 +183,7 @@ export function dispatchMentionNotifications(opts: {
         snippet:      opts.messageSnippet,
         recipient_name: "", // template handles missing var gracefully
       },
-      link_url: `/#/events?chat=${opts.eventId}&channel=${opts.channelId}&msg=${opts.messageId}`,
+      link_url: `/events?chat=${opts.eventId}&channel=${opts.channelId}&msg=${opts.messageId}`,
     });
   }
 }

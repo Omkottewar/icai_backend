@@ -143,6 +143,33 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, ts: new Date().toISOString() });
 });
 
+// ─── Frontend SPA fallback ────────────────────────────────────────────────
+// The frontend uses the History API (clean URLs like /events, /dashboard,
+// /admin/users — no `#`). A user opening one of those URLs directly hits
+// THIS server first, so we need to:
+//   1. Serve the Vite-built static assets (JS/CSS/img/sw.js/manifest).
+//   2. For every other GET that wants HTML, return the SPA shell
+//      (frontend/dist/index.html) so React boots and useRoute() reads
+//      the path on first render.
+// Only activates when FRONTEND_DIST is set — set it to the absolute path
+// of frontend/dist on hosts where Express serves the frontend too. On
+// Vercel/Netlify the platform handles SPA fallback natively, so leave
+// FRONTEND_DIST unset there.
+if (process.env.FRONTEND_DIST) {
+  const distDir = process.env.FRONTEND_DIST;
+  app.use(express.static(distDir, { index: false, maxAge: "1h" }));
+  app.get("*", (req, res, next) => {
+    // Don't shadow API/uploads/ws — they're already mounted above, so
+    // a request that reaches here past those routers means "no API match".
+    // Still, belt-and-braces guard so a misconfigured path can't serve
+    // the SPA shell to an API caller.
+    if (req.path.startsWith("/api/") || req.path.startsWith("/uploads/") || req.path.startsWith("/ws")) {
+      return next();
+    }
+    res.sendFile(join(distDir, "index.html"));
+  });
+}
+
 // Centralised error handler — keeps stack traces out of responses.
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   // eslint-disable-next-line no-console

@@ -1,4 +1,4 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 import { and, asc, desc, eq, gte, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
@@ -886,9 +886,9 @@ resourcesRouter.post("/comments", requireUser, async (req: AuthedRequest, res, n
           commenter_name: req.user!.name,
           paper_title:    resourceTitle,
           comment_preview: body.slice(0, 140) + (body.length > 140 ? "…" : ""),
-          paper_link:      `${process.env.APP_URL ?? ""}/#/resources/papers/${paperSlugRow?.slug ?? ""}`,
+          paper_link:      `${process.env.APP_URL ?? ""}/resources/papers/${paperSlugRow?.slug ?? ""}`,
         },
-        link_url: `/#/resources/papers/${paperSlugRow?.slug ?? ""}`,
+        link_url: `/resources/papers/${paperSlugRow?.slug ?? ""}`,
       });
     }
 

@@ -1,4 +1,4 @@
-// Public grievance / contact / suggestion endpoints.
+﻿// Public grievance / contact / suggestion endpoints.
 //
 // Two routes:
 //   POST /api/grievances            — file a new grievance (no login required)
@@ -227,7 +227,7 @@ type DispatchInput = {
 
 async function dispatchGrievanceEmails(input: DispatchInput): Promise<void> {
   const appUrl = process.env.APP_URL ?? "";
-  const statusLink = `${appUrl}/#/track-grievance?ticket_no=${encodeURIComponent(input.ticket_no)}&email=${encodeURIComponent(input.submitterEmail)}`;
+  const statusLink = `${appUrl}/track-grievance?ticket_no=${encodeURIComponent(input.ticket_no)}&email=${encodeURIComponent(input.submitterEmail)}`;
   const firstName = input.submitterName.split(/\s+/)[0] || input.submitterName;
 
   // 1. Acknowledgement to the submitter — uses the existing grievance_ack
@@ -268,7 +268,7 @@ async function dispatchGrievanceEmails(input: DispatchInput): Promise<void> {
       `Message:`,
       input.message,
       ``,
-      `Open in admin: ${appUrl}/#/admin/grievances?ticket_no=${encodeURIComponent(input.ticket_no)}`,
+      `Open in admin: ${appUrl}/admin/grievances?ticket_no=${encodeURIComponent(input.ticket_no)}`,
     ].filter(Boolean).join("\n");
     await sendEmail({ to: input.routeEmail, subject: adminSubject, body: adminBody });
   } catch (err) {

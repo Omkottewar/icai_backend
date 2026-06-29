@@ -1,4 +1,4 @@
-// Escalation cron — sweeps checklist_instance_approvals rows where:
+﻿// Escalation cron — sweeps checklist_instance_approvals rows where:
 //   - stage status is still 'pending'
 //   - the linked event ended more than 3 days ago (ends_at + 3d < now)
 //   - escalated_at IS NULL (so we don't double-send)
@@ -137,7 +137,7 @@ async function runGrievanceSweep(): Promise<{ checked: number; escalated: number
           `Subject: ${g.subject}`,
           `Message: ${g.message.slice(0, 500)}${g.message.length > 500 ? "…" : ""}`,
           ``,
-          `Open in admin: ${appUrl}/#/admin/grievances?ticket_no=${encodeURIComponent(g.ticket_no)}`,
+          `Open in admin: ${appUrl}/admin/grievances?ticket_no=${encodeURIComponent(g.ticket_no)}`,
         ].join("\n"),
       });
       await db.update(grievances)
@@ -175,7 +175,7 @@ export async function runEscalationSweep(): Promise<{ checked: number; escalated
         approver_name: "Chairperson",
         event_title:   c.event_title ?? c.stage_label,
         event_date:    "post-event",
-        checklist_link: `${process.env.APP_URL ?? ""}/#/my-checklists?id=${c.instance_id}`,
+        checklist_link: `${process.env.APP_URL ?? ""}/my-checklists?id=${c.instance_id}`,
         sla_days:      ESCALATION_AFTER_DAYS,
       },
     });

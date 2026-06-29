@@ -1,4 +1,4 @@
-// Pragyaan AI — function-calling tools.
+﻿// Pragyaan AI — function-calling tools.
 //
 // Turns Pragyaan from a Q&A assistant into a portal *agent*: when the
 // user asks "what events am I registered for?" the model can decide to
@@ -199,7 +199,7 @@ const lookup_event: ToolDef = {
       fee_inr: row.fee_paise / 100,
       seats_available: row.capacity != null ? row.capacity - row.registered_count : null,
       // The link the assistant should suggest if the user wants to act.
-      detail_url: `/#/events/${row.slug}`,
+      detail_url: `/events/${row.slug}`,
     };
   },
 };
@@ -369,7 +369,7 @@ const search_resources: ToolDef = {
         title: p.title,
         speaker: p.speaker,
         presented_on: fmtDate(p.presented_on),
-        url: `/#/resources/papers/${p.slug}`,
+        url: `/resources/papers/${p.slug}`,
       })),
       newsletters: newsletters.map((n) => ({
         title: n.title,

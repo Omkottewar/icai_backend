@@ -1,4 +1,4 @@
-import crypto from "node:crypto";
+﻿import crypto from "node:crypto";
 import { Router } from "express";
 import { and, eq, gte, isNull, or } from "drizzle-orm";
 import {
@@ -73,13 +73,13 @@ const SOCIAL_CONNECTIONS: Record<string, string> = {
 
 const appUrl = () => process.env.APP_URL ?? "http://localhost:5173";
 
-/** Redirect the browser to /#/<path>?error=<msg> on the frontend. */
+/** Redirect the browser to /<path>?error=<msg> on the frontend. */
 function redirectWithError(res: any, path: string, message: string) {
-  res.redirect(`${appUrl()}/#${path}?error=${encodeURIComponent(message)}`);
+  res.redirect(`${appUrl()}${path}?error=${encodeURIComponent(message)}`);
 }
 
 // â”€â”€â”€ POST /api/auth/login â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Embedded login: the form on /#/login posts here. No browser redirect to
+// Embedded login: the form on /login posts here. No browser redirect to
 // Auth0 â€” we call /oauth/token server-side, then set our own session cookie.
 authRouter.post("/login", loginLimiter, sameOrigin, async (req, res, next) => {
   try {
@@ -422,7 +422,7 @@ authRouter.get("/callback", async (req, res, next) => {
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions);
 
     const redirect = await getPostLoginPath(user.id, isNew);
-    res.redirect(`${appUrl()}/#${redirect}`);
+    res.redirect(`${appUrl()}${redirect}`);
   } catch (err) {
     next(err);
   }

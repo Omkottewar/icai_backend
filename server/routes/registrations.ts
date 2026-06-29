@@ -1,4 +1,4 @@
-import { Router } from "express";
+﻿import { Router } from "express";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { events, eventRegistrations, users, payments } from "../../schema/index.js";
@@ -32,7 +32,7 @@ function eventNotifyVars(event: { title: string; slug: string; venue: string | n
     event_time:   IST_TIME.format(startsAt),
     event_venue:  event.venue || (event.mode === "online" ? "Online" : "TBC"),
     cpe_hours:    event.cpe_hours,
-    calendar_link: `${process.env.APP_URL ?? ""}/#/events`,
+    calendar_link: `${process.env.APP_URL ?? ""}/events`,
     joining_link_or_directions: event.online_url || event.venue || "Details will be shared closer to the date.",
   };
 }
@@ -152,7 +152,7 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
           user_id: user.id,
           template_key: "event_registered",
           vars: eventNotifyVars(event),
-          link_url: `/#/dashboard`,
+          link_url: `/dashboard`,
         });
       }
 
@@ -326,7 +326,7 @@ registrationsRouter.post("/:slug/verify-payment", requireUser, async (req: Authe
         user_id: user.id,
         template_key: "event_registered",
         vars: eventNotifyVars(result.event),
-        link_url: `/#/dashboard`,
+        link_url: `/dashboard`,
       });
     }
 
@@ -378,7 +378,7 @@ registrationsRouter.get("/:slug/ical", async (req, res, next) => {
       title: event.title,
       description: event.description ?? null,
       location: event.venue ?? null,
-      url: event.online_url ?? `${process.env.APP_URL ?? ""}/#/events/${event.slug}`,
+      url: event.online_url ?? `${process.env.APP_URL ?? ""}/events/${event.slug}`,
       start: event.starts_at,
       end: event.ends_at,
       organizerEmail: "nagpur@icai.org",
@@ -436,7 +436,7 @@ registrationsRouter.get("/my-calendar.ics", async (req: AuthedRequest, res, next
       title: e.title,
       description: e.description ?? null,
       location: e.venue ?? null,
-      url: e.online_url ?? `${process.env.APP_URL ?? ""}/#/events/${e.slug}`,
+      url: e.online_url ?? `${process.env.APP_URL ?? ""}/events/${e.slug}`,
       start: e.starts_at,
       end: e.ends_at,
       organizerEmail: "nagpur@icai.org",
@@ -614,7 +614,7 @@ registrationsRouter.post("/:slug/cancel", requireUser, async (req: AuthedRequest
         user_id: result.promoted.user_id,
         template_key: "event_waitlist_promoted",
         vars: eventNotifyVars(result.event),
-        link_url: `/#/dashboard`,
+        link_url: `/dashboard`,
       });
     }
 
