@@ -71,6 +71,26 @@ app.use("/uploads", express.static(join(process.cwd(), "uploads"), {
   fallthrough: false,
 }));
 
+// Edge-cache helper for public read endpoints. Adds Cache-Control with
+// stale-while-revalidate semantics so Vercel's Mumbai edge serves repeat
+// GETs in <50ms without hitting Render. Self-skips when:
+//   • the request method isn't GET (writes are never cached)
+//   • the request carries an auth cookie (so dashboards / personalised
+//     pages can't be served stale to the wrong user)
+//   • the response status isn't 2xx (Vercel won't cache 4xx/5xx anyway,
+//     but no point setting the header)
+function publicCache(maxAgeSec: number, swrSec = Math.max(300, maxAgeSec * 5)) {
+  return (req: import("express").Request, res: import("express").Response, next: import("express").NextFunction) => {
+    if (req.method !== "GET") return next();
+    const cookieHeader = req.headers.cookie ?? "";
+    const hasAuthCookie = /\bsession=/.test(cookieHeader) || /\baccess_token=/.test(cookieHeader);
+    if (hasAuthCookie) return next();
+    res.setHeader("Cache-Control", `public, max-age=0, s-maxage=${maxAgeSec}, stale-while-revalidate=${swrSec}`);
+    res.setHeader("Vary", "Cookie, Accept-Encoding");
+    next();
+  };
+}
+
 app.use("/api/auth", authRouter);
 app.use("/api/onboarding", onboardingRouter);
 app.use("/api/dashboard", dashboardRouter);
@@ -81,17 +101,22 @@ app.use("/api/events", registrationsRouter);
 // eventChatRouter mounts before publicEventsRouter so the literal /:id/chat
 // paths aren't swallowed by the public router's catch-all /:slug.
 app.use("/api/events", eventChatRouter);
-app.use("/api/events", publicEventsRouter);
-app.use("/api/committees", publicCommitteesRouter);
+// publicCache: 60s fresh + 5min SWR for the public events list. The /:slug
+// detail route inside this router also gets cached. Cookies (auth) bypass.
+app.use("/api/events", publicCache(60), publicEventsRouter);
+app.use("/api/committees", publicCache(300), publicCommitteesRouter);
 app.use("/api/checklist-templates", checklistTemplatesRouter);
 app.use("/api/checklist-instances", checklistInstancesRouter);
 app.use("/api/branch", branchRouter);
 app.use("/api/rooms", roomsRouter);
 app.use("/api/forum", forumRouter);
-app.use("/api/site", siteRouter);
-app.use("/api/announcements", announcementsRouter);
+// Site content slots (text/images on every public page) change rarely —
+// the longer SWR window gives near-instant edge hits while admin edits
+// propagate within ~5 min.
+app.use("/api/site", publicCache(300), siteRouter);
+app.use("/api/announcements", publicCache(60), announcementsRouter);
 app.use("/api/employer", employerRouter);
-app.use("/api/jobs", publicJobsRouter);
+app.use("/api/jobs", publicCache(60), publicJobsRouter);
 app.use("/api/members", membersRouter);
 app.use("/api/mock-tests", mockTestsRouter);
 // Attempt lifecycle (start / save answer / submit / review). Mounted at
@@ -103,8 +128,8 @@ app.use("/api/checklist-tasks", checklistTasksRouter);
 // Branch-level content (Resources page, Gallery, About page). One router
 // serves all five entities — endpoints are scoped under sub-paths like
 // /paper-presentations, /gallery-albums, /newsletters, /office-bearers,
-// /annual-reports.
-app.use("/api", branchContentRouter);
+// /annual-reports. All are public + static-ish, perfect cache candidates.
+app.use("/api", publicCache(300), branchContentRouter);
 // Section L (Resources) — papers, e-journal, topics, bookmarks, comments,
 // quizzes. Lives under /api/resources/... so it doesn't collide with the
 // older /paper-presentations endpoint.

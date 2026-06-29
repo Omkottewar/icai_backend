@@ -18,6 +18,7 @@
     "storage:migrate:dry": "node scripts/migrate-uploads-to-supabase.mjs --dry-run",
     "vapid:generate": "node scripts/generate-vapid.mjs",
     "icai:import-directory": "tsx scripts/import-icai-directory.ts",
+    "bootstrap": "tsx scripts/bootstrap-db.mjs",
     "seed:mock": "node scripts/seed-mock-data.mjs",
     "seed:mock:clean": "node scripts/clean-mock-data.mjs",
     "seed:officers": "node scripts/seed-committee-officers.mjs",

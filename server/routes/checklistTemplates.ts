@@ -20,6 +20,26 @@ async function requireAdminUser(req: AuthedRequest) {
   if (!(await isAdmin(req.user!.id))) throw new ApiError(403, "Admin only");
 }
 
+// Allowed approver role codes. Empty (default) → single-reviewer flow.
+// Non-empty → ensureApprovalStages() creates one stage per listed role
+// at release time. Filter anything the UI shouldn't have sent so a bad
+// payload can't poison the array.
+const VALID_APPROVER_ROLES = new Set([
+  "branch_chairman",
+  "branch_vice_chairman",
+  "branch_secretary",
+  "branch_treasurer",
+]);
+function sanitiseApproverRoleCodes(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const out: string[] = [];
+  for (const v of input) {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (s && VALID_APPROVER_ROLES.has(s) && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
 // ─── GET /api/checklist-templates ─────────────────────────────────────────
 // Lists the LATEST version per family, plus a count of versions in the family.
 // Set ?all=1 to see every version (used by the version history drawer).
@@ -126,6 +146,7 @@ checklistTemplatesRouter.post("/", async (req: AuthedRequest, res, next) => {
     const category    = trim(req.body.category)    || null;
     const fill_role   = trim(req.body.fill_role)   || null;
     const review_role = trim(req.body.review_role) || null;
+    const approver_role_codes = sanitiseApproverRoleCodes(req.body.approver_role_codes);
     const questions = Array.isArray(req.body.questions) ? req.body.questions : [];
 
     const created = await db.transaction(async (tx) => {
@@ -135,6 +156,7 @@ checklistTemplatesRouter.post("/", async (req: AuthedRequest, res, next) => {
         version: 1,
         name, description, category,
         fill_role, review_role,
+        approver_role_codes,
         created_by: req.user!.id,
         is_published: false,
       }).returning();
@@ -170,6 +192,7 @@ checklistTemplatesRouter.patch("/:id", async (req: AuthedRequest, res, next) => 
     if (req.body.category    !== undefined) patch.category    = trim(req.body.category)    || null;
     if (req.body.fill_role   !== undefined) patch.fill_role   = trim(req.body.fill_role)   || null;
     if (req.body.review_role !== undefined) patch.review_role = trim(req.body.review_role) || null;
+    if (req.body.approver_role_codes !== undefined) patch.approver_role_codes = sanitiseApproverRoleCodes(req.body.approver_role_codes);
 
     const questions = Array.isArray(req.body.questions) ? req.body.questions : null;
 
@@ -266,6 +289,7 @@ checklistTemplatesRouter.post("/:id/clone", async (req: AuthedRequest, res, next
         category: src.category,
         fill_role: src.fill_role,
         review_role: src.review_role,
+        approver_role_codes: src.approver_role_codes ?? [],
         created_by: req.user!.id,
         is_published: false,
         // Clones are never starters themselves — even if the source was one.

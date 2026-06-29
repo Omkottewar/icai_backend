@@ -810,39 +810,70 @@ async function findActiveRoleHolder(
 
 // ─── Multi-stage approval stages for event-bound instances ──────────────────
 //
-// Section R of the requirements describes three parallel approvals:
-//   • Branch chairman — overall sign-off
-//   • Treasurer       — budget / IUT items
-//   • Vice-Chairman   — agenda
-//
-// We auto-create these stages when an event-bound instance is RELEASED.
-// Non-event instances continue to use the original single-reviewer flow.
+// Multi-stage approval is OPTIONAL per template (migration 0065). When an
+// admin lists role codes in `checklist_templates.approver_role_codes`,
+// every released event-bound instance from that template gets one approval
+// stage per listed role. When the list is empty (the default), the
+// instance uses the original single-reviewer flow and no Multi-stage panel
+// renders on the UI.
 //
 // `cascade_checklist_approval_status` (migration 0025) is the SQL trigger
 // that watches these stage rows and flips the parent instance.
-const EVENT_APPROVAL_STAGES: Array<{
-  stage_code: string;
-  stage_label: string;
-  required_role_code: string;
-  sort_order: number;
-}> = [
-  { stage_code: "branch_chairman", stage_label: "Branch Chairman — overall approval", required_role_code: "branch_chairman", sort_order: 10 },
-  { stage_code: "treasurer_iut",   stage_label: "Treasurer — IUT / budget review",    required_role_code: "branch_treasurer", sort_order: 20 },
-  { stage_code: "vc_agenda",       stage_label: "Vice-Chairman — agenda review",      required_role_code: "branch_vice_chairman", sort_order: 30 },
-];
+
+// Human-readable labels for the role codes most commonly used as branch
+// approvers. Anything not in this map falls back to a Title-Cased version
+// of the role code so admins can experiment with custom roles without code
+// changes.
+const APPROVER_ROLE_LABELS: Record<string, string> = {
+  branch_chairman:      "Branch Chairman — overall approval",
+  branch_vice_chairman: "Vice-Chairman — agenda review",
+  branch_secretary:     "Branch Secretary — final review",
+  branch_treasurer:     "Treasurer — IUT / budget review",
+};
+
+function approverLabelFor(roleCode: string): string {
+  if (APPROVER_ROLE_LABELS[roleCode]) return APPROVER_ROLE_LABELS[roleCode];
+  // Fallback — turn "some_custom_role" → "Some Custom Role"
+  return roleCode
+    .split(/[_\s]+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
 
 async function ensureApprovalStages(instanceId: string, isEventBound: boolean) {
   if (!isEventBound) return;
+
+  // Read the parent template's approver_role_codes. Empty array (the
+  // default for every existing and new template) = single-reviewer flow,
+  // so we return early without inserting any stage rows.
+  const [inst] = await db
+    .select({ template_id: checklistInstances.template_id })
+    .from(checklistInstances)
+    .where(eq(checklistInstances.id, instanceId))
+    .limit(1);
+  if (!inst) return;
+
+  const [tmpl] = await db
+    .select({ approver_role_codes: checklistTemplates.approver_role_codes })
+    .from(checklistTemplates)
+    .where(eq(checklistTemplates.id, inst.template_id))
+    .limit(1);
+  const roleCodes = (tmpl?.approver_role_codes ?? []).filter(Boolean);
+  if (roleCodes.length === 0) return; // single-reviewer flow
+
   // INSERT ... ON CONFLICT keeps re-releases (after reject + reopen)
   // idempotent — existing stage rows are preserved with their statuses
   // so the chairman doesn't have to re-approve work they'd already signed off.
-  for (const s of EVENT_APPROVAL_STAGES) {
+  for (let i = 0; i < roleCodes.length; i++) {
+    const roleCode = roleCodes[i];
     await db.insert(checklistInstanceApprovals).values({
-      instance_id: instanceId,
-      stage_code: s.stage_code,
-      stage_label: s.stage_label,
-      required_role_code: s.required_role_code,
-      sort_order: s.sort_order,
+      instance_id:        instanceId,
+      // Use the role code as the stage code so the trigger + admin
+      // approve/reject endpoints can route to the right row.
+      stage_code:         roleCode,
+      stage_label:        approverLabelFor(roleCode),
+      required_role_code: roleCode,
+      sort_order:         (i + 1) * 10,
     }).onConflictDoNothing();
   }
 }
@@ -1445,11 +1476,17 @@ checklistInstancesRouter.post("/:id/submit", async (req: AuthedRequest, res, nex
     const eventTitle = !!row.instance.event_id ? (await instanceEventTitle(id)) : null;
     const reviewerIds = new Set<string>();
     if (row.instance.assigned_review_user_id) reviewerIds.add(row.instance.assigned_review_user_id);
-    // Stage reviewers — resolve role codes to actual users via the same
-    // helper the create flow uses.
-    if (!!row.instance.event_id && !!row.event_committee_id) {
-      for (const stage of EVENT_APPROVAL_STAGES) {
-        const uid = await findActiveRoleHolder(stage.required_role_code);
+    // Stage reviewers — multi-stage approval is opt-in per template via
+    // checklist_templates.approver_role_codes (migration 0065). When the
+    // admin configured it, ping every listed role's active holder so the
+    // approvals don't serialise through the chairman. When empty (default),
+    // fall back to the template's single review_role.
+    const approverRoles = Array.isArray(row.template.approver_role_codes)
+      ? row.template.approver_role_codes.filter(Boolean) as string[]
+      : [];
+    if (!!row.instance.event_id && approverRoles.length > 0) {
+      for (const code of approverRoles) {
+        const uid = await findActiveRoleHolder(code);
         if (uid) reviewerIds.add(uid);
       }
     } else if (row.template.review_role) {

@@ -1,6 +1,7 @@
 import {
   pgTable, uuid, text, integer, timestamp, boolean, jsonb, uniqueIndex, index,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import {
   checklistQuestionTypeEnum,
   checklistInstanceStatusEnum,
@@ -34,6 +35,11 @@ export const checklistTemplates = pgTable("checklist_templates", {
   is_starter:   boolean("is_starter").notNull().default(false),
   fill_role:    text("fill_role"),
   review_role:  text("review_role"),
+  // When non-empty, every released event-bound instance from this template
+  // gets one approval stage per listed role code (multi-stage flow). Empty
+  // array (default) = original single-reviewer flow, no multi-stage panel.
+  // See migration 0065 + ensureApprovalStages() in routes/checklistInstances.ts.
+  approver_role_codes: text("approver_role_codes").array().notNull().default(sql`'{}'::text[]`),
   created_by:   uuid("created_by").references(() => users.id),
   created_at:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updated_at:   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
