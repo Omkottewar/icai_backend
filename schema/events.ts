@@ -37,6 +37,9 @@ export const events = pgTable("events", {
   recurrence_rrule:     text("recurrence_rrule"),       // RFC 5545
   highlights:           text("highlights").array(),
   program_type:         text("program_type"),
+  speaker_name:         text("speaker_name"),
+  speaker_bio:          text("speaker_bio"),
+  speaker_photo_id:     uuid("speaker_photo_id").references(() => files.id, { onDelete: "set null" }),
   created_by:           uuid("created_by").references(() => users.id),
   created_at:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updated_at:           timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -1,7 +1,12 @@
 import { Router } from "express";
 import { and, asc, desc, eq, ilike, isNull, ne, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { db } from "../../../db/client.js";
 import { events, eventRegistrations, committees, branches, files, checklistInstances, checklistInstanceApprovals, eventOverrideLog } from "../../../schema/index.js";
+
+// Same trick as the public route — `files` is joined twice on the GET /:id
+// endpoint (banner + speaker photo) so we need an alias to disambiguate.
+const speakerFilesAdmin = alias(files, "speaker_files");
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { requireRole } from "../../middleware/requireRole.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
@@ -165,11 +170,13 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
         branch_name: branches.name,
         banner_path: files.storage_path,
         banner_bucket: files.bucket,
+        speaker_photo_path: speakerFilesAdmin.storage_path,
       })
       .from(events)
       .leftJoin(committees, eq(committees.id, events.committee_id))
       .leftJoin(branches, eq(branches.id, events.branch_id))
       .leftJoin(files, eq(files.id, events.banner_id))
+      .leftJoin(speakerFilesAdmin, eq(speakerFilesAdmin.id, events.speaker_photo_id))
       .where(and(eq(events.id, req.params.id), isNull(events.deleted_at)))
       .limit(1);
     if (!row) throw new ApiError(404, "Event not found");
@@ -184,6 +191,7 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
       committee_name: row.committee_name,
       branch_name: row.branch_name,
       banner_url: row.banner_path ? storage().url(row.banner_path) : null,
+      speaker_photo_url: row.speaker_photo_path ? storage().url(row.speaker_photo_path) : null,
       registrations_total: regs,
     });
   } catch (err) { handleApiError(err, res, next); }
@@ -223,6 +231,9 @@ eventsAdminRouter.post("/", canManageEvents, async (req: AuthedRequest, res, nex
     const highlights = parseHighlights(req.body.highlights);
     const banner_id = trim(req.body.banner_id) || null;
     const recurrence_rrule = trim(req.body.recurrence_rrule) || null;
+    const speaker_name     = trim(req.body.speaker_name) || null;
+    const speaker_bio      = trim(req.body.speaker_bio)  || null;
+    const speaker_photo_id = trim(req.body.speaker_photo_id) || null;
 
     const slug = await uniqueSlug(trim(req.body.slug) ? slugify(trim(req.body.slug)) : slugify(title));
 
@@ -250,6 +261,9 @@ eventsAdminRouter.post("/", canManageEvents, async (req: AuthedRequest, res, nex
         recurrence_rrule,
         highlights,
         program_type,
+        speaker_name,
+        speaker_bio,
+        speaker_photo_id,
         created_by: req.user!.id,
       })
       .returning();
@@ -302,6 +316,9 @@ eventsAdminRouter.patch("/:id", canManageEvents, async (req, res, next) => {
     if (req.body.highlights !== undefined) patch.highlights = parseHighlights(req.body.highlights);
     if (req.body.banner_id !== undefined) patch.banner_id = trim(req.body.banner_id) || null;
     if (req.body.recurrence_rrule !== undefined) patch.recurrence_rrule = trim(req.body.recurrence_rrule) || null;
+    if (req.body.speaker_name !== undefined)     patch.speaker_name     = trim(req.body.speaker_name) || null;
+    if (req.body.speaker_bio !== undefined)      patch.speaker_bio      = trim(req.body.speaker_bio)  || null;
+    if (req.body.speaker_photo_id !== undefined) patch.speaker_photo_id = trim(req.body.speaker_photo_id) || null;
 
     // Status changes go through dedicated endpoints (publish/cancel).
     delete patch.status;
