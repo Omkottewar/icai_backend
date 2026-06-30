@@ -219,6 +219,31 @@ resourcesRouter.get("/papers", async (req, res, next) => {
   } catch (err) { handleApiError(err, res, next); }
 });
 
+// ─── Papers — list my submissions ────────────────────────────────────────
+// MUST be registered before /papers/:slug below, otherwise Express
+// matches the slug route first with slug="mine" and the handler 404s.
+// So a member can see "approved / pending / rejected" status on each of
+// their submissions and resubmit after a rejection.
+resourcesRouter.get("/papers/mine", requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const rows = await db
+      .select({
+        id: paperPresentations.id,
+        slug: paperPresentations.slug,
+        title: paperPresentations.title,
+        status: paperPresentations.status,
+        review_note: paperPresentations.review_note,
+        submitted_at: paperPresentations.created_at,
+        reviewed_at: paperPresentations.reviewed_at,
+        view_count: paperPresentations.view_count,
+      })
+      .from(paperPresentations)
+      .where(eq(paperPresentations.submitted_by, req.user!.id))
+      .orderBy(desc(paperPresentations.created_at));
+    res.json({ items: rows });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
 // ─── Papers — public detail by slug ──────────────────────────────────────
 // Increments view_count on each successful read (best-effort — the side
 // effect is fire-and-forget so a slow update doesn't delay the response).
@@ -441,29 +466,6 @@ resourcesRouter.post("/papers/submit", requireUser, async (req: AuthedRequest, r
     });
 
     res.status(201).json({ ok: true, paper: { id: created.id, slug: created.slug, status: created.status } });
-  } catch (err) { handleApiError(err, res, next); }
-});
-
-// ─── Papers — list my submissions ────────────────────────────────────────
-// So a member can see "approved / pending / rejected" status on each of
-// their submissions and resubmit after a rejection.
-resourcesRouter.get("/papers/mine", requireUser, async (req: AuthedRequest, res, next) => {
-  try {
-    const rows = await db
-      .select({
-        id: paperPresentations.id,
-        slug: paperPresentations.slug,
-        title: paperPresentations.title,
-        status: paperPresentations.status,
-        review_note: paperPresentations.review_note,
-        submitted_at: paperPresentations.created_at,
-        reviewed_at: paperPresentations.reviewed_at,
-        view_count: paperPresentations.view_count,
-      })
-      .from(paperPresentations)
-      .where(eq(paperPresentations.submitted_by, req.user!.id))
-      .orderBy(desc(paperPresentations.created_at));
-    res.json({ items: rows });
   } catch (err) { handleApiError(err, res, next); }
 });
 
