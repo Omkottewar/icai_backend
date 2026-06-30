@@ -6,10 +6,13 @@ import { handleApiError, trim } from "../lib/apiError.js";
 
 export const publicJobsRouter = Router();
 
-const VALID_TYPES = ["job", "articleship"] as const;
+const VALID_TYPES = ["job", "articleship", "assignment"] as const;
 
 // GET /api/jobs?type=job|articleship|assignment
-// Returns active postings for the public vacancies page.
+// Returns active postings for the public vacancies page. "assignment" is
+// for short-term / freelance / consulting engagements that members pick
+// up alongside their regular practice (audit assistance, due-diligence,
+// project consulting, etc.) — surfaced on Members → Assignments.
 publicJobsRouter.get("/", async (req, res, next) => {
   try {
     const type = trim(req.query.type);

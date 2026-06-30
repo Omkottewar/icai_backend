@@ -7,14 +7,14 @@ import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
 
 export const jobsAdminRouter = Router();
 
-const POSTING_TYPES = ["job", "articleship"] as const;
+const POSTING_TYPES = ["job", "articleship", "assignment"] as const;
 const POSTING_STATUSES = ["draft", "pending_payment", "active", "filled", "expired", "closed"] as const;
 
 // Fixed fee per posting type (paise). Payment flow not wired yet — stored for future use.
 const FEE_PAISE: Record<typeof POSTING_TYPES[number], number> = {
-  job: 100000,         // ₹1,000
-  articleship: 50000,  // ₹500
-  // assignment: 100000,   ₹1,000
+  job:         100000,  // ₹1,000
+  articleship:  50000,  // ₹500
+  assignment:  100000,  // ₹1,000 — short-term / freelance engagements for members
 };
 
 function pickType(v: unknown): typeof POSTING_TYPES[number] {
