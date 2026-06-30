@@ -29,7 +29,7 @@ Add to calendar: https://nagpur.icai.org/cal/abc
 
 Questions? Just reply to this email.
 
-— Nagpur Branch of WIRC of ICAI`,
+— ICAI Nagpur Branch (WIRC)`,
   },
   {
     subject: "Reset your password",
@@ -41,7 +41,7 @@ Reset password: https://nagpur.icai.org/reset?token=xyz
 
 If you didn't request this, you can safely ignore this email — your password stays the same.
 
-— Nagpur Branch of WIRC of ICAI`,
+— ICAI Nagpur Branch (WIRC)`,
   },
   {
     subject: "Thank you for your CABF contribution",
@@ -51,7 +51,7 @@ We gratefully acknowledge your CA Benevolent Fund contribution of **₹5,000** o
 
 Your 80G receipt will be mailed by ICAI HO.
 
-— Nagpur Branch of WIRC of ICAI`,
+— ICAI Nagpur Branch (WIRC)`,
   },
 ];
 

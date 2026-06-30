@@ -14,8 +14,8 @@
 //   Gmail strips <style> blocks. Outlook strips margin/padding from <p>.
 //   Inline attributes are the most reliable cross-client baseline.
 
-const BRAND_NAME      = "Nagpur Branch of WIRC of ICAI";
-const BRAND_EYEBROW   = "NAGPUR BRANCH OF WIRC OF ICAI";
+const BRAND_NAME      = "ICAI Nagpur Branch (WIRC)";
+const BRAND_EYEBROW   = "ICAI NAGPUR BRANCH (WIRC)";
 const BRAND_ADDRESS   = "ICAI Bhawan, 20/1, Behind Vijayanand Society, Dhantoli, Nagpur — 440012";
 const BRAND_EMAIL     = "nagpur@icai.in";
 const SENDER_EMAIL    = process.env.EMAIL_FROM_ADDR || "no-reply@icainagpur.in";

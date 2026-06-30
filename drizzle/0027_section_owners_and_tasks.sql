@@ -77,7 +77,7 @@ VALUES
    'Fires when someone is assigned a task on a checklist (e.g. banner design).',
    ARRAY['inapp','email']::text[],
    'You''ve been assigned a task — {{event_title}}',
-   E'Hi {{first_name}},\n\n{{assigner_name}} has assigned you a task on the "{{event_title}}" checklist:\n\n  {{task_description}}\n\nDue: {{due_date}}\n\nOpen the checklist: {{checklist_link}}\n\nIf this isn''t for you, please reply to this email so the assigner can reassign.\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\n{{assigner_name}} has assigned you a task on the "{{event_title}}" checklist:\n\n  {{task_description}}\n\nDue: {{due_date}}\n\nOpen the checklist: {{checklist_link}}\n\nIf this isn''t for you, please reply to this email so the assigner can reassign.\n\n— ICAI Nagpur Branch (WIRC)',
    '{{task_description}}',
    '{{event_title}} · due {{due_date}}')
 ON CONFLICT (key) DO NOTHING;

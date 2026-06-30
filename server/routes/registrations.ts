@@ -382,7 +382,7 @@ registrationsRouter.get("/:slug/ical", async (req, res, next) => {
       start: event.starts_at,
       end: event.ends_at,
       organizerEmail: "nagpur@icai.org",
-      organizerName: "Nagpur Branch of WIRC of ICAI",
+      organizerName: "ICAI Nagpur Branch (WIRC)",
       status: event.status === "cancelled" ? "CANCELLED" : "CONFIRMED",
     }], event.title);
 
@@ -440,7 +440,7 @@ registrationsRouter.get("/my-calendar.ics", async (req: AuthedRequest, res, next
       start: e.starts_at,
       end: e.ends_at,
       organizerEmail: "nagpur@icai.org",
-      organizerName: "Nagpur Branch of WIRC of ICAI",
+      organizerName: "ICAI Nagpur Branch (WIRC)",
       status: e.status === "cancelled" ? "CANCELLED" : "CONFIRMED",
     })), "My ICAI Nagpur Events");
 
@@ -521,7 +521,7 @@ registrationsRouter.get("/:slug/certificate", requireUser, async (req: AuthedReq
       eventTitle: event.title,
       eventDate: event.starts_at,
       cpeHours: Number(event.cpe_hours),
-      branchName: "Nagpur Branch of WIRC of ICAI",
+      branchName: "ICAI Nagpur Branch (WIRC)",
       certificateNo,
     }, res);
   } catch (err) { handleApiError(err, res, next); }

@@ -45,7 +45,7 @@ export const SITE_SLOTS = {
     ],
   },
   home_hero: {
-    label: "Home — Top tagline (under \"Nagpur Branch of ICAI\")",
+    label: "Home — Top tagline (under \"ICAI Nagpur Branch (WIRC)\")",
     page:  "Home",
     fields: [
       { key: "tagline", label: "Tagline", kind: "markdown" },
@@ -77,7 +77,7 @@ export const SITE_SLOTS = {
     ],
   },
   home_hero_text: {
-    label: "Home — Hero text + background image (\"Nagpur Branch of ICAI\" + 3 CTA buttons)",
+    label: "Home — Hero text + background image (\"ICAI Nagpur Branch (WIRC)\" + 3 CTA buttons)",
     page:  "Home",
     fields: [
       { key: "bg_image_url",     label: "Hero background photo",                       kind: "image", hint: "Wide landscape (≈1920×1080). Shown behind the headline with a soft white wash.", minWidth: 1600, minHeight: 900 },
@@ -97,7 +97,7 @@ export const SITE_SLOTS = {
       { key: "cta_book_label",     label: "First button label (e.g. \"Book CPE Event\")",   kind: "text" },
       { key: "cta_download_label", label: "Second button label (e.g. \"Download Circulars\")", kind: "text" },
       { key: "since_label",        label: "Floating badge top line (e.g. \"SINCE\")",        kind: "text" },
-      { key: "since_year",         label: "Floating badge bottom line (e.g. \"1962\")",       kind: "text" },
+      { key: "since_year",         label: "Floating badge bottom line (e.g. \"1978\")",       kind: "text" },
     ],
   },
   home_leadership_carousel: {
@@ -179,7 +179,7 @@ export const SITE_SLOTS = {
     page:  "About",
     fields: [
       { key: "title",    label: "Page title (e.g. \"About the Branch\")",                    kind: "text" },
-      { key: "subtitle", label: "Page subtitle (e.g. \"Established 1962 · Branch of WIRC\")", kind: "text" },
+      { key: "subtitle", label: "Page subtitle (e.g. \"Established 1978 · Branch of WIRC\")", kind: "text" },
     ],
   },
   about_section_headings: {

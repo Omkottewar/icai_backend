@@ -22,7 +22,7 @@ VALUES
    'Fires when a checklist is assigned to a user — admin creates an instance, releases a draft, or adds a new section assignee. The recipient is whoever has new work to do.',
    ARRAY['inapp','email','webpush']::text[],
    'New checklist to fill: {{checklist_title}}',
-   E'Hi {{first_name}},\n\n{{assigner_name}} has assigned you a checklist:\n\n  "{{checklist_title}}"{{section_clause}}\n\n{{event_clause}}Open the checklist: {{checklist_link}}\n\nIf this is unexpected, please reply to this email so the assigner can reassign.\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\n{{assigner_name}} has assigned you a checklist:\n\n  "{{checklist_title}}"{{section_clause}}\n\n{{event_clause}}Open the checklist: {{checklist_link}}\n\nIf this is unexpected, please reply to this email so the assigner can reassign.\n\n— ICAI Nagpur Branch (WIRC)',
    '{{checklist_title}}',
    '{{section_summary}}')
 ON CONFLICT (key) DO NOTHING;
@@ -37,7 +37,7 @@ VALUES
    'Fires when the filler submits a checklist. Recipient is the assigned reviewer (branch chairman for event-bound instances) so they can approve / send back.',
    ARRAY['inapp','email','webpush']::text[],
    'Checklist ready for your review: {{checklist_title}}',
-   E'Hi {{first_name}},\n\n{{filler_name}} has submitted a checklist for your review:\n\n  "{{checklist_title}}"\n\n{{event_clause}}Open to approve or send back: {{checklist_link}}\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\n{{filler_name}} has submitted a checklist for your review:\n\n  "{{checklist_title}}"\n\n{{event_clause}}Open to approve or send back: {{checklist_link}}\n\n— ICAI Nagpur Branch (WIRC)',
    'Ready for review: {{checklist_title}}',
    'Submitted by {{filler_name}}')
 ON CONFLICT (key) DO NOTHING;

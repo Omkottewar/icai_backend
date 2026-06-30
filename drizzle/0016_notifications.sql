@@ -76,7 +76,7 @@ VALUES
    'Sent immediately after a member registers for an event (free or paid).',
    ARRAY['inapp','email']::text[],
    'You''re registered — {{event_title}}',
-   E'Hi {{first_name}},\n\nYour spot for {{event_title}} on {{event_date}} at {{event_time}} ({{event_venue}}) is confirmed.\n\n{{cpe_hours}} CPE hours.\n\nAdd to calendar: {{calendar_link}}\n\nQuestions? Reply to this email.\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nYour spot for {{event_title}} on {{event_date}} at {{event_time}} ({{event_venue}}) is confirmed.\n\n{{cpe_hours}} CPE hours.\n\nAdd to calendar: {{calendar_link}}\n\nQuestions? Reply to this email.\n\n— ICAI Nagpur Branch (WIRC)',
    'Registered for {{event_title}}',
    '{{event_date}} · {{event_venue}}'),
 
@@ -85,7 +85,7 @@ VALUES
    'Sent 24 hours before the event starts.',
    ARRAY['inapp','email']::text[],
    'Reminder — {{event_title}} is tomorrow',
-   E'Hi {{first_name}},\n\nThis is a reminder that {{event_title}} starts tomorrow, {{event_date}} at {{event_time}} ({{event_venue}}).\n\n{{joining_link_or_directions}}\n\nWe look forward to seeing you.\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nThis is a reminder that {{event_title}} starts tomorrow, {{event_date}} at {{event_time}} ({{event_venue}}).\n\n{{joining_link_or_directions}}\n\nWe look forward to seeing you.\n\n— ICAI Nagpur Branch (WIRC)',
    'Tomorrow: {{event_title}}',
    '{{event_time}} · {{event_venue}}'),
 
@@ -94,7 +94,7 @@ VALUES
    'Sent when a seat opens up and a waitlisted member is moved off the waitlist.',
    ARRAY['inapp','email']::text[],
    'A seat just opened — you''re in for {{event_title}}',
-   E'Hi {{first_name}},\n\nGood news — a seat has opened up and you''ve been moved off the waitlist for {{event_title}} on {{event_date}} at {{event_time}}.\n\nYour registration is now confirmed.\n\n{{joining_link_or_directions}}\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nGood news — a seat has opened up and you''ve been moved off the waitlist for {{event_title}} on {{event_date}} at {{event_time}}.\n\nYour registration is now confirmed.\n\n{{joining_link_or_directions}}\n\n— ICAI Nagpur Branch (WIRC)',
    'You''re off the waitlist — {{event_title}}',
    'Confirmed for {{event_date}}'),
 
@@ -103,7 +103,7 @@ VALUES
    'Sent to every registered attendee when an event is cancelled.',
    ARRAY['inapp','email']::text[],
    'Cancelled — {{event_title}} on {{event_date}}',
-   E'Hi {{first_name}},\n\nWe regret to inform you that {{event_title}} scheduled for {{event_date}} has been cancelled. Any fee paid will be refunded within {{refund_days}} working days.\n\nWe apologise for the inconvenience.\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nWe regret to inform you that {{event_title}} scheduled for {{event_date}} has been cancelled. Any fee paid will be refunded within {{refund_days}} working days.\n\nWe apologise for the inconvenience.\n\n— ICAI Nagpur Branch (WIRC)',
    'Cancelled: {{event_title}}',
    'Scheduled for {{event_date}}'),
 
@@ -112,7 +112,7 @@ VALUES
    'Sent when CPE hours are credited to a member.',
    ARRAY['inapp','email']::text[],
    '{{cpe_hours}} CPE hours credited — {{event_title}}',
-   E'Hi {{first_name}},\n\n{{cpe_hours}} CPE hours for attending {{event_title}} on {{event_date}} have been credited to your account.\n\nView your CPE record: {{cpe_link}}\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\n{{cpe_hours}} CPE hours for attending {{event_title}} on {{event_date}} have been credited to your account.\n\nView your CPE record: {{cpe_link}}\n\n— ICAI Nagpur Branch (WIRC)',
    '{{cpe_hours}} CPE hours credited',
    '{{event_title}}'),
 
@@ -121,7 +121,7 @@ VALUES
    'Sent when a participation certificate is generated and available.',
    ARRAY['inapp','email']::text[],
    'Your certificate is ready — {{event_title}}',
-   E'Hi {{first_name}},\n\nYour participation certificate for {{event_title}} is ready.\n\nDownload it here: {{certificate_link}}\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nYour participation certificate for {{event_title}} is ready.\n\nDownload it here: {{certificate_link}}\n\n— ICAI Nagpur Branch (WIRC)',
    'Certificate ready',
    '{{event_title}}'),
 
@@ -130,7 +130,7 @@ VALUES
    'Sent when a member is approved to view the members'' directory.',
    ARRAY['inapp','email']::text[],
    'Members'' Directory access granted',
-   E'Hi {{first_name}},\n\nYour access to the Members'' Directory has been approved.\n\nBrowse the directory here: {{directory_link}}\n\nPlease use member contact details responsibly.\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nYour access to the Members'' Directory has been approved.\n\nBrowse the directory here: {{directory_link}}\n\nPlease use member contact details responsibly.\n\n— ICAI Nagpur Branch (WIRC)',
    'Directory access granted',
    'You can now browse the members'' directory.'),
 
@@ -139,7 +139,7 @@ VALUES
    'Sent when a user requests a password reset.',
    ARRAY['email']::text[],
    'Reset your password',
-   E'Hi {{first_name}},\n\nWe received a request to reset your password.\n\nClick here to set a new one: {{reset_link}} (valid for {{expiry}}).\n\nIf you didn''t request this, please ignore this email.\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nWe received a request to reset your password.\n\nClick here to set a new one: {{reset_link}} (valid for {{expiry}}).\n\nIf you didn''t request this, please ignore this email.\n\n— ICAI Nagpur Branch (WIRC)',
    NULL,
    NULL),
 
@@ -148,7 +148,7 @@ VALUES
    'Weekly digest of new job / articleship postings matching the member''s profile.',
    ARRAY['inapp','email']::text[],
    'New opportunities matching your profile',
-   E'Hi {{first_name}},\n\n{{count}} new job/articleship postings match your profile this week.\n\nView them here: {{jobs_link}}\n\nTo stop these digests, update your preferences: {{preferences_link}}\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\n{{count}} new job/articleship postings match your profile this week.\n\nView them here: {{jobs_link}}\n\nTo stop these digests, update your preferences: {{preferences_link}}\n\n— ICAI Nagpur Branch (WIRC)',
    '{{count}} new job postings',
    'Tap to view'),
 
@@ -156,8 +156,8 @@ VALUES
    'Monthly newsletter',
    'Sent on the day each monthly newsletter is published.',
    ARRAY['inapp','email']::text[],
-   '{{month}} Newsletter — Nagpur Branch of WIRC of ICAI',
-   E'Hi {{first_name}},\n\nThe {{month}} {{year}} edition of our branch newsletter is out.\n\nRead it here: {{newsletter_link}}\n\nHighlights: {{highlights}}\n\n— Nagpur Branch of WIRC of ICAI',
+   '{{month}} Newsletter — ICAI Nagpur Branch (WIRC)',
+   E'Hi {{first_name}},\n\nThe {{month}} {{year}} edition of our branch newsletter is out.\n\nRead it here: {{newsletter_link}}\n\nHighlights: {{highlights}}\n\n— ICAI Nagpur Branch (WIRC)',
    '{{month}} newsletter is out',
    'Tap to read'),
 
@@ -166,7 +166,7 @@ VALUES
    'Sent to the approver when an event checklist reaches their stage.',
    ARRAY['inapp','email']::text[],
    'Approval needed — {{event_title}} checklist',
-   E'Hi {{approver_name}},\n\nThe event checklist for {{event_title}} ({{event_date}}) is awaiting your approval.\n\nReview and action it here: {{checklist_link}}\n\nPending items auto-escalate after {{sla_days}} days.\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{approver_name}},\n\nThe event checklist for {{event_title}} ({{event_date}}) is awaiting your approval.\n\nReview and action it here: {{checklist_link}}\n\nPending items auto-escalate after {{sla_days}} days.\n\n— ICAI Nagpur Branch (WIRC)',
    'Checklist needs your review',
    '{{event_title}}'),
 
@@ -175,7 +175,7 @@ VALUES
    'Sent when a room/reading-room booking is confirmed.',
    ARRAY['inapp','email']::text[],
    'Booking confirmed — {{room_name}} on {{booking_date}}',
-   E'Hi {{first_name}},\n\nYour booking of {{room_name}} for {{booking_date}}, {{slot}} is confirmed. Deposit of ₹{{deposit}} received.\n\nPlease note the cancellation policy: {{policy_link}}\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nYour booking of {{room_name}} for {{booking_date}}, {{slot}} is confirmed. Deposit of ₹{{deposit}} received.\n\nPlease note the cancellation policy: {{policy_link}}\n\n— ICAI Nagpur Branch (WIRC)',
    'Booking confirmed: {{room_name}}',
    '{{booking_date}} · {{slot}}'),
 
@@ -184,7 +184,7 @@ VALUES
    'Sent when a room booking is cancelled (by member or admin).',
    ARRAY['inapp','email']::text[],
    'Booking cancelled — {{room_name}} on {{booking_date}}',
-   E'Hi {{first_name}},\n\nYour booking of {{room_name}} for {{booking_date}}, {{slot}} has been cancelled. Your deposit of ₹{{deposit}} will be refunded as per policy ({{refund_method}}).\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nYour booking of {{room_name}} for {{booking_date}}, {{slot}} has been cancelled. Your deposit of ₹{{deposit}} will be refunded as per policy ({{refund_method}}).\n\n— ICAI Nagpur Branch (WIRC)',
    'Booking cancelled',
    '{{room_name}} · {{booking_date}}'),
 
@@ -193,7 +193,7 @@ VALUES
    'Sent on receipt of a CA Benevolent Fund contribution. 80G receipt is mailed separately by ICAI HO.',
    ARRAY['inapp','email']::text[],
    'Thank you for your CABF contribution',
-   E'Hi {{first_name}},\n\nWe gratefully acknowledge your CA Benevolent Fund contribution of ₹{{amount}} on {{contribution_date}} (Ref: {{receipt_no}}).\n\nYour 80G receipt will be mailed by ICAI HO.\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nWe gratefully acknowledge your CA Benevolent Fund contribution of ₹{{amount}} on {{contribution_date}} (Ref: {{receipt_no}}).\n\nYour 80G receipt will be mailed by ICAI HO.\n\n— ICAI Nagpur Branch (WIRC)',
    'CABF contribution received',
    '₹{{amount}} · Ref {{receipt_no}}'),
 
@@ -202,7 +202,7 @@ VALUES
    'Sent immediately on grievance submission. Aim: respond within 48 hours.',
    ARRAY['inapp','email']::text[],
    'We''ve received your grievance ({{ticket_no}})',
-   E'Hi {{first_name}},\n\nYour grievance has been logged (Ref: {{ticket_no}}) and routed to the concerned team. We aim to respond within 48 hours.\n\nTrack status here: {{status_link}}\n\n— Nagpur Branch of WIRC of ICAI',
+   E'Hi {{first_name}},\n\nYour grievance has been logged (Ref: {{ticket_no}}) and routed to the concerned team. We aim to respond within 48 hours.\n\nTrack status here: {{status_link}}\n\n— ICAI Nagpur Branch (WIRC)',
    'Grievance logged ({{ticket_no}})',
    'We''ll respond within 48 hours.')
 ON CONFLICT (key) DO NOTHING;

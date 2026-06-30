@@ -18,7 +18,7 @@ export interface CertificateInput {
   eventTitle: string;
   eventDate: Date;          // event.starts_at
   cpeHours: number;
-  branchName: string;       // "Nagpur Branch of WIRC of ICAI"
+  branchName: string;       // "ICAI Nagpur Branch (WIRC)"
   certificateNo: string;    // e.g. "NGP-CPE-{event.slug.slice(-8)}-{userId.slice(0,8)}"
 }
 

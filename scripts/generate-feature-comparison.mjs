@@ -156,7 +156,7 @@ sections.push(new Paragraph({
   alignment: AlignmentType.CENTER,
   spacing: { after: 400 },
   children: [new TextRun({
-    text: "Nagpur Branch of WIRC of ICAI",
+    text: "ICAI Nagpur Branch (WIRC)",
     bold: true, size: 48, color: NAVY,
   })],
 }));
@@ -1020,7 +1020,7 @@ sections.push(new Paragraph({
 }));
 
 const doc = new Document({
-  creator: "Nagpur Branch of WIRC of ICAI",
+  creator: "ICAI Nagpur Branch (WIRC)",
   title: "Feature Comparison Document",
   description: "nagpuricai.org vs icainagpur.in feature-by-feature comparison",
   styles: {
@@ -1050,7 +1050,7 @@ const doc = new Document({
       default: new Footer({
         children: [new Paragraph({
           alignment: AlignmentType.CENTER,
-          children: [new TextRun({ text: `Generated ${today}  |  Nagpur Branch of WIRC of ICAI`, color: GREY, size: 16 })],
+          children: [new TextRun({ text: `Generated ${today}  |  ICAI Nagpur Branch (WIRC)`, color: GREY, size: 16 })],
         })],
       }),
     },

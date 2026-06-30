@@ -92,7 +92,7 @@ try {
   if (!branch) {
     [branch] = await sql`
       INSERT INTO branches (code, name, city, state, region_code, active)
-      VALUES ('NGP', 'Nagpur Branch of WIRC of ICAI', 'Nagpur', 'Maharashtra', 'WIRC', true)
+      VALUES ('NGP', 'ICAI Nagpur Branch (WIRC)', 'Nagpur', 'Maharashtra', 'WIRC', true)
       RETURNING id, name
     `;
     console.log(`  ✓ Created branch: ${branch.name}  id=${branch.id}`);

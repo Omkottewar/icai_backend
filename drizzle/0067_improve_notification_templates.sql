@@ -20,7 +20,7 @@ Your booking of {{room_name}} for {{booking_date}}, {{slot}} is confirmed. Depos
 
 View policy: {{policy_link}}
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'room_booking_confirmed'
    AND updated_by IS NULL;
 
@@ -34,7 +34,7 @@ Highlights: {{highlights}}
 
 Read newsletter: {{newsletter_link}}
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'newsletter_published'
    AND updated_by IS NULL;
 
@@ -48,7 +48,7 @@ View postings: {{jobs_link}}
 
 To stop these digests, update your notification preferences in your dashboard.
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'jobs_digest'
    AND updated_by IS NULL;
 
@@ -60,7 +60,7 @@ The event checklist for {{event_title}} ({{event_date}}) is awaiting your approv
 
 Review checklist: {{checklist_link}}
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'checklist_pending_approval'
    AND updated_by IS NULL;
 
@@ -74,7 +74,7 @@ UPDATE notification_templates
 
 {{event_clause}}Review checklist: {{checklist_link}}
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'checklist_submitted'
    AND updated_by IS NULL;
 
@@ -89,7 +89,7 @@ We aim to respond within 48 hours.
 
 Track status: {{status_link}}
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'grievance_ack'
    AND updated_by IS NULL;
 
@@ -108,7 +108,7 @@ Add to calendar: {{calendar_link}}
 
 Questions? Just reply to this email.
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'event_registered'
    AND updated_by IS NULL;
 
@@ -126,7 +126,7 @@ View event: {{event_link}}
 
 We look forward to seeing you.
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'event_reminder'
    AND updated_by IS NULL;
 
@@ -141,7 +141,7 @@ View event: {{event_link}}
 
 Add to calendar: {{calendar_link}}
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'event_waitlist_promoted'
    AND updated_by IS NULL;
 
@@ -153,7 +153,7 @@ Your participation certificate for {{event_title}} is ready.
 
 Download certificate: {{certificate_link}}
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'certificate_ready'
    AND updated_by IS NULL;
 
@@ -167,7 +167,7 @@ Reset password: {{reset_link}}
 
 If you didn''t request this, you can safely ignore this email — your password stays the same.
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'password_reset'
    AND updated_by IS NULL;
 
@@ -181,7 +181,7 @@ Open directory: {{directory_link}}
 
 Please use member contact details responsibly and only for legitimate professional reasons.
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'directory_access_granted'
    AND updated_by IS NULL;
 
@@ -193,6 +193,6 @@ UPDATE notification_templates
 
 View CPE record: {{cpe_link}}
 
-— Nagpur Branch of WIRC of ICAI'
+— ICAI Nagpur Branch (WIRC)'
  WHERE key = 'cpe_credit_awarded'
    AND updated_by IS NULL;
