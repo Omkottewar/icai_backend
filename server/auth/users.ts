@@ -106,6 +106,11 @@ export async function findOrCreateUserFromAuth0(
         name: profile.name ?? profile.email,
         email: profile.email,
         primary_role: role,
+        // Self-signups are gated behind branch-admin approval: the user can
+        // sign up + verify email, but cannot sign in until an admin flips
+        // their status to 'active'. Admin-created users skip this code path
+        // and are inserted directly with status='active'.
+        status: "pending_approval",
         last_login_at: new Date(),
       })
       .returning();

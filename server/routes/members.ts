@@ -11,8 +11,9 @@ export const membersRouter = Router();
 // Source: icai_member_master (the official branch roster — ~3,000 rows).
 //
 // Auth policy:
-//   • Anonymous callers get name + mrn + status + city only.
-//   • Authenticated callers also get phone + email + firm_name.
+//   • Anonymous callers get name + status + city + firm_name (MRN is
+//     returned as the stable row id; UI does not display it to anons).
+//   • Authenticated callers additionally get phone + email.
 //
 // `optionalUser` is intentionally applied BEFORE the router-wide requireUser
 // gate so this endpoint is reachable without a session.
@@ -73,7 +74,7 @@ membersRouter.get("/directory", optionalUser, async (req: AuthedRequest, res, ne
         // server-side so a curious client can't read them off the wire.
         phone:     isAuthed ? (r.phone ?? null) : null,
         email:     isAuthed ? (r.email ?? null) : null,
-        firm_name: isAuthed ? (r.firm_name ?? null) : null,
+        firm_name: r.firm_name ?? null,
       })),
       total,
       page,

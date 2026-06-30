@@ -78,6 +78,15 @@ function redirectWithError(res: any, path: string, message: string) {
   res.redirect(`${appUrl()}${path}?error=${encodeURIComponent(message)}`);
 }
 
+// Shown to self-signed-up users on every sign-in attempt until the branch
+// admin promotes their `users.status` to 'active'. Kept here so /signup,
+// /login, and /callback all say the exact same thing.
+const PENDING_APPROVAL_MESSAGE =
+  "Your account has been created and your email is verified, but it is still " +
+  "awaiting branch-admin approval. Please contact the ICAI Nagpur Branch " +
+  "office (nagpur@icai.org) with your Membership Number so the admin can " +
+  "verify your details and activate your account.";
+
 // â”€â”€â”€ POST /api/auth/login â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Embedded login: the form on /login posts here. No browser redirect to
 // Auth0 â€” we call /oauth/token server-side, then set our own session cookie.
@@ -147,6 +156,18 @@ authRouter.post("/login", loginLimiter, sameOrigin, async (req, res, next) => {
     }
 
     const { user, isNew } = result;
+
+    // Self-signups are blocked here until the branch admin promotes them.
+    // Auth0 has already authenticated them, but we refuse to mint our own
+    // session cookie until status='active'. The frontend turns this error
+    // code into a dialog telling the user to contact the branch.
+    if (user.status === "pending_approval") {
+      return res.status(403).json({
+        error: "account_pending_approval",
+        message: PENDING_APPROVAL_MESSAGE,
+      });
+    }
+
     const token = signSessionToken(user.id);
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions);
     const redirect = await getPostLoginPath(user.id, isNew);
@@ -317,6 +338,19 @@ authRouter.post("/signup", signupLimiter, sameOrigin, async (req, res, next) => 
     }
 
     const { user, isNew } = result;
+
+    // Self-signups are now gated behind branch-admin approval. We do NOT
+    // mint a session — the user must come back and sign in after the admin
+    // has activated them. The frontend turns `requiresApproval` into a
+    // dialog explaining how to get verified.
+    if (user.status === "pending_approval") {
+      return res.json({
+        ok: true,
+        requiresApproval: true,
+        message: PENDING_APPROVAL_MESSAGE,
+      });
+    }
+
     const token = signSessionToken(user.id);
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions);
     const redirect = await getPostLoginPath(user.id, isNew);
@@ -415,6 +449,13 @@ authRouter.get("/callback", async (req, res, next) => {
     }
 
     const { user, isNew } = result;
+
+    // Self-signups (incl. social) are gated until the branch admin approves.
+    // Bounce back to /login with the message — same UX as the embedded flow.
+    if (user.status === "pending_approval") {
+      clearTempCookies();
+      return redirectWithError(res, "/login", PENDING_APPROVAL_MESSAGE);
+    }
 
     const token = signSessionToken(user.id);
 

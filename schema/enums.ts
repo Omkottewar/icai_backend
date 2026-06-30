@@ -50,7 +50,7 @@ export const forumThreadTagEnum = pgEnum("forum_thread_tag", [
 ]);
 
 export const userStatusEnum = pgEnum("user_status", [
-  "active", "inactive", "suspended",
+  "active", "inactive", "suspended", "pending_approval",
 ]);
 
 export const localeEnum = pgEnum("locale", ["en", "hi", "mr"]);
