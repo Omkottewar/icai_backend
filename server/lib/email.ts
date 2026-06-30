@@ -14,6 +14,7 @@
 // crash the import graph at boot.
 
 import "dotenv/config";
+import { renderEmailHtml } from "./emailTemplate.js";
 
 let clientPromise: Promise<any> | null = null;
 let clientDisabled = false;
@@ -127,13 +128,20 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
     ? `[→ ${input.to}] ${input.subject}`
     : input.subject;
 
+  // Auto-render a branded HTML envelope when the caller didn't pass one.
+  // Plain-text body still ships in the `text` field as a fallback for
+  // accessibility / text-only clients. Callers that already build HTML
+  // (e.g. the Resend smoke test) keep their custom layout.
+  const html = input.html
+    ?? renderEmailHtml({ subject: input.subject, body: input.body });
+
   try {
     const { data, error } = await client.emails.send({
       from,
       to:      finalTo,
       subject: finalSubject,
       text:    input.body,
-      html:    input.html,
+      html,
     });
     if (error) {
       return {
