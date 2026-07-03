@@ -24,7 +24,9 @@
     "seed:officers": "node scripts/seed-committee-officers.mjs",
     "seed:officers:clean": "node scripts/free-mock-singleton-roles.mjs",
     "pragyaan:ingest": "tsx scripts/ingest-public.mjs",
-    "pragyaan:ingest:dry": "tsx scripts/ingest-public.mjs --dry-run"
+    "pragyaan:ingest:dry": "tsx scripts/ingest-public.mjs --dry-run",
+    "site-content:dump-defaults": "tsx scripts/dump-site-content-defaults.ts",
+    "site-content:dump-defaults:dry": "tsx scripts/dump-site-content-defaults.ts --dry-run"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.1",

@@ -6,7 +6,7 @@ DROP TABLE "invoices" CASCADE;--> statement-breakpoint
 DROP TABLE "payment_disputes" CASCADE;--> statement-breakpoint
 DROP TABLE "payment_refunds" CASCADE;--> statement-breakpoint
 DROP TABLE "approvals" CASCADE;--> statement-breakpoint
-ALTER TABLE "student_profiles" ALTER COLUMN "articleship_status" SET DATA TYPE articleship_status;--> statement-breakpoint
+ALTER TABLE "student_profiles" ALTER COLUMN "articleship_status" SET DATA TYPE articleship_status USING "articleship_status"::text::articleship_status;--> statement-breakpoint
 ALTER TABLE "user_role_assignments" ADD CONSTRAINT "user_role_assignments_scope_committee_id_committees_id_fk" FOREIGN KEY ("scope_committee_id") REFERENCES "public"."committees"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "users" ADD CONSTRAINT "users_avatar_id_files_id_fk" FOREIGN KEY ("avatar_id") REFERENCES "public"."files"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "cpe_credits" ADD CONSTRAINT "cpe_credits_certificate_file_id_files_id_fk" FOREIGN KEY ("certificate_file_id") REFERENCES "public"."files"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint

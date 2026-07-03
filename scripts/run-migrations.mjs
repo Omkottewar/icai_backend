@@ -44,7 +44,13 @@ const sql = postgres(url, { max: 1, prepare: false });
 function listMigrationFiles() {
   return readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith(".sql") && f !== "verify.sql")
-    .sort(); // 0000_… < 0001_… alphabetic = numeric for our naming
+    .sort(); // 0000_… < 0001_… alphabetic = numeric for our naming.
+             // Convention: when two files share a number (drizzle-generated
+             // companion + hand-written), the drizzle one creates the tables
+             // and must run first. If the hand-written name would sort BEFORE
+             // the drizzle one (e.g. 0004_event_checklists < 0004_lumpy_klaw),
+             // rename the hand-written to 0004_z_… so alphabetic order still
+             // runs drizzle first. See 0004_z_event_checklists.sql.
 }
 
 async function ensureTrackingTable() {
