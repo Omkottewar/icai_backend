@@ -90,6 +90,8 @@ usersAdminRouter.get("/", async (req, res, next) => {
         branch_name: branches.name,
         last_login_at: users.last_login_at,
         created_at: users.created_at,
+        signup_mrn: users.signup_mrn,
+        signup_mrn_in_directory: users.signup_mrn_in_directory,
       })
       .from(users)
       .leftJoin(branches, eq(branches.id, users.branch_id))

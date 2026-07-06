@@ -54,6 +54,12 @@ export const users = pgTable("users", {
   // Kept on the user row (not summed from `files`) so the per-upload
   // quota check stays O(1).
   chat_bytes_used: bigint("chat_bytes_used", { mode: "number" }).notNull().default(0),
+  // MRN declared at signup + whether it matched icai_member_master at that
+  // moment. Surfaced to admins on the Sign-up approvals screen so they can
+  // spot fake / mistyped MRNs before activating an account. NULL when no
+  // MRN was supplied (non-member roles, or member who left the field blank).
+  signup_mrn:              text("signup_mrn"),
+  signup_mrn_in_directory: boolean("signup_mrn_in_directory"),
   created_at:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updated_at:    timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   deleted_at:    timestamp("deleted_at", { withTimezone: true }),

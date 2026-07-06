@@ -27,7 +27,7 @@ import { sameOrigin } from "../middleware/sameOrigin.js";
 import { loginLimiter, signupLimiter, forgotPasswordLimiter } from "../middleware/rateLimit.js";
 import { validatePassword } from "../auth/password.js";
 import { db } from "../../db/client.js";
-import { roles, userRoleAssignments, icaiMemberMaster, siteSettings } from "../../schema/index.js";
+import { roles, userRoleAssignments, icaiMemberMaster, siteSettings, users } from "../../schema/index.js";
 
 export const authRouter = Router();
 
@@ -237,29 +237,39 @@ authRouter.post("/signup", signupLimiter, sameOrigin, async (req, res, next) => 
       return res.status(400).json({ error: "weak_password", message: pwError });
     }
 
-    // MRN gate (member role only). The flag is OFF by default so dev signups
-    // keep working; the branch admin flips it on once they've imported the
-    // ICAI directory and verified counts look right.
+    // MRN handling (member role only). Two independent things happen here:
+    //   1. Capture the declared MRN + a directory-match flag so the admin can
+    //      see them on the Sign-up approvals screen — done unconditionally.
+    //   2. Enforce the hard gate (403 on mismatch) only when the branch admin
+    //      has explicitly enabled signup.mrn_gating_enabled. Soft-launch mode
+    //      still lets everyone through so the admin can decide case-by-case.
+    let signupMrn: string | null = null;
+    let signupMrnInDirectory: boolean | null = null;
     if (parsedRole === "member") {
+      signupMrn = (typeof req.body?.mrn === "string" ? req.body.mrn.trim() : "") || null;
+
+      if (signupMrn) {
+        const [exists] = await db
+          .select({ mrn: icaiMemberMaster.mrn })
+          .from(icaiMemberMaster)
+          .where(eq(icaiMemberMaster.mrn, signupMrn))
+          .limit(1);
+        signupMrnInDirectory = Boolean(exists);
+      }
+
       const [flag] = await db
         .select()
         .from(siteSettings)
         .where(eq(siteSettings.key, "signup.mrn_gating_enabled"))
         .limit(1);
       if (flag?.value === "true") {
-        const mrn = typeof req.body?.mrn === "string" ? req.body.mrn.trim() : "";
-        if (!mrn) {
+        if (!signupMrn) {
           return res.status(400).json({
             error: "mrn_required",
             message: "Membership Number (MRN) is required for member signup.",
           });
         }
-        const [exists] = await db
-          .select({ mrn: icaiMemberMaster.mrn })
-          .from(icaiMemberMaster)
-          .where(eq(icaiMemberMaster.mrn, mrn))
-          .limit(1);
-        if (!exists) {
+        if (!signupMrnInDirectory) {
           return res.status(403).json({
             error: "mrn_not_found",
             message:
@@ -325,6 +335,15 @@ authRouter.post("/signup", signupLimiter, sameOrigin, async (req, res, next) => 
     }
 
     res.clearCookie(ROLE_COOKIE, clearCookieOpts);
+
+    // Persist the declared MRN + directory-match flag on the freshly-created
+    // users row so the branch admin sees it on Sign-up approvals. Applies to
+    // members only; other roles never populate these fields.
+    if (parsedRole === "member" && (signupMrn !== null || signupMrnInDirectory !== null)) {
+      await db.update(users)
+        .set({ signup_mrn: signupMrn, signup_mrn_in_directory: signupMrnInDirectory })
+        .where(eq(users.id, result.user.id));
+    }
 
     // Rows are in place. Only mint a session if the email is verified â€”
     // unverified users can't reach /dashboard until they click the link and
