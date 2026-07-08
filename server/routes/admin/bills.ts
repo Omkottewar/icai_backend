@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
-import { bills, users, events, committees } from "../../../schema/index.js";
+import { bills, users, events, committees, vendors, expenseCategories } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
 
@@ -39,7 +39,11 @@ billsAdminRouter.get("/", async (req, res, next) => {
     const rows = await db
       .select({
         id:               bills.id,
+        vendor_id:        bills.vendor_id,
         vendor_name:      bills.vendor_name,
+        vendor_directory_name: vendors.name,
+        category_id:      bills.category_id,
+        category_label:   expenseCategories.label,
         description:      bills.description,
         amount_paise:     bills.amount_paise,
         budget_paise:     bills.budget_paise,
@@ -59,6 +63,8 @@ billsAdminRouter.get("/", async (req, res, next) => {
       .leftJoin(events, eq(events.id, bills.event_id))
       .leftJoin(committees, eq(committees.id, bills.committee_id))
       .leftJoin(users, eq(users.id, bills.submitted_by))
+      .leftJoin(vendors, eq(vendors.id, bills.vendor_id))
+      .leftJoin(expenseCategories, eq(expenseCategories.id, bills.category_id))
       .where(and(...conds))
       .orderBy(desc(bills.created_at))
       .limit(pageSize)
@@ -89,6 +95,8 @@ billsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
     const event_id       = trim(req.body?.event_id) || null;
     const committee_id   = trim(req.body?.committee_id) || null;
     const document_file_id = trim(req.body?.document_file_id) || null;
+    const vendor_id      = trim(req.body?.vendor_id) || null;
+    const category_id    = trim(req.body?.category_id) || null;
     const budget_paise = req.body?.budget_paise != null
       ? Math.trunc(Number(req.body.budget_paise)) || null
       : null;
@@ -97,7 +105,9 @@ billsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
     const status: Status = submit ? "submitted" : "draft";
 
     const [row] = await db.insert(bills).values({
+      vendor_id,
       vendor_name,
+      category_id,
       description,
       amount_paise,
       bill_date,
@@ -139,6 +149,8 @@ billsAdminRouter.patch("/:id", async (req: AuthedRequest, res, next) => {
     if (typeof req.body?.bill_date === "string") patch.bill_date = parseDate(req.body.bill_date, "Bill date");
     if ("event_id" in req.body) patch.event_id = req.body.event_id || null;
     if ("committee_id" in req.body) patch.committee_id = req.body.committee_id || null;
+    if ("vendor_id" in req.body) patch.vendor_id = req.body.vendor_id || null;
+    if ("category_id" in req.body) patch.category_id = req.body.category_id || null;
     if ("document_file_id" in req.body) patch.document_file_id = req.body.document_file_id || null;
 
     const [row] = await db.update(bills).set(patch as any).where(eq(bills.id, id)).returning();

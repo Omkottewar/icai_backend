@@ -29,6 +29,7 @@
     "site-content:dump-defaults:dry": "tsx scripts/dump-site-content-defaults.ts --dry-run"
   },
   "dependencies": {
+    "@sentry/node": "^10.63.0",
     "@supabase/supabase-js": "^2.108.1",
     "@types/ws": "^8.18.1",
     "archiver": "^8.0.0",

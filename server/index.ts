@@ -1,4 +1,9 @@
 import "dotenv/config";
+// Sentry init runs before every other import so OpenTelemetry can patch
+// http/express/postgres/etc. on load. No-ops when SENTRY_DSN is unset or
+// NODE_ENV != production. See server/instrument.ts for gating logic.
+import "./instrument.js";
+import * as Sentry from "@sentry/node";
 import { setDefaultResultOrder } from "node:dns";
 
 // Prefer IPv4 when resolving any hostname (Supabase, SMTP, etc.).
@@ -46,6 +51,9 @@ import { branchContentRouter } from "./routes/branchContent.js";
 import { grievancesRouter } from "./routes/grievances.js";
 import { pragyaanRouter } from "./routes/pragyaan.js";
 import { studentSuggestionsRouter } from "./routes/studentSuggestions.js";
+import { mentorshipRouter } from "./routes/mentorship.js";
+import { articleshipMatchesRouter } from "./routes/articleshipMatches.js";
+import { scholarshipsRouter } from "./routes/scholarships.js";
 
 const app = express();
 
@@ -137,6 +145,9 @@ app.use("/api/resources", resourcesRouter);
 app.use("/api/grievances", grievancesRouter);
 app.use("/api/pragyaan", pragyaanRouter);
 app.use("/api/student-suggestions", studentSuggestionsRouter);
+app.use("/api/mentorship", mentorshipRouter);
+app.use("/api/articleship-matches", articleshipMatchesRouter);
+app.use("/api/scholarships", scholarshipsRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {
@@ -170,11 +181,32 @@ if (process.env.FRONTEND_DIST) {
   });
 }
 
+// Sentry's Express error handler — captures any error passed to next(err)
+// or thrown from an async handler. Must sit BEFORE our own error middleware
+// (Sentry decides what to report, then calls next() so our handler still
+// returns the JSON response). No-ops entirely when Sentry.init() didn't
+// run (missing DSN / non-prod), so safe to leave in.
+Sentry.setupExpressErrorHandler(app);
+
 // Centralised error handler — keeps stack traces out of responses.
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   // eslint-disable-next-line no-console
   console.error("[api error]", err);
   res.status(500).json({ error: "internal_error" });
+});
+
+// Last-resort catch for anything that escaped Express (background timers,
+// unhandled promises in cron jobs). Sentry.init() is a no-op when DSN is
+// unset, so these handlers just fall through to the console line below.
+process.on("uncaughtException", (err) => {
+  Sentry.captureException(err);
+  // eslint-disable-next-line no-console
+  console.error("[uncaughtException]", err);
+});
+process.on("unhandledRejection", (reason) => {
+  Sentry.captureException(reason);
+  // eslint-disable-next-line no-console
+  console.error("[unhandledRejection]", reason);
 });
 
 const port = Number(process.env.PORT ?? 4000);

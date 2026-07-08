@@ -17,6 +17,10 @@ export const forumThreads = pgTable("forum_threads", {
   event_id:     uuid("event_id").references(() => events.id, { onDelete: "set null" }),
   committee_id: uuid("committee_id").references(() => committees.id, { onDelete: "set null" }),
   mock_test_id: uuid("mock_test_id").references(() => mockTests.id, { onDelete: "cascade" }),
+  // Scope-less discussion topic (e.g. 'student_general', 'members_general').
+  // A thread is valid when ANY of event_id / committee_id / mock_test_id /
+  // topic is set — enforced by the forum_threads_scope_check constraint.
+  topic:        text("topic"),
   created_by:   uuid("created_by").notNull().references(() => users.id),
   created_at:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updated_at:   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

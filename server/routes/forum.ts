@@ -31,6 +31,7 @@ forumRouter.get("/threads", async (req: AuthedRequest, res, next) => {
   try {
     const eventId     = trim(req.query.event_id);
     const committeeId = trim(req.query.committee_id);
+    const topic       = trim(req.query.topic);
     const tag         = trim(req.query.tag);
     const q           = trim(req.query.q);
     const mine        = trim(req.query.mine) === "1";
@@ -42,6 +43,7 @@ forumRouter.get("/threads", async (req: AuthedRequest, res, next) => {
     const conds = [isNull(forumThreads.deleted_at)];
     if (eventId)     conds.push(eq(forumThreads.event_id, eventId));
     if (committeeId) conds.push(eq(forumThreads.committee_id, committeeId));
+    if (topic)       conds.push(eq(forumThreads.topic, topic));
     if (tag && TAGS.includes(tag as any)) conds.push(eq(forumThreads.tag, tag as any));
     if (mine) conds.push(eq(forumThreads.created_by, req.user!.id));
     if (q) conds.push(or(ilike(forumThreads.title, `%${q}%`), ilike(forumThreads.body, `%${q}%`))!);
@@ -147,9 +149,24 @@ forumRouter.post("/threads", async (req: AuthedRequest, res, next) => {
     const tag   = pickTag(req.body.tag);
     const eventId     = trim(req.body.event_id) || null;
     const committeeId = trim(req.body.committee_id) || null;
+    const topic       = trim(req.body.topic) || null;
 
-    if (!eventId && !committeeId) {
-      throw new ApiError(400, "Thread must be attached to an event or a committee");
+    if (!eventId && !committeeId && !topic) {
+      throw new ApiError(400, "Thread must be attached to an event, committee, or topic");
+    }
+
+    // Only students may open threads under the student general topic. Staff/
+    // admins can attach anywhere, but a member-signup account shouldn't be
+    // polluting the students' peer forum.
+    if (topic === "student_general" && req.user!.primary_role !== "student"
+        && !(await isAdmin(req.user!.id))) {
+      throw new ApiError(403, "Only students can post in the student peer forum");
+    }
+    // Guardrail: only a small allowlist of topics is currently supported so
+    // arbitrary strings don't create ghost forums.
+    const ALLOWED_TOPICS = new Set(["student_general", "members_general"]);
+    if (topic && !ALLOWED_TOPICS.has(topic)) {
+      throw new ApiError(400, "Unknown forum topic");
     }
 
     // Verify the referenced scope exists (so we return a 400 instead of a 23503)
@@ -168,6 +185,7 @@ forumRouter.post("/threads", async (req: AuthedRequest, res, next) => {
         title, body, tag,
         event_id: eventId,
         committee_id: committeeId,
+        topic,
         created_by: req.user!.id,
       })
       .returning();

@@ -3,6 +3,7 @@ import { users } from "./identity";
 import { events } from "./events";
 import { committees } from "./committees";
 import { files } from "./files";
+import { vendors, expenseCategories } from "./vendorsAndCategories";
 
 // ─── Bills ────────────────────────────────────────────────────────────────────
 //
@@ -25,7 +26,14 @@ export const bills = pgTable(
     id:                uuid("id").primaryKey().defaultRandom(),
     event_id:          uuid("event_id").references(() => events.id, { onDelete: "set null" }),
     committee_id:      uuid("committee_id").references(() => committees.id, { onDelete: "set null" }),
+    // vendor_id references the vendor directory when the bill is tied to a
+    // frequent supplier. `vendor_name` remains for one-off vendors the
+    // treasurer doesn't want to add to the directory permanently.
+    vendor_id:         uuid("vendor_id").references(() => vendors.id, { onDelete: "set null" }),
     vendor_name:       text("vendor_name").notNull(),
+    // Expense category (venue / catering / honorarium / …). Feeds the
+    // treasurer dashboard's expense-by-category donut.
+    category_id:       uuid("category_id").references(() => expenseCategories.id, { onDelete: "set null" }),
     description:       text("description"),
     amount_paise:      integer("amount_paise").notNull(),
     bill_date:         date("bill_date").notNull(),

@@ -49,12 +49,25 @@ function sanitizeLayout(input: unknown): Array<{ id: string; size: "sm" | "md" |
   return out;
 }
 
+// Multiple dashboard surfaces (chairman insights, treasurer insights, …)
+// share this endpoint via the ?scope= query. Unknown / missing scopes fall
+// back to 'chairman' so pre-scope callers keep working unchanged.
+const ALLOWED_SCOPES = new Set(["chairman", "treasurer"]);
+function resolveScope(raw: unknown): string {
+  const s = typeof raw === "string" ? raw : "";
+  return ALLOWED_SCOPES.has(s) ? s : "chairman";
+}
+
 dashboardRouter.get("/layout", requireUser, async (req: AuthedRequest, res, next) => {
   try {
+    const scope = resolveScope(req.query.scope);
     const [row] = await db
       .select({ layout: dashboardLayouts.layout, updated_at: dashboardLayouts.updated_at })
       .from(dashboardLayouts)
-      .where(eq(dashboardLayouts.user_id, req.user!.id))
+      .where(and(
+        eq(dashboardLayouts.user_id, req.user!.id),
+        eq(dashboardLayouts.scope, scope),
+      ))
       .limit(1);
     res.json({
       layout: row?.layout ?? null,             // null → frontend uses its default
@@ -65,12 +78,13 @@ dashboardRouter.get("/layout", requireUser, async (req: AuthedRequest, res, next
 
 dashboardRouter.put("/layout", requireUser, async (req: AuthedRequest, res, next) => {
   try {
+    const scope = resolveScope(req.query.scope);
     const layout = sanitizeLayout(req.body?.layout);
     await db
       .insert(dashboardLayouts)
-      .values({ user_id: req.user!.id, layout, updated_at: new Date() })
+      .values({ user_id: req.user!.id, scope, layout, updated_at: new Date() })
       .onConflictDoUpdate({
-        target: dashboardLayouts.user_id,
+        target: [dashboardLayouts.user_id, dashboardLayouts.scope],
         set: { layout, updated_at: new Date() },
       });
     res.json({ ok: true, layout });
@@ -79,7 +93,11 @@ dashboardRouter.put("/layout", requireUser, async (req: AuthedRequest, res, next
 
 dashboardRouter.delete("/layout", requireUser, async (req: AuthedRequest, res, next) => {
   try {
-    await db.delete(dashboardLayouts).where(eq(dashboardLayouts.user_id, req.user!.id));
+    const scope = resolveScope(req.query.scope);
+    await db.delete(dashboardLayouts).where(and(
+      eq(dashboardLayouts.user_id, req.user!.id),
+      eq(dashboardLayouts.scope, scope),
+    ));
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
