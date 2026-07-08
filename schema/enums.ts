@@ -27,6 +27,11 @@ export const checklistQuestionTypeEnum = pgEnum("checklist_question_type", [
   // for the shape. Auto-totals + deficit/surplus computed client-side.
   // Added in migration 0029.
   "budget_table",
+  // 'checklist_table' — Excel-style tabular question with fixed rows and
+  // configurable columns (text / number / money / status). Supports total
+  // rows (auto-sum) and computed rows (formulas). See lib/checklistQuestions.ts
+  // for shape details. Added in migration 0078.
+  "checklist_table",
 ]);
 
 export const checklistInstanceStatusEnum = pgEnum("checklist_instance_status", [

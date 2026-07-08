@@ -17,7 +17,7 @@ export type QuestionType =
   | "date" | "datetime" | "time_range"
   | "radio" | "dropdown" | "yes_no" | "checkbox"
   | "rating" | "file" | "section_heading"
-  | "task_list" | "budget_table";
+  | "task_list" | "budget_table" | "checklist_table";
 
 export const QUESTION_TYPES = [
   "short_text", "long_text",
@@ -25,8 +25,37 @@ export const QUESTION_TYPES = [
   "date", "datetime", "time_range",
   "radio", "dropdown", "yes_no", "checkbox",
   "rating", "file", "section_heading",
-  "task_list", "budget_table",
+  "task_list", "budget_table", "checklist_table",
 ] as const;
+
+// ─── checklist_table shapes ─────────────────────────────────────────────
+// Template-time config:
+//   columns[]  — array of { key, label, type }
+//                 type ∈ 'text' | 'number' | 'money' | 'status'
+//   rows[]     — array of { id, label, kind?, hint?, total_of?, formula? }
+//                 kind ∈ 'data' | 'total' | 'computed' (default 'data')
+//                 hint     — shown as placeholder / greyed cell prefill
+//                 total_of — key of the column to auto-sum when kind='total'
+//                 formula  — javascript-ish string (rowA - rowB) when kind='computed'
+//
+// Response value (persisted): { [rowId]: { [colKey]: string|number } }.
+// Only 'data' rows carry response values; 'total' / 'computed' rows are
+// derived client-side and re-derived on read.
+export type ChecklistTableColumnType = "text" | "number" | "money" | "status";
+export type ChecklistTableColumn = {
+  key: string;
+  label: string;
+  type: ChecklistTableColumnType;
+};
+export type ChecklistTableRowKind = "data" | "total" | "computed";
+export type ChecklistTableRow = {
+  id: string;
+  label: string;
+  kind?: ChecklistTableRowKind;
+  hint?: string;
+  total_of?: string;
+  formula?: string;
+};
 
 // A single task row inside a task_list response. The shape is denormalised
 // from the dedicated checklist_task_assignments table so the response
@@ -152,6 +181,66 @@ export function normaliseConfig(type: QuestionType, raw: any): Record<string, un
       if (Number.isFinite(Number(cfg.min_tasks))) out.min_tasks = clampInt(Number(cfg.min_tasks), 0, 50);
       if (Number.isFinite(Number(cfg.default_due_days))) out.default_due_days = clampInt(Number(cfg.default_due_days), 0, 365);
       return out;
+    }
+    case "checklist_table": {
+      // Validate/normalise the fixed-row Excel-style table shape. Both
+      // columns and rows are required — a table with none of either isn't
+      // useful. Column keys and row ids must be unique so the response
+      // blob can be dictionary-keyed without collisions.
+      const rawCols = Array.isArray(cfg.columns) ? cfg.columns : [];
+      const rawRows = Array.isArray(cfg.rows) ? cfg.rows : [];
+      const validColTypes = new Set<ChecklistTableColumnType>([
+        "text", "number", "money", "status",
+      ]);
+      const validRowKinds = new Set<ChecklistTableRowKind>([
+        "data", "total", "computed",
+      ]);
+
+      const seenColKeys = new Set<string>();
+      const columns: ChecklistTableColumn[] = rawCols
+        .map((c: any, i: number) => {
+          const key = String(c?.key ?? `col_${i + 1}`).slice(0, 50);
+          const label = String(c?.label ?? key).slice(0, 200);
+          const type = validColTypes.has(c?.type) ? c.type : "text";
+          return { key, label, type };
+        })
+        .filter((c: ChecklistTableColumn) => {
+          if (seenColKeys.has(c.key)) return false;
+          seenColKeys.add(c.key);
+          return c.key.length > 0;
+        });
+
+      if (columns.length < 1) {
+        throw new ApiError(400, "checklist_table needs at least one column");
+      }
+
+      const seenRowIds = new Set<string>();
+      const rows: ChecklistTableRow[] = rawRows
+        .map((r: any, i: number) => {
+          const id = String(r?.id ?? `row_${i + 1}`).slice(0, 50);
+          const label = String(r?.label ?? id).slice(0, 300);
+          const kind = validRowKinds.has(r?.kind) ? r.kind : "data";
+          const out: ChecklistTableRow = { id, label, kind };
+          if (typeof r?.hint === "string") out.hint = String(r.hint).slice(0, 200);
+          if (kind === "total" && typeof r?.total_of === "string") {
+            out.total_of = String(r.total_of).slice(0, 50);
+          }
+          if (kind === "computed" && typeof r?.formula === "string") {
+            out.formula = String(r.formula).slice(0, 500);
+          }
+          return out;
+        })
+        .filter((r: ChecklistTableRow) => {
+          if (seenRowIds.has(r.id)) return false;
+          seenRowIds.add(r.id);
+          return r.id.length > 0;
+        });
+
+      if (rows.length < 1) {
+        throw new ApiError(400, "checklist_table needs at least one row");
+      }
+
+      return { columns, rows };
     }
   }
 }
@@ -355,6 +444,45 @@ export function validateResponseValue(
         throw new ApiError(400, `Add at least ${cfg.min_tasks} task${cfg.min_tasks === 1 ? "" : "s"}`);
       }
       return cleaned;
+    }
+    case "checklist_table": {
+      // Response shape: { [rowId]: { [colKey]: string | number } }.
+      // We validate ONLY 'data' rows against the template's columns —
+      // total / computed rows are derived at read time and never stored.
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new ApiError(400, "Checklist table response must be an object");
+      }
+      const cols: ChecklistTableColumn[] = Array.isArray(cfg.columns) ? cfg.columns : [];
+      const rows: ChecklistTableRow[] = Array.isArray(cfg.rows) ? cfg.rows : [];
+      const dataRowIds = new Set(
+        rows.filter((r) => (r.kind ?? "data") === "data").map((r) => r.id),
+      );
+
+      const out: Record<string, Record<string, string | number>> = {};
+      const rec = raw as Record<string, unknown>;
+      for (const rowId of Object.keys(rec)) {
+        if (!dataRowIds.has(rowId)) continue;  // drop unknown / non-data rows
+        const cell = rec[rowId];
+        if (typeof cell !== "object" || cell === null) continue;
+        const cellMap = cell as Record<string, unknown>;
+        const cleanedRow: Record<string, string | number> = {};
+        for (const col of cols) {
+          const v = cellMap[col.key];
+          if (v === undefined || v === null || v === "") continue;
+          if (col.type === "number" || col.type === "money") {
+            const n = Number(v);
+            if (Number.isFinite(n)) cleanedRow[col.key] = n;
+          } else if (col.type === "status") {
+            const s = String(v);
+            if (s === "done" || s === "pending" || s === "na") cleanedRow[col.key] = s;
+          } else {
+            // text
+            cleanedRow[col.key] = String(v).slice(0, 500);
+          }
+        }
+        if (Object.keys(cleanedRow).length > 0) out[rowId] = cleanedRow;
+      }
+      return out;
     }
   }
 }

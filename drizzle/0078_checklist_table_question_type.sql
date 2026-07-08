@@ -1,0 +1,32 @@
+-- ════════════════════════════════════════════════════════════════════════════
+-- Migration 0078 — checklist_table question type
+--
+-- Adds a new value to the checklist_question_type enum: 'checklist_table'.
+-- Renders as an Excel-style HTML table with fixed rows (labels defined by
+-- the template) and configurable columns (text / number / money / status).
+-- Supports "total" rows that auto-sum the money column above them and
+-- "computed" rows that derive from other rows via a simple formula
+-- (e.g., profit = income - total_expenses).
+--
+-- Template config shape:
+--   {
+--     columns: [
+--       { key: "quantity", label: "Qty / Detail", type: "text"   },
+--       { key: "person",   label: "Person",       type: "text"   },
+--       { key: "status",   label: "Status",       type: "status" },
+--     ],
+--     rows: [
+--       { id: "podium",  label: "Podium",                 kind: "data" },
+--       { id: "sweet",   label: "Sweet for Faculty",      kind: "data", hint: "6 Box" },
+--       { id: "total",   label: "TOTAL",                  kind: "total",    total_of: "amount" },
+--       { id: "profit",  label: "Profit / (Loss)",        kind: "computed", formula: "income - total" },
+--     ],
+--   }
+--
+-- Response value shape (JSON, one object keyed by row id):
+--   { "podium": { quantity: "", person: "", status: "done" }, ... }
+--
+-- Idempotent — safe to re-run.
+-- ════════════════════════════════════════════════════════════════════════════
+
+ALTER TYPE "checklist_question_type" ADD VALUE IF NOT EXISTS 'checklist_table';
