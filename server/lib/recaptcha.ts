@@ -27,11 +27,17 @@ export async function verifyRecaptcha(
   const secret = process.env.RECAPTCHA_SECRET_KEY;
   const minScore = Number(process.env.RECAPTCHA_MIN_SCORE ?? "0.5");
 
-  if (!secret) {
-    if (process.env.NODE_ENV === "production") {
-      return { ok: false, reason: "recaptcha_not_configured" };
-    }
+  // Dev short-circuit — skip verification whenever we're NOT in production,
+  // regardless of whether a secret is configured. Local dev typically runs on
+  // localhost, which needs to be in the reCAPTCHA site's allowed-domains list
+  // OR the check will always fail. Bypassing here keeps dev friction-free while
+  // keeping the check active on prod where NODE_ENV=production.
+  if (process.env.NODE_ENV !== "production") {
     return { ok: true, skipped: true };
+  }
+
+  if (!secret) {
+    return { ok: false, reason: "recaptcha_not_configured" };
   }
 
   if (!token || typeof token !== "string") {

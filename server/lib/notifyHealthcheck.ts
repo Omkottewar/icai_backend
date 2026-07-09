@@ -24,6 +24,8 @@ export const REFERENCED_TEMPLATE_KEYS = [
   "task_assigned",
   "checklist_assigned",
   "checklist_submitted",
+  "checklist_approved",
+  "checklist_rejected",
 ] as const;
 
 export async function runNotificationHealthcheck(): Promise<void> {

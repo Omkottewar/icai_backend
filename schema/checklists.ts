@@ -143,6 +143,10 @@ export const checklistInstanceSectionAssignments = pgTable("checklist_instance_s
   section_question_id:          uuid("section_question_id").references(() => checklistTemplateQuestions.id, { onDelete: "cascade" }),
   instance_section_question_id: uuid("instance_section_question_id").references(() => checklistInstanceQuestions.id, { onDelete: "cascade" }),
   assignee_id:                  uuid("assignee_id").references(() => users.id, { onDelete: "set null" }),
+  // Per-section approver added in 0079. NULL means "fall back to the
+  // checklist-level assigned_review_user_id". Non-NULL takes over sign-off
+  // for this section only.
+  approver_id:                  uuid("approver_id").references(() => users.id, { onDelete: "set null" }),
   created_at:                   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updated_at:                   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
@@ -150,6 +154,7 @@ export const checklistInstanceSectionAssignments = pgTable("checklist_instance_s
   instanceISectionIdx: uniqueIndex("ux_checklist_section_assignments_instance_isection").on(t.instance_id, t.instance_section_question_id),
   instanceIdx:         index("idx_checklist_section_assignments_instance").on(t.instance_id),
   assigneeIdx:         index("idx_checklist_section_assignments_assignee").on(t.assignee_id),
+  approverIdx:         index("idx_checklist_section_assignments_approver").on(t.approver_id),
 }));
 
 export const checklistInstanceReviews = pgTable("checklist_instance_reviews", {

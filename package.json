@@ -23,6 +23,7 @@
     "seed:mock:clean": "node scripts/clean-mock-data.mjs",
     "seed:officers": "node scripts/seed-committee-officers.mjs",
     "seed:officers:clean": "node scripts/free-mock-singleton-roles.mjs",
+    "seed:starters": "node scripts/seed-checklist-starters.mjs",
     "pragyaan:ingest": "tsx scripts/ingest-public.mjs",
     "pragyaan:ingest:dry": "tsx scripts/ingest-public.mjs --dry-run",
     "site-content:dump-defaults": "tsx scripts/dump-site-content-defaults.ts",
