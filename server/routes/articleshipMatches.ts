@@ -24,7 +24,7 @@
 // scripted abuse.
 
 import { Router } from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { and, desc, eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { articleshipMatches, events } from "../../schema/index.js";
@@ -41,7 +41,8 @@ const submissionLimiter = rateLimit({
   legacyHeaders: false,
   windowMs: 60 * 60 * 1000,
   limit: 2,
-  keyGenerator: (req: any) => req.user?.id ?? req.ip,
+  // ipKeyGenerator normalises IPv6 to a /64 bucket for correct dedup.
+  keyGenerator: (req: any) => req.user?.id ?? ipKeyGenerator(req.ip),
   message: {
     error: "rate_limited",
     message: "You've submitted an articleship form recently. Please wait an hour before another submission.",

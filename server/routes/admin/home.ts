@@ -421,29 +421,51 @@ homeAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
       [{ c: refundsPending }],
       [{ c: billsPendingApproval }],
       [{ c: billsPendingRecord }],
-    ] = await Promise.all([
-      pendingEventsP,
-      myReviewQueueP,
-      myFillQueueP,
-      myStageQueueP,
-      myCommitteeEventsP,
-      pendingBillsP,
-      pendingRefundsP,
-      pendingIutsP,
-      revenueByMonthP,
-      cabfStatsP,
-      upcomingMockTestsP,
-      pendingMentorshipP,
-      pendingMatchesP,
-      upcomingCountP,
-      eventsThisMonthP,
-      regsThisMonthP,
-      userCountsP,
-      revenueMonthP,
-      refundsPendingP,
-      billsPendingApprovalP,
-      billsPendingRecordP,
-    ]);
+    ] = await (async () => {
+      const labels = [
+        "pendingEvents", "myReviewQueue", "myFillQueue", "myStageQueue",
+        "myCommitteeEvents", "pendingBills", "pendingRefunds", "pendingIuts",
+        "revenueByMonth", "cabfStats", "upcomingMockTests", "pendingMentorship",
+        "pendingMatches", "upcomingCount", "eventsThisMonth", "regsThisMonth",
+        "userCounts", "revenueMonth", "refundsPending", "billsPendingApproval",
+        "billsPendingRecord",
+      ];
+      // Promise.allSettled + fallback values so a single query failure
+      // (e.g. a transient DB pool exhaustion or a slow child crashing on
+      // cold start) degrades that ONE tile instead of blowing up the
+      // whole /admin/home response. Each failed query is loudly logged
+      // so we can see which one is flapping in Fly logs.
+      const promises = [
+        pendingEventsP, myReviewQueueP, myFillQueueP, myStageQueueP,
+        myCommitteeEventsP, pendingBillsP, pendingRefundsP, pendingIutsP,
+        revenueByMonthP, cabfStatsP, upcomingMockTestsP, pendingMentorshipP,
+        pendingMatchesP, upcomingCountP, eventsThisMonthP, regsThisMonthP,
+        userCountsP, revenueMonthP, refundsPendingP, billsPendingApprovalP,
+        billsPendingRecordP,
+      ];
+      const settled = await Promise.allSettled(promises);
+      // Fallback shapes match what a successful query would return so the
+      // downstream aggregation code doesn't have to null-check every field.
+      const fallbacks: unknown[] = [
+        [], [], [], [],                                       // pending / review / fill / stage queues
+        [], [], [], [],                                       // committee events, bills, refunds, iuts
+        [], null,                                             // revenueByMonth, cabfStats
+        [], [], [],                                           // mock tests, mentorship, matches
+        [{ c: 0 }], [{ c: 0 }], [{ c: 0 }],                   // upcoming/events-month/regs-month counts
+        { members: 0, students: 0 },                          // userCounts
+        0,                                                    // revenueMonthPaise
+        [{ c: 0 }], [{ c: 0 }], [{ c: 0 }],                   // refundsPending / bills pending
+      ];
+      return settled.map((s, i) => {
+        if (s.status === "fulfilled") return s.value;
+        // eslint-disable-next-line no-console
+        console.error(`[admin/home] sub-query "${labels[i]}" failed`, {
+          user: user.id,
+          error: s.reason instanceof Error ? { message: s.reason.message, stack: s.reason.stack } : s.reason,
+        });
+        return fallbacks[i];
+      }) as any;
+    })();
 
     // ─── Compose the inbox ─────────────────────────────────────────────
     // Each variant gets a curated inbox of the things it most needs to act
@@ -636,5 +658,15 @@ homeAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
     // is always fresh. The 5-second in-memory homeCache above still absorbs
     // rapid re-fetches from the same user within a request burst.
     res.json(body);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Log the actual error before handing off to the Express default
+    // handler. Without this the 500 was invisible in Fly logs and we
+    // had to guess which query failed on cold-start / pool-exhaustion.
+    // eslint-disable-next-line no-console
+    console.error("[admin/home] endpoint failed", {
+      user: req.user?.id,
+      error: err instanceof Error ? { message: err.message, stack: err.stack } : err,
+    });
+    next(err);
+  }
 });

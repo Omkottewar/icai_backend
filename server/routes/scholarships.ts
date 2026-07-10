@@ -8,7 +8,7 @@
 // delete, so we still preserve the audit trail.
 
 import { Router } from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db } from "../../db/client.js";
@@ -25,7 +25,7 @@ const applyLimiter = rateLimit({
   legacyHeaders: false,
   windowMs: 60 * 60 * 1000,
   limit: 6,
-  keyGenerator: (req: any) => req.user?.id ?? req.ip,
+  keyGenerator: (req: any) => req.user?.id ?? ipKeyGenerator(req.ip),
   message: {
     error: "rate_limited",
     message: "You've applied to several scholarships recently. Please wait an hour and try again.",
@@ -40,7 +40,7 @@ const uploadLimiter = rateLimit({
   legacyHeaders: false,
   windowMs: 60 * 60 * 1000,
   limit: 12,
-  keyGenerator: (req: any) => req.user?.id ?? req.ip,
+  keyGenerator: (req: any) => req.user?.id ?? ipKeyGenerator(req.ip),
   message: {
     error: "rate_limited",
     message: "Too many uploads recently. Wait a bit before trying again.",

@@ -15,7 +15,7 @@
 // spamming the WICASA inbox with duplicate asks.
 
 import { Router } from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { and, desc, eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { mentorshipRequests, users } from "../../schema/index.js";
@@ -30,7 +30,9 @@ const submissionLimiter = rateLimit({
   legacyHeaders: false,
   windowMs: 60 * 60 * 1000,
   limit: 3,
-  keyGenerator: (req: any) => req.user?.id ?? req.ip,
+  // ipKeyGenerator normalises IPv6 into a /64 bucket so a single user can't
+  // rotate through addresses inside their prefix to bypass the limit.
+  keyGenerator: (req: any) => req.user?.id ?? ipKeyGenerator(req.ip),
   message: {
     error: "rate_limited",
     message: "You've submitted a few mentorship requests recently. Please wait an hour before submitting another.",
