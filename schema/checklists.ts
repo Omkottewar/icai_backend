@@ -147,6 +147,14 @@ export const checklistInstanceSectionAssignments = pgTable("checklist_instance_s
   // checklist-level assigned_review_user_id". Non-NULL takes over sign-off
   // for this section only.
   approver_id:                  uuid("approver_id").references(() => users.id, { onDelete: "set null" }),
+  // Per-section approval state added in 0081. Every section on a submitted
+  // instance carries its own decision so multiple approvers can sign off
+  // different sections independently. Checklist-level status flips to
+  // 'approved' only when every section's approval_status is 'approved'.
+  approval_status:              text("approval_status").notNull().default("pending"),
+  decided_by:                   uuid("decided_by").references(() => users.id, { onDelete: "set null" }),
+  decided_at:                   timestamp("decided_at", { withTimezone: true }),
+  note:                         text("note"),
   created_at:                   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updated_at:                   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
@@ -155,6 +163,7 @@ export const checklistInstanceSectionAssignments = pgTable("checklist_instance_s
   instanceIdx:         index("idx_checklist_section_assignments_instance").on(t.instance_id),
   assigneeIdx:         index("idx_checklist_section_assignments_assignee").on(t.assignee_id),
   approverIdx:         index("idx_checklist_section_assignments_approver").on(t.approver_id),
+  approvalStatusIdx:   index("idx_checklist_section_assignments_status").on(t.instance_id, t.approval_status),
 }));
 
 export const checklistInstanceReviews = pgTable("checklist_instance_reviews", {

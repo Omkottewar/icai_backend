@@ -143,7 +143,7 @@ treasurerAnalyticsAdminRouter.get("/", async (_req, res, next) => {
       .groupBy(bills.category_id, expenseCategories.label, expenseCategories.code)
       .orderBy(sql`total_paise DESC`);
 
-    res.set("cache-control", "private, max-age=60");
+    // no-store is inherited from the admin router — don't override.
     res.json({
       fy_start_year: fy,
       as_of: now.toISOString(),

@@ -53,9 +53,9 @@ statsAdminRouter.get("/", async (_req, res, next) => {
         )),
     ]);
 
-    // Light client/edge cache — 30s is enough to absorb the polling we do
-    // from useAdminStats without serving truly stale numbers.
-    res.set("cache-control", "private, max-age=30");
+    // no-store is inherited from the admin router — don't override.
+    // Client-side polling deduplication is handled by frontend's apiCache
+    // in-memory layer, which correctly invalidates on writes.
     res.json({
       members:            userCounts.members,
       students:           userCounts.students,

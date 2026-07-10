@@ -47,6 +47,21 @@ import {
 
 export const adminRouter = Router();
 
+// Never cache admin responses — attached BEFORE the auth middleware so
+// 401 / 403 rejections also get the header (a cached "unauthorized" from
+// before a role change would otherwise linger). Admin data changes on
+// every write (approvals, user edits, event publishes) and must reflect
+// the latest DB state on every read. Without this, Vercel's edge,
+// browsers, and any intermediate CDN can hold onto stale bodies OR error
+// responses (as happened when a broken vercel.json rewrite let 502s get
+// cached for hours after the fix landed).
+adminRouter.use((_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  next();
+});
+
 // Every admin endpoint requires (a) a valid session and (b) the admin role.
 adminRouter.use(requireUser, requireAdmin);
 

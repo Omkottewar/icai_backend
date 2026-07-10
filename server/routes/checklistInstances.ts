@@ -151,6 +151,66 @@ async function instanceEventTitle(instance_id: string): Promise<string | null> {
 }
 
 /**
+ * Ensure every section_heading in an instance has a section_assignments row
+ * so per-section approval state can be tracked.
+ *
+ * Two modes:
+ *   • resetExisting=true  (used from /submit) — every existing row is reset
+ *     to status='pending' + decided_*=null. Missing rows are inserted. This
+ *     is right for a fresh submission (or a resubmission after rejection).
+ *   • resetExisting=false (used from /approve, /reject as a safety net) —
+ *     only inserts MISSING rows. Existing rows keep their status so we
+ *     never wipe an already-decided approval.
+ *
+ * If the instance has zero section_headings we return without doing anything
+ * so the legacy single-block checklist keeps its old approval semantics.
+ */
+async function ensureSectionApprovalRows(instanceId: string, opts: { resetExisting?: boolean } = {}): Promise<void> {
+  const resetExisting = opts.resetExisting !== false;
+  const sections = await db
+    .select({ id: checklistInstanceQuestions.id })
+    .from(checklistInstanceQuestions)
+    .where(and(
+      eq(checklistInstanceQuestions.instance_id, instanceId),
+      eq(checklistInstanceQuestions.type, "section_heading"),
+    ));
+  if (sections.length === 0) return;
+
+  const existingRows = await db
+    .select({
+      id: checklistInstanceSectionAssignments.id,
+      instance_section_question_id: checklistInstanceSectionAssignments.instance_section_question_id,
+    })
+    .from(checklistInstanceSectionAssignments)
+    .where(eq(checklistInstanceSectionAssignments.instance_id, instanceId));
+  const existingByISection = new Map<string, string>();
+  for (const r of existingRows) {
+    if (r.instance_section_question_id) existingByISection.set(r.instance_section_question_id, r.id);
+  }
+
+  const now = new Date();
+  await db.transaction(async (tx) => {
+    for (const s of sections) {
+      const existingRowId = existingByISection.get(s.id);
+      if (existingRowId) {
+        if (resetExisting) {
+          await tx.update(checklistInstanceSectionAssignments)
+            .set({ approval_status: "pending", decided_by: null, decided_at: null, note: null, updated_at: now })
+            .where(eq(checklistInstanceSectionAssignments.id, existingRowId));
+        }
+      } else {
+        await tx.insert(checklistInstanceSectionAssignments).values({
+          instance_id:                  instanceId,
+          instance_section_question_id: s.id,
+          approver_id:                  null,
+          approval_status:              "pending",
+        });
+      }
+    }
+  });
+}
+
+/**
  * Notify every filler of a checklist after a review outcome (approve /
  * reject). Recipients:
  *   • row.instance.assigned_fill_user_id (checklist-level primary filler)
@@ -354,6 +414,10 @@ async function authorise(instanceId: string, userId: string) {
       // Included here so route handlers can enforce per-section ownership
       // without re-querying the section_assignments table.
       lockedSectionIds: Array.from(specificallyAssignedSectionIds),
+      // Sections where the current user is the per-section APPROVER.
+      // The frontend uses this to show approve/reject buttons on the
+      // sections they're actually responsible for.
+      myApproverSectionIds: Array.from(myApproverSectionIds),
     },
   };
 }
@@ -540,6 +604,8 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
     // 0053 backfills the new column for every existing assignment, so the
     // COALESCE here is purely a transitional safety net.
     const sectionAssigneeU = aliasedTable(users, "section_assignee_u");
+    const sectionApproverU = aliasedTable(users, "section_approver_u");
+    const sectionDeciderU  = aliasedTable(users, "section_decider_u");
     const sectionAssignments = await db
       .select({
         id:                            checklistInstanceSectionAssignments.id,
@@ -547,9 +613,19 @@ checklistInstancesRouter.get("/:id", async (req: AuthedRequest, res, next) => {
         assignee_id:                   checklistInstanceSectionAssignments.assignee_id,
         assignee_name:                 sectionAssigneeU.name,
         assignee_email:                sectionAssigneeU.email,
+        approver_id:                   checklistInstanceSectionAssignments.approver_id,
+        approver_name:                 sectionApproverU.name,
+        approver_email:                sectionApproverU.email,
+        approval_status:               checklistInstanceSectionAssignments.approval_status,
+        decided_by:                    checklistInstanceSectionAssignments.decided_by,
+        decided_by_name:               sectionDeciderU.name,
+        decided_at:                    checklistInstanceSectionAssignments.decided_at,
+        note:                          checklistInstanceSectionAssignments.note,
       })
       .from(checklistInstanceSectionAssignments)
       .leftJoin(sectionAssigneeU, eq(sectionAssigneeU.id, checklistInstanceSectionAssignments.assignee_id))
+      .leftJoin(sectionApproverU, eq(sectionApproverU.id, checklistInstanceSectionAssignments.approver_id))
+      .leftJoin(sectionDeciderU,  eq(sectionDeciderU.id,  checklistInstanceSectionAssignments.decided_by))
       .where(eq(checklistInstanceSectionAssignments.instance_id, id));
 
     // Look up the assigned filler + reviewer so the admin sees who got
@@ -1618,6 +1694,15 @@ checklistInstancesRouter.post("/:id/submit", async (req: AuthedRequest, res, nex
       note: trim(req.body?.note) || null,
     });
 
+    // Ensure every section_heading on this instance has an approval row
+    // so per-section approvers can sign off independently. Rows already
+    // created by the admin (with a specific approver_id) are preserved;
+    // sections without a per-section approver get a row with approver_id
+    // NULL — the checklist-level reviewer (or the template's review_role
+    // holder) acts on those. All rows reset to status='pending' whenever
+    // the instance re-enters awaiting_review (fresh submit after reject).
+    await ensureSectionApprovalRows(id);
+
     // Tell the reviewer there's something waiting. For event-bound
     // instances with multi-stage approval, also nudge the treasurer + VC
     // — each stage has its own decider, and waiting for the chairman to
@@ -1677,10 +1762,24 @@ checklistInstancesRouter.post("/:id/submit", async (req: AuthedRequest, res, nex
 });
 
 // ─── POST /api/checklist-instances/:id/approve ────────────────────────────
-// Single-reviewer approve. For event-bound instances with stage rows this
-// is BLOCKED — the user must call /approve-stage instead. The block forces
-// the multi-stage flow where it applies and prevents the chairman from
-// accidentally short-circuiting the treasurer / VC stages.
+// Per-section approval flow.
+//
+// Body: { section_ids?: uuid[], note?: string }
+//   • section_ids missing / empty → approve every section the caller is
+//     currently authorised for (per-section approver on that section OR
+//     the checklist-level reviewer for sections without a specific approver).
+//   • section_ids provided        → approve only those sections. Each must
+//     be one the caller can act on (else 403).
+//
+// After the section-level update, we recompute the whole instance status:
+//     • every section approved → instance flips to 'approved'
+//     • any section still pending → instance stays in 'awaiting_review'
+//     • any section rejected → handled by /reject (this endpoint won't
+//       change status to rejected)
+//
+// For legacy checklists that have NO section headings at all, the endpoint
+// falls back to the whole-checklist single-shot approve behaviour so old
+// data keeps working.
 checklistInstancesRouter.post("/:id/approve", async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
@@ -1695,28 +1794,149 @@ checklistInstancesRouter.post("/:id/approve", async (req: AuthedRequest, res, ne
       );
     }
 
-    const [updated] = await db.update(checklistInstances)
-      .set({ status: "approved", reviewed_at: new Date() })
-      .where(eq(checklistInstances.id, id))
-      .returning();
-    await db.insert(checklistInstanceReviews).values({
-      instance_id: id, actor_id: req.user!.id, action: "approved",
-      note: trim(req.body?.note) || null,
+    // Safety net for instances that were mid-review BEFORE the 0081
+    // migration — insert any missing per-section rows so this endpoint
+    // has something to update. Existing decisions are preserved.
+    await ensureSectionApprovalRows(id, { resetExisting: false });
+
+    const note = trim(req.body?.note) || null;
+    const requestedSectionIds: string[] = Array.isArray(req.body?.section_ids)
+      ? req.body.section_ids.filter((v: unknown) => typeof v === "string" && v.length > 0)
+      : [];
+
+    // Load section rows so we know what exists on this instance and which
+    // ones the caller can act on. `section_id` is the instance question id
+    // of the heading (COALESCE handles the legacy template-question id too).
+    const sectionRows = await db
+      .select({
+        id:               checklistInstanceSectionAssignments.id,
+        section_id:       sql<string>`COALESCE(${checklistInstanceSectionAssignments.instance_section_question_id}, ${checklistInstanceSectionAssignments.section_question_id})`.as("section_id"),
+        approver_id:      checklistInstanceSectionAssignments.approver_id,
+        approval_status:  checklistInstanceSectionAssignments.approval_status,
+      })
+      .from(checklistInstanceSectionAssignments)
+      .where(eq(checklistInstanceSectionAssignments.instance_id, id));
+
+    // Legacy path: no section rows means an old instance from before per-
+    // section approval was wired in — collapse to whole-checklist approve.
+    if (sectionRows.length === 0) {
+      const [updatedLegacy] = await db.update(checklistInstances)
+        .set({ status: "approved", reviewed_at: new Date() })
+        .where(eq(checklistInstances.id, id))
+        .returning();
+      await db.insert(checklistInstanceReviews).values({
+        instance_id: id, actor_id: req.user!.id, action: "approved", note,
+      });
+      await notifyChecklistReviewOutcome({
+        instanceId: id, row, reviewerId: req.user!.id,
+        templateKey: "checklist_approved", note,
+      });
+      return res.json(updatedLegacy);
+    }
+
+    // Compute which section IDs the caller can act on.
+    //   • per-section approver of THAT section, OR
+    //   • the checklist-level reviewer (assigned_review_user_id or the
+    //     review-role holder) for any section that has NO specific approver
+    const isChecklistReviewer =
+      row.instance.assigned_review_user_id === req.user!.id
+      || roleMatchForCurrentUserAsReviewer(row, req.user!.id, perms);
+    const authorisedSectionIds = new Set<string>();
+    for (const s of sectionRows) {
+      if (s.approver_id === req.user!.id) authorisedSectionIds.add(s.section_id);
+      else if (!s.approver_id && isChecklistReviewer) authorisedSectionIds.add(s.section_id);
+    }
+    if (authorisedSectionIds.size === 0) {
+      throw new ApiError(403, "You are not the approver of any pending section on this checklist.");
+    }
+
+    // Narrow to the sections actually being approved this call.
+    const targetSectionIds: string[] = requestedSectionIds.length > 0
+      ? requestedSectionIds
+      : Array.from(authorisedSectionIds);
+    for (const sid of targetSectionIds) {
+      if (!authorisedSectionIds.has(sid)) {
+        throw new ApiError(403, "You can't approve one of the requested sections.");
+      }
+    }
+
+    // Apply the approval + recompute instance status inside a transaction
+    // so the "all approved → status=approved" flip is atomic.
+    const now = new Date();
+    const finalInstance = await db.transaction(async (tx) => {
+      // Approve the target section rows that are still pending. Skip
+      // already-approved rows so a second click doesn't overwrite the
+      // original decided_by.
+      const idList = sectionRows
+        .filter((s) => targetSectionIds.includes(s.section_id) && s.approval_status !== "approved")
+        .map((s) => s.id);
+      if (idList.length > 0) {
+        await tx.update(checklistInstanceSectionAssignments)
+          .set({ approval_status: "approved", decided_by: req.user!.id, decided_at: now, note, updated_at: now })
+          .where(inArray(checklistInstanceSectionAssignments.id, idList));
+      }
+
+      // Recompute — are ALL section rows now approved?
+      const post = await tx
+        .select({ approval_status: checklistInstanceSectionAssignments.approval_status })
+        .from(checklistInstanceSectionAssignments)
+        .where(eq(checklistInstanceSectionAssignments.instance_id, id));
+      const allApproved = post.length > 0 && post.every((r) => r.approval_status === "approved");
+
+      if (allApproved) {
+        const [updated] = await tx.update(checklistInstances)
+          .set({ status: "approved", reviewed_at: now })
+          .where(eq(checklistInstances.id, id))
+          .returning();
+        await tx.insert(checklistInstanceReviews).values({
+          instance_id: id, actor_id: req.user!.id, action: "approved", note,
+        });
+        return updated;
+      }
+
+      // Not yet complete — log a partial approval audit row so the
+      // timeline reflects each per-section decision.
+      await tx.insert(checklistInstanceReviews).values({
+        instance_id: id, actor_id: req.user!.id, action: "approved",
+        note: note ? `${note} (sections: ${targetSectionIds.length})` : `Approved ${targetSectionIds.length} section(s)`,
+      });
+      const [current] = await tx.select().from(checklistInstances)
+        .where(eq(checklistInstances.id, id)).limit(1);
+      return current;
     });
 
-    // Notify the filler(s) so they know their submission cleared without
-    // having to log in and check.
-    await notifyChecklistReviewOutcome({
-      instanceId: id,
-      row,
-      reviewerId: req.user!.id,
-      templateKey: "checklist_approved",
-      note: trim(req.body?.note) || null,
-    });
+    // Only notify the filler on FINAL approval (all sections signed off).
+    // Otherwise the filler would get a "your checklist was approved" note
+    // for every partial section approval.
+    if (finalInstance?.status === "approved") {
+      await notifyChecklistReviewOutcome({
+        instanceId: id, row, reviewerId: req.user!.id,
+        templateKey: "checklist_approved", note,
+      });
+    }
 
-    res.json(updated);
+    res.json(finalInstance);
   } catch (err) { handleApiError(err, res, next); }
 });
+
+// Convenience — mirrors the roleMatch logic from authorise() but scoped
+// to "is this user a valid checklist-level reviewer?" (either the
+// assigned_review_user_id or holds the effective review role). Used by
+// the per-section approve gate to decide whether the caller can cover
+// sections that don't have a specific approver.
+function roleMatchForCurrentUserAsReviewer(
+  row: Awaited<ReturnType<typeof loadInstance>>,
+  userId: string,
+  perms: Awaited<ReturnType<typeof authorise>>["perms"],
+): boolean {
+  // authorise() already computed isReviewer via role check; if the user's
+  // canReview is true AND they weren't included as a per-section approver
+  // (which would still let them act on non-specific sections), they must
+  // be the checklist-level reviewer.
+  if (row.instance.assigned_review_user_id === userId) return true;
+  // Fallback: canReview covers role holders — trust the pre-computed perm.
+  return !!perms.canReview;
+}
 
 // ─── POST /api/checklist-instances/:id/approve-stage ──────────────────────
 // Decide a single approval stage. The DB trigger cascades the instance
@@ -1921,6 +2141,15 @@ checklistInstancesRouter.post("/:id/reject-stage", async (req: AuthedRequest, re
 });
 
 // ─── POST /api/checklist-instances/:id/reject ─────────────────────────────
+// Per-section reject. Any per-section approver (or the checklist-level
+// reviewer) can reject a section they're authorised for. A single rejected
+// section flips the WHOLE instance to 'rejected' — the filler must fix
+// and resubmit before anyone else can approve.
+//
+// Body: { section_ids?: uuid[], note: string (required) }
+//   • section_ids missing / empty → reject every section the caller is
+//     currently authorised for.
+//   • section_ids provided        → reject only those sections.
 checklistInstancesRouter.post("/:id/reject", async (req: AuthedRequest, res, next) => {
   try {
     const id = String(req.params.id);
@@ -1929,17 +2158,83 @@ checklistInstancesRouter.post("/:id/reject", async (req: AuthedRequest, res, nex
     if (row.instance.status !== "awaiting_review") throw new ApiError(400, "Not awaiting review");
     const note = need(trim(req.body?.note), "Rejection note");
 
-    const [updated] = await db.update(checklistInstances)
-      .set({ status: "rejected", reviewed_at: new Date() })
-      .where(eq(checklistInstances.id, id))
-      .returning();
-    await db.insert(checklistInstanceReviews).values({
-      instance_id: id, actor_id: req.user!.id, action: "rejected", note,
+    // Safety net for pre-0081 instances (see /approve for context).
+    await ensureSectionApprovalRows(id, { resetExisting: false });
+
+    const requestedSectionIds: string[] = Array.isArray(req.body?.section_ids)
+      ? req.body.section_ids.filter((v: unknown) => typeof v === "string" && v.length > 0)
+      : [];
+
+    const sectionRows = await db
+      .select({
+        id:               checklistInstanceSectionAssignments.id,
+        section_id:       sql<string>`COALESCE(${checklistInstanceSectionAssignments.instance_section_question_id}, ${checklistInstanceSectionAssignments.section_question_id})`.as("section_id"),
+        approver_id:      checklistInstanceSectionAssignments.approver_id,
+        approval_status:  checklistInstanceSectionAssignments.approval_status,
+      })
+      .from(checklistInstanceSectionAssignments)
+      .where(eq(checklistInstanceSectionAssignments.instance_id, id));
+
+    // Legacy path: no section rows → whole-checklist reject (previous
+    // behaviour), so old instances keep working.
+    if (sectionRows.length === 0) {
+      const [updatedLegacy] = await db.update(checklistInstances)
+        .set({ status: "rejected", reviewed_at: new Date() })
+        .where(eq(checklistInstances.id, id))
+        .returning();
+      await db.insert(checklistInstanceReviews).values({
+        instance_id: id, actor_id: req.user!.id, action: "rejected", note,
+      });
+      await notifyChecklistReviewOutcome({
+        instanceId: id, row, reviewerId: req.user!.id,
+        templateKey: "checklist_rejected", note,
+      });
+      return res.json(updatedLegacy);
+    }
+
+    const isChecklistReviewer =
+      row.instance.assigned_review_user_id === req.user!.id
+      || roleMatchForCurrentUserAsReviewer(row, req.user!.id, perms);
+    const authorisedSectionIds = new Set<string>();
+    for (const s of sectionRows) {
+      if (s.approver_id === req.user!.id) authorisedSectionIds.add(s.section_id);
+      else if (!s.approver_id && isChecklistReviewer) authorisedSectionIds.add(s.section_id);
+    }
+    if (authorisedSectionIds.size === 0) {
+      throw new ApiError(403, "You are not the approver of any pending section on this checklist.");
+    }
+
+    const targetSectionIds: string[] = requestedSectionIds.length > 0
+      ? requestedSectionIds
+      : Array.from(authorisedSectionIds);
+    for (const sid of targetSectionIds) {
+      if (!authorisedSectionIds.has(sid)) {
+        throw new ApiError(403, "You can't reject one of the requested sections.");
+      }
+    }
+
+    const now = new Date();
+    const updated = await db.transaction(async (tx) => {
+      const idList = sectionRows
+        .filter((s) => targetSectionIds.includes(s.section_id))
+        .map((s) => s.id);
+      if (idList.length > 0) {
+        await tx.update(checklistInstanceSectionAssignments)
+          .set({ approval_status: "rejected", decided_by: req.user!.id, decided_at: now, note, updated_at: now })
+          .where(inArray(checklistInstanceSectionAssignments.id, idList));
+      }
+      const [inst] = await tx.update(checklistInstances)
+        .set({ status: "rejected", reviewed_at: now })
+        .where(eq(checklistInstances.id, id))
+        .returning();
+      await tx.insert(checklistInstanceReviews).values({
+        instance_id: id, actor_id: req.user!.id, action: "rejected", note,
+      });
+      return inst;
     });
 
-    // Notify everyone who filled it. Whole-instance filler + role-holder
-    // + every per-section assignee gets the "sent back" ping so they can
-    // fix and re-submit without having to hunt for updates.
+    // Notify everyone who filled it — one rejected section blocks the
+    // whole checklist, so the filler needs to see this immediately.
     await notifyChecklistReviewOutcome({
       instanceId: id,
       row,

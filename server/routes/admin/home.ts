@@ -80,7 +80,7 @@ homeAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
     const codesKey = Array.from(perms.codes).sort().join("|");
     const cached = homeCacheGet(user.id, codesKey);
     if (cached) {
-      res.set("cache-control", "private, max-age=30");
+      // no-store is inherited from the admin router — don't override.
       return res.json(cached);
     }
 
@@ -631,7 +631,10 @@ homeAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
       },
     };
     homeCacheSet(user.id, codesKey, body);
-    res.set("cache-control", "private, max-age=30");
+    // Cache-Control is set to no-store by the parent admin router
+    // (routes/admin/index.ts) — deliberately no override here so admin data
+    // is always fresh. The 5-second in-memory homeCache above still absorbs
+    // rapid re-fetches from the same user within a request burst.
     res.json(body);
   } catch (err) { next(err); }
 });
