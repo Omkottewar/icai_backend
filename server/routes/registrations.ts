@@ -1,10 +1,9 @@
 ﻿import { Router } from "express";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { events, eventRegistrations, users, payments } from "../../schema/index.js";
+import { events, eventRegistrations, users, payments, siteSettings } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
-import { createRazorpayOrder, razorpayKeyId, verifyCheckoutSignature } from "../lib/razorpay.js";
 import { notifyAsync } from "../lib/notify.js";
 import { streamCertificate } from "../lib/certificates.js";
 import { buildCalendar } from "../lib/ical.js";
@@ -35,6 +34,37 @@ function eventNotifyVars(event: { title: string; slug: string; venue: string | n
     calendar_link: `${process.env.APP_URL ?? ""}/events`,
     joining_link_or_directions: event.online_url || event.venue || "Details will be shared closer to the date.",
   };
+}
+
+// Fetch the branch's UPI VPA + display name from site_settings. Both are
+// admin-editable via the Site Content admin so switching UPI providers (or
+// account holders) is a one-click change without a redeploy.
+async function loadUpiConfig(): Promise<{ upi_id: string; payee_name: string }> {
+  const rows = await db
+    .select({ key: siteSettings.key, value: siteSettings.value })
+    .from(siteSettings);
+  const map = new Map(rows.map((r) => [r.key, r.value]));
+  return {
+    upi_id: (map.get("payment_upi_id") ?? "").trim(),
+    payee_name: (map.get("payment_upi_payee_name") ?? "ICAI Nagpur Branch").trim(),
+  };
+}
+
+// Build the UPI intent URI (`upi://pay?pa=...&pn=...&am=...&tn=...&cu=INR`)
+// the frontend renders as a QR. Scanning this in any UPI app opens a
+// payment screen with the amount already filled in — the user just picks
+// the source account and hits Pay. `tn` (transaction note) is the payment
+// UUID so the branch can cross-reference the UTR against the payments row.
+function buildUpiUri(input: { upi_id: string; payee_name: string; amount_paise: number; note: string }): string {
+  const amountRupees = (input.amount_paise / 100).toFixed(2);
+  const params = new URLSearchParams({
+    pa: input.upi_id,
+    pn: input.payee_name,
+    am: amountRupees,
+    cu: "INR",
+    tn: input.note,
+  });
+  return `upi://pay?${params.toString()}`;
 }
 
 export const registrationsRouter = Router();
@@ -163,25 +193,30 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
       });
     }
 
-    // â”€â”€ Paid event: open a Razorpay order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // We create the payment row first (without razorpay_order_id), use its UUID
-    // as the Razorpay receipt, then patch the order id back. This way every
-    // payment we attempt has a row, even if order creation fails â€” easier
-    // reconciliation than relying on Razorpay being the source of truth.
+    // ── Paid event: UPI QR flow ────────────────────────────────────────
+    // We DON'T create the registration row yet — that happens only after
+    // an admin verifies the UTR the user submits. The payment row is the
+    // durable handle: user gets its id + the UPI URI, submits UTR against
+    // it, admin approves against it, registration is created against it.
     //
-    // GST (H.20): when gst_applicable is true, the fee shown to the user is
-    // base + GST. We store both numbers in payment.metadata so the invoice
-    // generator and reconciliation can recover the split deterministically.
+    // GST (H.20): when gst_applicable is true, the fee shown to the user
+    // is base + GST. We store both numbers in payment.metadata so the
+    // invoice generator can recover the split deterministically.
     const baseFee = event.fee_paise;
     const gstRate = event.gst_applicable ? Number(event.gst_percent ?? 0) : 0;
     const gstPaise = Math.round(baseFee * gstRate / 100);
     const totalPaise = baseFee + gstPaise;
 
+    const upi = await loadUpiConfig();
+    if (!upi.upi_id) {
+      throw new ApiError(503, "Online payments are not configured yet. Please contact the branch office.");
+    }
+
     const [payment] = await db.insert(payments).values({
       payer_user_id: user.id,
       amount_paise: totalPaise,
       currency: "INR",
-      status: "created",
+      status: "pending",
       purpose: "event_registration",
       ref_type: "event",
       ref_id: event.id,
@@ -195,142 +230,128 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
       },
     }).returning();
 
-    const order = await createRazorpayOrder({
+    // The transaction-note token is what the admin cross-references when
+    // reading the bank statement — keep it short + prefixed so it's easy
+    // to grep for "ICAI-<id>" in a UPI statement export.
+    const upiUri = buildUpiUri({
+      upi_id: upi.upi_id,
+      payee_name: upi.payee_name,
       amount_paise: totalPaise,
-      receipt: payment.id.slice(0, 40),
-      notes: {
-        event_id: event.id,
-        user_id: user.id,
-        payment_id: payment.id,
-      },
+      note: `ICAI-${payment.id.slice(0, 8)}`,
     });
-
-    await db.update(payments)
-      .set({ razorpay_order_id: order.id, updated_at: new Date() })
-      .where(eq(payments.id, payment.id));
 
     return res.status(200).json({
       paid: true,
       payment_id: payment.id,
-      order_id: order.id,
       amount_paise: totalPaise,
       base_paise: baseFee,
       gst_paise: gstPaise,
       gst_applicable: event.gst_applicable,
       gst_percent: gstRate,
       currency: "INR",
-      key_id: razorpayKeyId(),
+      upi_id: upi.upi_id,
+      upi_payee_name: upi.payee_name,
+      upi_uri: upiUri,
       event: { title: event.title, slug: event.slug },
-      prefill: { name: user.name, email: user.email, contact: phone || user.phone || "" },
     });
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// â”€â”€â”€ POST /api/events/:slug/verify-payment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Razorpay Checkout returns order_id + payment_id + signature on success.
-// We verify the HMAC, mark the payment row paid, and create the registration
-// row in the same transaction. The whole thing is idempotent on payment_id â€”
-// Razorpay does retry callbacks.
-registrationsRouter.post("/:slug/verify-payment", requireUser, async (req: AuthedRequest, res, next) => {
+// ─── POST /api/events/:slug/submit-utr ───────────────────────────────────
+// User has paid via the UPI QR and is submitting the UTR (UPI transaction
+// reference — 12-digit numeric string that any bank/UPI app returns after
+// a successful transfer) so an admin can cross-check it against the bank
+// statement. Flow:
+//   1. Look up the payment row created by POST /register.
+//   2. Guard: caller owns it, it's still 'pending' (not already submitted
+//      or verified), UTR isn't already in use elsewhere (partial UNIQUE
+//      index on payments.upi_utr).
+//   3. Flip status → 'pending_verification', stash utr + screenshot.
+//   4. Return the payment row so the frontend can show "verification
+//      typically takes 24h".
+//
+// No registration row is created here. That happens only on admin approve.
+registrationsRouter.post("/:slug/submit-utr", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const user = req.user!;
     const slug = need(trim(req.params.slug), "Event slug");
     const payment_id = need(trim(req.body?.payment_id), "Payment ID");
-    const razorpay_order_id = need(trim(req.body?.razorpay_order_id), "Razorpay order ID");
-    const razorpay_payment_id = need(trim(req.body?.razorpay_payment_id), "Razorpay payment ID");
-    const razorpay_signature = need(trim(req.body?.razorpay_signature), "Razorpay signature");
+    const utr = need(trim(req.body?.utr), "UTR (UPI reference number)");
+    const screenshot_file_id = trim(req.body?.screenshot_file_id) || null;
 
-    const ok = verifyCheckoutSignature({
-      order_id: razorpay_order_id,
-      payment_id: razorpay_payment_id,
-      signature: razorpay_signature,
-    });
-
-    if (!ok) {
-      // Mark the payment failed so admins can see the bad attempt
-      await db.update(payments)
-        .set({ status: "failed", updated_at: new Date() })
-        .where(eq(payments.id, payment_id));
-      throw new ApiError(400, "Payment signature verification failed");
+    // Basic UTR sanity — most banks emit 12-digit numeric, some emit
+    // 22-char alphanumeric. Accept 8-30 alphanumeric chars to cover both
+    // without blocking edge-case wallet providers.
+    if (!/^[A-Za-z0-9]{8,30}$/.test(utr)) {
+      throw new ApiError(400, "UTR looks invalid — enter the 12-digit reference from your UPI app.");
     }
 
-    const result = await db.transaction(async (tx) => {
-      const [payment] = await tx.select().from(payments).where(eq(payments.id, payment_id)).limit(1);
-      if (!payment) throw new ApiError(404, "Payment not found");
-      if (payment.payer_user_id !== user.id) throw new ApiError(403, "Payment does not belong to this user");
-      if (payment.razorpay_order_id !== razorpay_order_id) {
-        throw new ApiError(400, "Payment / order mismatch");
-      }
+    const [payment] = await db.select().from(payments).where(eq(payments.id, payment_id)).limit(1);
+    if (!payment) throw new ApiError(404, "Payment not found");
+    if (payment.payer_user_id !== user.id) throw new ApiError(403, "Payment does not belong to this user");
+    if (payment.status !== "pending") {
+      throw new ApiError(400, `Payment is already in status '${payment.status}'. Refresh the page.`);
+    }
 
-      const [event] = await tx
-        .select()
-        .from(events)
-        .where(and(eq(events.slug, slug), isNull(events.deleted_at)))
-        .limit(1);
-      if (!event) throw new ApiError(404, "Event not found");
-      if (payment.ref_id !== event.id) throw new ApiError(400, "Payment is for a different event");
+    const [event] = await db
+      .select({ id: events.id, slug: events.slug })
+      .from(events)
+      .where(and(eq(events.slug, slug), isNull(events.deleted_at)))
+      .limit(1);
+    if (!event) throw new ApiError(404, "Event not found");
+    if (payment.ref_id !== event.id) throw new ApiError(400, "Payment is for a different event");
 
-      // Idempotency: if we've already verified this payment, return the existing registration.
-      if (payment.status === "success") {
-        const [existing] = await tx
-          .select()
-          .from(eventRegistrations)
-          .where(and(
-            eq(eventRegistrations.event_id, event.id),
-            eq(eventRegistrations.user_id, user.id),
-            isNull(eventRegistrations.deleted_at),
-          ))
-          .limit(1);
-        if (existing) return { payment, registration: existing };
-      }
-
-      if (event.capacity !== null && event.registered_count >= event.capacity) {
-        // Edge case: event filled up between order creation and payment. Mark
-        // the payment refundable so an admin can issue a refund.
-        await tx.update(payments).set({
-          status: "success",
-          razorpay_payment_id,
-          razorpay_signature,
-          metadata: { ...(payment.metadata as object || {}), needs_refund: "event_full_after_payment" },
-          updated_at: new Date(),
-        }).where(eq(payments.id, payment.id));
-        throw new ApiError(409, "Event filled up before payment completed. Our team will refund you shortly.");
-      }
-
-      const [updatedPayment] = await tx.update(payments).set({
-        status: "success",
-        razorpay_payment_id,
-        razorpay_signature,
+    try {
+      const [updated] = await db.update(payments).set({
+        status: "pending_verification",
+        upi_utr: utr,
+        upi_screenshot_file_id: screenshot_file_id,
         updated_at: new Date(),
       }).where(eq(payments.id, payment.id)).returning();
 
-      const [registration] = await tx.insert(eventRegistrations).values({
-        event_id: event.id,
-        user_id: user.id,
-        status: "registered",
-        payment_id: payment.id,
-      }).returning();
-
-      await tx.update(events).set({
-        registered_count: sql`${events.registered_count} + 1`,
-        updated_at: new Date(),
-      }).where(eq(events.id, event.id));
-
-      return { payment: updatedPayment, registration, event };
-    });
-
-    // Skip when the transaction took the idempotent path (no fresh registration)
-    // — the user already received a confirmation on the first successful verify.
-    if (result.event) {
-      notifyAsync({
-        user_id: user.id,
-        template_key: "event_registered",
-        vars: eventNotifyVars(result.event),
-        link_url: `/dashboard`,
-      });
+      return res.status(200).json({ ok: true, payment: updated });
+    } catch (e) {
+      // Duplicate UTR — someone submitted the same reference against a
+      // different registration. Almost always a copy/paste error; occasionally
+      // a fraud attempt. Either way, block it here and route the human to
+      // support so admin can eyeball both rows.
+      if (e && typeof e === "object" && "code" in e && (e as any).code === "23505") {
+        throw new ApiError(409, "This UTR has already been submitted for another payment. If this is a mistake, please contact the branch office.");
+      }
+      throw e;
     }
+  } catch (err) { handleApiError(err, res, next); }
+});
 
-    res.status(201).json({ paid: true, registration: result.registration });
+// ─── GET /api/events/my-pending-payments ─────────────────────────────────
+// Returns the caller's payments currently awaiting admin verification, plus
+// enough event context for the "you have N pending payment(s)" banner on
+// the events page and the dashboard. Members can see status + submitted
+// timestamp but not the reject reason (that lives in the rejection email
+// only, to keep the UI copy simple).
+registrationsRouter.get("/my-pending-payments", requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const rows = await db
+      .select({
+        payment_id: payments.id,
+        event_id: events.id,
+        event_slug: events.slug,
+        event_title: events.title,
+        amount_paise: payments.amount_paise,
+        status: payments.status,
+        upi_utr: payments.upi_utr,
+        submitted_at: payments.updated_at,
+      })
+      .from(payments)
+      .innerJoin(events, eq(events.id, payments.ref_id))
+      .where(and(
+        eq(payments.payer_user_id, req.user!.id),
+        eq(payments.purpose, "event_registration"),
+        isNull(payments.deleted_at),
+        sql`${payments.status} in ('pending', 'pending_verification')`,
+      ))
+      .orderBy(sql`${payments.created_at} desc`);
+    res.json({ rows });
   } catch (err) { handleApiError(err, res, next); }
 });
 

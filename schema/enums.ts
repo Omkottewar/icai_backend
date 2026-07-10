@@ -85,7 +85,13 @@ export const employerUserRoleEnum = pgEnum("employer_user_role", [
 ]);
 
 export const paymentStatusEnum = pgEnum("payment_status", [
-  "created", "pending", "success", "failed", "refunded", "partially_refunded",
+  "created", "pending",
+  // 'pending_verification' — UPI QR flow: user has submitted a UTR
+  // (transaction reference) but admin hasn't confirmed the money landed
+  // in the bank account yet. Rows in this state show up on the admin
+  // approval queue. See migration 0084.
+  "pending_verification",
+  "success", "failed", "refunded", "partially_refunded",
 ]);
 
 export const paymentPurposeEnum = pgEnum("payment_purpose", [

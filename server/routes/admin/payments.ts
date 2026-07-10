@@ -7,14 +7,22 @@
 // Mounted at /api/admin/payments.
 
 import { Router } from "express";
-import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, lt, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
-import { payments, paymentRefunds, users } from "../../../schema/index.js";
-import { ApiError, handleApiError, trim } from "../../lib/apiError.js";
+import { payments, paymentRefunds, users, events, eventRegistrations, files } from "../../../schema/index.js";
+import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import type { AuthedRequest } from "../../middleware/requireUser.js";
+import { notifyAsync } from "../../lib/notify.js";
+import { sendEmail } from "../../lib/email.js";
+import { storage } from "../../lib/storage.js";
+
+// Compact helper: null for empty paths so the admin UI can skip the
+// "View screenshot" link when no attachment was submitted.
+const fileUrl = (path: string | null | undefined) => (path ? storage().url(path) : null);
 
 export const paymentsAdminRouter = Router();
 
-const STATUSES = ["created", "pending", "success", "failed", "refunded", "partially_refunded"] as const;
+const STATUSES = ["created", "pending", "pending_verification", "success", "failed", "refunded", "partially_refunded"] as const;
 const PURPOSES = [
   "event_registration", "cop_renewal", "firm_registration", "job_posting",
   "assignment_posting", "cabf_donation", "consultation", "room_booking", "other",
@@ -43,6 +51,7 @@ paymentsAdminRouter.get("/", async (req, res, next) => {
     if (q)    conds.push(sql`(
       ${payments.razorpay_order_id} ILIKE ${`%${q}%`}
       OR ${payments.razorpay_payment_id} ILIKE ${`%${q}%`}
+      OR ${payments.upi_utr}          ILIKE ${`%${q}%`}
     )`);
     const where = conds.length ? and(...conds) : undefined;
 
@@ -60,6 +69,10 @@ paymentsAdminRouter.get("/", async (req, res, next) => {
         ref_id: payments.ref_id,
         razorpay_order_id: payments.razorpay_order_id,
         razorpay_payment_id: payments.razorpay_payment_id,
+        upi_utr: payments.upi_utr,
+        upi_screenshot_file_id: payments.upi_screenshot_file_id,
+        rejected_reason: payments.rejected_reason,
+        metadata: payments.metadata,
         created_at: payments.created_at,
         updated_at: payments.updated_at,
         // Sum of approved/processed refunds for this payment.
@@ -133,6 +146,196 @@ paymentsAdminRouter.get("/summary", async (req, res, next) => {
   } catch (err) { handleApiError(err, res, next); }
 });
 
+// ─── GET /api/admin/payments/pending-verification ────────────────────────
+// Focused queue for the manual UPI approval workflow. Every row here is a
+// user waiting for the branch to confirm their UTR against the bank
+// statement. Enriched with event context + screenshot file url so the
+// admin panel can eyeball everything without opening a detail modal.
+paymentsAdminRouter.get("/pending-verification", async (_req, res, next) => {
+  try {
+    const rows = await db
+      .select({
+        payment_id:     payments.id,
+        payer_user_id:  payments.payer_user_id,
+        payer_name:     users.name,
+        payer_email:    users.email,
+        amount_paise:   payments.amount_paise,
+        upi_utr:        payments.upi_utr,
+        screenshot_storage_path: files.storage_path,
+        purpose:        payments.purpose,
+        event_id:       events.id,
+        event_title:    events.title,
+        event_slug:     events.slug,
+        event_starts_at: events.starts_at,
+        submitted_at:   payments.updated_at,
+        created_at:     payments.created_at,
+        metadata:       payments.metadata,
+      })
+      .from(payments)
+      .leftJoin(users, eq(users.id, payments.payer_user_id))
+      .leftJoin(events, and(eq(events.id, payments.ref_id), eq(payments.ref_type, "event")))
+      .leftJoin(files, eq(files.id, payments.upi_screenshot_file_id))
+      .where(eq(payments.status, "pending_verification"))
+      .orderBy(desc(payments.updated_at));
+    res.json({ rows: rows.map((r) => ({
+      ...r,
+      screenshot_url: fileUrl(r.screenshot_storage_path),
+    })) });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/payments/:id/approve ────────────────────────────────
+// Admin has eyeballed the UTR against the bank statement and confirmed the
+// money landed. This endpoint flips the payment to 'success', creates the
+// event registration (or waitlists it if the event filled up while the
+// admin was verifying), bumps registered_count, and fires the standard
+// event_registered notification.
+//
+// Idempotent — if the payment is already 'success' and a registration
+// already exists, returns 200 without side effects. This matters because
+// the admin might double-click the button or reload after a network hiccup.
+paymentsAdminRouter.post("/:id/approve", async (req: AuthedRequest, res, next) => {
+  try {
+    const id = trim(req.params.id);
+    const result = await db.transaction(async (tx) => {
+      const [payment] = await tx.select().from(payments).where(eq(payments.id, id)).limit(1);
+      if (!payment) throw new ApiError(404, "Payment not found");
+
+      // Idempotent short-circuit.
+      if (payment.status === "success") {
+        return { alreadyApproved: true, payment };
+      }
+      if (payment.status !== "pending_verification") {
+        throw new ApiError(400, `Payment is in status '${payment.status}' — can only approve pending_verification.`);
+      }
+      if (payment.purpose !== "event_registration") {
+        throw new ApiError(400, "Only event registrations can be approved through this endpoint (other purposes are not wired yet).");
+      }
+
+      const [event] = await tx.select().from(events).where(eq(events.id, payment.ref_id!)).limit(1);
+      if (!event) throw new ApiError(404, "Linked event not found");
+
+      // Guard against double-registration if a legacy row somehow exists.
+      const [existing] = await tx
+        .select({ id: eventRegistrations.id, status: eventRegistrations.status })
+        .from(eventRegistrations)
+        .where(and(
+          eq(eventRegistrations.event_id, event.id),
+          eq(eventRegistrations.user_id, payment.payer_user_id!),
+          isNull(eventRegistrations.deleted_at),
+        ))
+        .limit(1);
+
+      // Capacity check — if the event filled up between UTR submission and
+      // approval, we waitlist rather than reject. Admin can see this in the
+      // registration row status and choose to refund off-platform if needed.
+      const isFull = event.capacity !== null && event.registered_count >= event.capacity;
+      const regStatus = isFull ? "waitlisted" : "registered";
+
+      let registration;
+      if (existing) {
+        registration = existing;
+      } else {
+        [registration] = await tx.insert(eventRegistrations).values({
+          event_id: event.id,
+          user_id: payment.payer_user_id!,
+          status: regStatus,
+          payment_id: payment.id,
+        }).returning();
+      }
+
+      const [updatedPayment] = await tx.update(payments).set({
+        status: "success",
+        verified_by: req.user!.id,
+        verified_at: new Date(),
+        metadata: isFull
+          ? { ...(payment.metadata as object || {}), needs_refund: "event_full_after_payment" }
+          : payment.metadata,
+        updated_at: new Date(),
+      }).where(eq(payments.id, payment.id)).returning();
+
+      if (!existing && regStatus === "registered") {
+        await tx.update(events).set({
+          registered_count: sql`${events.registered_count} + 1`,
+          updated_at: new Date(),
+        }).where(eq(events.id, event.id));
+      }
+
+      return { alreadyApproved: false, payment: updatedPayment, registration, event, waitlisted: regStatus === "waitlisted" };
+    });
+
+    if (!result.alreadyApproved && result.event) {
+      const startsAt = result.event.starts_at instanceof Date ? result.event.starts_at : new Date(result.event.starts_at);
+      notifyAsync({
+        user_id: result.payment.payer_user_id!,
+        template_key: "event_registered",
+        vars: {
+          event_title: result.event.title,
+          event_slug:  result.event.slug,
+          event_date:  startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium" }),
+          event_time:  startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", timeStyle: "short" }),
+          event_venue: result.event.venue || (result.event.mode === "online" ? "Online" : "TBC"),
+          cpe_hours:   result.event.cpe_hours,
+          calendar_link: `${process.env.APP_URL ?? ""}/events`,
+          joining_link_or_directions: result.event.online_url || result.event.venue || "Details will be shared closer to the date.",
+        },
+        link_url: "/dashboard",
+      });
+    }
+
+    res.json({
+      ok: true,
+      already_approved: result.alreadyApproved,
+      registration: result.alreadyApproved ? null : result.registration,
+      waitlisted: !result.alreadyApproved && result.waitlisted,
+    });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/payments/:id/reject ─────────────────────────────────
+// The UTR the user submitted didn't match anything in the bank statement,
+// or looked fraudulent. Flip payment to 'failed', record the reason so the
+// admin queue shows why, and email the user so they know to retry.
+// Body: { reason: "..." }
+paymentsAdminRouter.post("/:id/reject", async (req: AuthedRequest, res, next) => {
+  try {
+    const id = trim(req.params.id);
+    const reason = need(trim(req.body?.reason), "Rejection reason");
+
+    const [payment] = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
+    if (!payment) throw new ApiError(404, "Payment not found");
+    if (payment.status !== "pending_verification") {
+      throw new ApiError(400, `Payment is in status '${payment.status}' — can only reject pending_verification.`);
+    }
+
+    const [updated] = await db.update(payments).set({
+      status: "failed",
+      rejected_reason: reason,
+      verified_by: req.user!.id,
+      verified_at: new Date(),
+      updated_at: new Date(),
+    }).where(eq(payments.id, payment.id)).returning();
+
+    // Best-effort email to the user. No template for this yet — write the
+    // copy inline. sendEmail returns a structured result on failure so we
+    // never block admin's action on a mail hiccup.
+    if (payment.payer_user_id) {
+      const [payer] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, payment.payer_user_id)).limit(1);
+      if (payer?.email) {
+        const md = (payment.metadata as { event_title?: string }) ?? {};
+        const eventTitle = md.event_title ?? "your event registration";
+        sendEmail({
+          to: payer.email,
+          subject: `Payment could not be verified — ${eventTitle}`,
+          body: `Hi ${payer.name},\n\nWe couldn't confirm your payment for "${eventTitle}".\n\nReason: ${reason}\n\nPlease register again and submit a fresh UTR after paying. If you believe the money did leave your account, contact the branch office with a copy of the transaction receipt.\n\n— ICAI Nagpur Branch`,
+        }).catch(() => { /* swallow */ });
+      }
+    }
+
+    res.json({ ok: true, payment: updated });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
 // ─── GET /api/admin/payments/:id ──────────────────────────────────────────
 // Detail view with refund history.
 paymentsAdminRouter.get("/:id", async (req, res, next) => {
@@ -153,6 +356,11 @@ paymentsAdminRouter.get("/:id", async (req, res, next) => {
         razorpay_order_id: payments.razorpay_order_id,
         razorpay_payment_id: payments.razorpay_payment_id,
         razorpay_signature: payments.razorpay_signature,
+        upi_utr: payments.upi_utr,
+        upi_screenshot_file_id: payments.upi_screenshot_file_id,
+        verified_by: payments.verified_by,
+        verified_at: payments.verified_at,
+        rejected_reason: payments.rejected_reason,
         metadata: payments.metadata,
         created_at: payments.created_at,
         updated_at: payments.updated_at,
