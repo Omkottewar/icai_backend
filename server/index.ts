@@ -210,11 +210,16 @@ process.on("unhandledRejection", (reason) => {
 });
 
 const port = Number(process.env.PORT ?? 4000);
+// Bind to 0.0.0.0 explicitly so Fly.io's health checker (which hits the
+// machine's public IPv4) can reach the app. Without the host arg, Node
+// picks a default that varies across environments and Fly reports
+// "[PC01] instance refused connection. is your app listening on 0.0.0.0?".
+const bindHost = "0.0.0.0";
 // Hold a reference to the http.Server so we can attach the WebSocket upgrade
 // handler. The WS endpoint shares this port — clients connect to ws(s)://host/ws/...
-const server = app.listen(port, () => {
+const server = app.listen(port, bindHost, () => {
   // eslint-disable-next-line no-console
-  console.log(`API listening on http://localhost:${port}`);
+  console.log(`API listening on http://${bindHost}:${port}`);
 });
 attachEventChatSocket(server);
 
