@@ -116,18 +116,6 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
     return { status: "skipped", reason: "resend_not_configured_dev" };
   }
 
-  // Dev safety net — when DEV_EMAIL_OVERRIDE is set (and we're not in
-  // production), redirect every outbound email to that single inbox. Keeps
-  // test grievances, registrations, escalations, etc. from accidentally
-  // hitting real branch addresses while wiring up. The original recipient
-  // is prepended to the subject so the override inbox can still tell who
-  // *would have* received each mail.
-  const override = process.env.DEV_EMAIL_OVERRIDE;
-  const finalTo      = override && process.env.NODE_ENV !== "production" ? override : input.to;
-  const finalSubject = override && process.env.NODE_ENV !== "production"
-    ? `[→ ${input.to}] ${input.subject}`
-    : input.subject;
-
   // Auto-render a branded HTML envelope when the caller didn't pass one.
   // Plain-text body still ships in the `text` field as a fallback for
   // accessibility / text-only clients. Callers that already build HTML
@@ -138,8 +126,8 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
   try {
     const { data, error } = await client.emails.send({
       from,
-      to:      finalTo,
-      subject: finalSubject,
+      to:      input.to,
+      subject: input.subject,
       text:    input.body,
       html,
     });

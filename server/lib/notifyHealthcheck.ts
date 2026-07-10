@@ -47,9 +47,10 @@ export async function runNotificationHealthcheck(): Promise<void> {
       }
     }
 
-    // Email/SMTP readiness — log clearly at boot whether emails will fly
-    // or be silently swallowed in dev mode.
-    const smtpReady = !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+    // Email (Resend) readiness — log clearly at boot whether emails will
+    // fly or be silently swallowed. The codebase uses Resend's HTTP API
+    // (lib/email.ts), not SMTP.
+    const resendReady = !!process.env.RESEND_API_KEY;
     const isProd = process.env.NODE_ENV === "production";
 
     // eslint-disable-next-line no-console
@@ -68,17 +69,17 @@ export async function runNotificationHealthcheck(): Promise<void> {
       // eslint-disable-next-line no-console
       console.warn(`  ⚠ DISABLED in DB: ${disabled.join(", ")} — these dispatches will be silently dropped.`);
     }
-    if (!smtpReady) {
+    if (!resendReady) {
       // eslint-disable-next-line no-console
       console.warn(
-        `  ⚠ SMTP NOT CONFIGURED (SMTP_HOST/SMTP_USER/SMTP_PASS) — ` +
+        `  ⚠ RESEND_API_KEY not set — ` +
         (isProd
-          ? "emails will FAIL in production. Configure now."
-          : "emails will be logged to stdout only in dev. Set the SMTP env vars to actually send.")
+          ? "emails will FAIL in production. Set RESEND_API_KEY now."
+          : "emails will be logged to stdout only in dev. Set RESEND_API_KEY to actually send.")
       );
     } else {
       // eslint-disable-next-line no-console
-      console.log(`  ✓ SMTP configured (${process.env.SMTP_HOST}).`);
+      console.log(`  ✓ Resend configured.`);
     }
     const vapidReady = !!(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
     if (!vapidReady) {
