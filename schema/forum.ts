@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, AnyPgColumn, integer, jsonb, primaryKey, unique, index, boolean } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, AnyPgColumn, integer, jsonb, primaryKey, unique, uniqueIndex, index, boolean } from "drizzle-orm/pg-core";
 import { forumThreadTagEnum } from "./enums";
 import { users } from "./identity";
 import { events } from "./events";
@@ -144,6 +144,23 @@ export const forumPosts = pgTable("forum_posts", {
   updated_at:       timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   deleted_at:       timestamp("deleted_at", { withTimezone: true }),
 });
+
+// ─── event_speakers ───────────────────────────────────────────────────────
+// Many-to-many: which real user accounts are speaking at which event.
+// A speaker is a normal user (typically with primary_role='guest') who
+// gets the "Guest speaker" badge in the event's chat and can post in any
+// of that event's channels. Admin adds / removes via the event drawer.
+export const eventSpeakers = pgTable("event_speakers", {
+  id:        uuid("id").primaryKey().defaultRandom(),
+  event_id:  uuid("event_id").notNull().references(() => events.id, { onDelete: "cascade" }),
+  user_id:   uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  added_by:  uuid("added_by").references(() => users.id, { onDelete: "set null" }),
+  added_at:  timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  eventUserUq: uniqueIndex("ux_event_speakers_event_user").on(t.event_id, t.user_id),
+  eventIdx:    index("idx_event_speakers_event").on(t.event_id),
+  userIdx:     index("idx_event_speakers_user").on(t.user_id),
+}));
 
 // ─── forum_post_reactions ─────────────────────────────────────────────────
 // One row per (post, user, emoji). The UNIQUE constraint means clicking

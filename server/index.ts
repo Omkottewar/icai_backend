@@ -54,6 +54,7 @@ import { studentSuggestionsRouter } from "./routes/studentSuggestions.js";
 import { mentorshipRouter } from "./routes/mentorship.js";
 import { articleshipMatchesRouter } from "./routes/articleshipMatches.js";
 import { scholarshipsRouter } from "./routes/scholarships.js";
+import { speakerEventsRouter } from "./routes/speakerEvents.js";
 
 const app = express();
 
@@ -148,6 +149,7 @@ app.use("/api/student-suggestions", studentSuggestionsRouter);
 app.use("/api/mentorship", mentorshipRouter);
 app.use("/api/articleship-matches", articleshipMatchesRouter);
 app.use("/api/scholarships", scholarshipsRouter);
+app.use("/api/my-speaker-events", speakerEventsRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {

@@ -2,6 +2,10 @@ import { pgEnum } from "drizzle-orm/pg-core";
 
 export const userRoleEnum = pgEnum("user_role", [
   "member", "student", "employer", "employee", "mcm", "chairman", "admin", "staff",
+  // 'guest' — external speakers/panellists with a real account so they can
+  // receive email + in-app notifications, but no branch/committee scope.
+  // Access is granted per event via event_speakers. Added in migration 0083.
+  "guest",
 ]);
 
 export const roleScopeEnum = pgEnum("role_scope", [

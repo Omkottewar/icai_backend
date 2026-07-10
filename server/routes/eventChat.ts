@@ -26,7 +26,7 @@ import {
   forumPosts, forumPostReactions,
   eventChatChannels, eventChatChannelReads,
   eventChatMutes, eventChatMessageReports, eventChatAudit,
-  files,
+  files, eventSpeakers,
 } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
@@ -532,24 +532,31 @@ eventChatRouter.post("/:id/chat/channels/:cid/messages", requireUser, async (req
       throw new ApiError(400, "Up to 5 attachments per message");
     }
 
+    // Speaker fast-path: a user listed in event_speakers for THIS event
+    // gets the guest-speaker badge + bypasses registered/mute/role gates
+    // (they're the invited authority, not an attendee).
+    const [speakerRow] = await db
+      .select({ id: eventSpeakers.id })
+      .from(eventSpeakers)
+      .where(and(
+        eq(eventSpeakers.event_id, eventId),
+        eq(eventSpeakers.user_id, req.user!.id),
+      ))
+      .limit(1);
+    const isSpeaker = !!speakerRow;
+
     // Rate limit FIRST — cheapest check, blocks abusers before any DB hit.
     const rate = checkRate(`send:${req.user!.id}:${eventId}`, RATE_LIMITS.sendMessage);
     if (!rate.allowed) {
       throw new ApiError(429, `Slow down — try again in ${Math.ceil(rate.retryAfterMs / 1000)}s`);
     }
 
-    // ── Perf: parallelize the three pre-checks ────────────────────
-    //
-    // Previously these ran sequentially (await assertRegistered, then
-    // await getChannel, then await findActiveMute) — each is a remote
-    // round-trip, so on a Supabase DB from India that's ~300–600 ms
-    // before we even touch the message. Promise.all collapses them to
-    // the slowest single trip. We also start the optional reply-target
-    // lookup at the same time when applicable.
+    // ── Perf: parallelize the three pre-checks. Speakers skip
+    // registered/mute since being on event_speakers IS the authorisation.
     const [, channel, mute, parentRow] = await Promise.all([
-      assertRegistered(req.user!.id, eventId),
+      isSpeaker ? Promise.resolve(null) : assertRegistered(req.user!.id, eventId),
       getChannel(eventId, cid),
-      findActiveMute(eventId, req.user!.id, cid),
+      isSpeaker ? Promise.resolve(null) : findActiveMute(eventId, req.user!.id, cid),
       parent_post_id
         ? db.select({ id: forumPosts.id, channel_id: forumPosts.channel_id })
             .from(forumPosts)
@@ -561,7 +568,10 @@ eventChatRouter.post("/:id/chat/channels/:cid/messages", requireUser, async (req
 
     // ── Post-parallel checks (all cheap, no DB) ───────────────────
     if (channel.archived_at) throw new ApiError(403, "This channel is archived and read-only");
-    if (channel.frozen) {
+    if (channel.frozen && !isSpeaker) {
+      // Speakers bypass the frozen gate — the invited authority typically
+      // wants to broadcast when general chat is paused. Regular users
+      // need moderator rights.
       try { await assertCanModerate(req.user!.id, eventId); }
       catch { throw new ApiError(403, "This channel is currently frozen"); }
     }
@@ -572,19 +582,16 @@ eventChatRouter.post("/:id/chat/channels/:cid/messages", requireUser, async (req
     if (parent_post_id && (!parentRow || parentRow.channel_id !== cid)) {
       throw new ApiError(400, "Reply target is not in this channel");
     }
-    if (channel.post_role_required) {
+    if (channel.post_role_required && !isSpeaker) {
+      // Role-restricted channels stay open to speakers on THIS event.
       const perms = await loadUserPermissions(req.user!.id);
       if (!perms.codes.has(channel.post_role_required) && !perms.isAdmin) {
         throw new ApiError(403, `Only ${channel.post_role_required} can post here`);
       }
     }
-    // Q&A semantics — keep #qa as a question forum, not a debate channel.
-    // Top-level posts (a question) are open to any registered user.
-    // Replies (an answer) are restricted to moderators (admin / branch
-    // chairman / committee chairman of this event's committee) and to
-    // speakers, who get a magic-link login that grants moderation on
-    // their event only (catalogue §4 lightweight access pattern).
-    if (channel.kind === "qa" && parent_post_id) {
+    // Q&A: replies are moderator-only, but a speaker on this event is
+    // exactly the designated answerer.
+    if (channel.kind === "qa" && parent_post_id && !isSpeaker) {
       try { await assertCanModerate(req.user!.id, eventId); }
       catch {
         throw new ApiError(403,
@@ -643,7 +650,8 @@ eventChatRouter.post("/:id/chat/channels/:cid/messages", requireUser, async (req
           edited_at:        existing.edited_at,
           created_by:       existing.created_by,
           author_name:      req.user!.name,
-          author_badge:     badgeMap.get(existing.created_by) ?? null,
+          author_badge:     isSpeaker ? "Guest speaker" : (badgeMap.get(existing.created_by) ?? null),
+          is_speaker:       isSpeaker,
           created_at:       existing.created_at,
           client_id:        existing.client_id,
           reactions:        [],
@@ -669,8 +677,8 @@ eventChatRouter.post("/:id/chat/channels/:cid/messages", requireUser, async (req
     }
 
     // ── Build the response shape ───────────────────────────────────
-    // Role badge is cached in-process by loadUserPermissions — no DB
-    // for warm callers.
+    // Speakers get a fixed "Guest speaker" badge that overrides their
+    // role-based badge (if any). Non-speakers get their normal role badge.
     const badgeMap = await resolveRoleBadgesFor([req.user!.id]);
     const message = {
       id:               inserted.id,
@@ -683,7 +691,8 @@ eventChatRouter.post("/:id/chat/channels/:cid/messages", requireUser, async (req
       edited_at:        inserted.edited_at,
       created_by:       inserted.created_by,
       author_name:      req.user!.name,
-      author_badge:     badgeMap.get(req.user!.id) ?? null,
+      author_badge:     isSpeaker ? "Guest speaker" : (badgeMap.get(req.user!.id) ?? null),
+      is_speaker:       isSpeaker,
       created_at:       inserted.created_at,
       client_id:        inserted.client_id,
       reactions:        [] as Array<{ emoji: string; user_ids: string[]; count: number }>,

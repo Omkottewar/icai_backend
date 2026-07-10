@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireUser } from "../../middleware/requireUser.js";
 import { requireAdmin } from "../../middleware/requireAdmin.js";
 import { eventsAdminRouter } from "./events.js";
+import { eventSpeakersAdminRouter } from "./eventSpeakers.js";
 import { registrationsAdminRouter } from "./registrations.js";
 import { statsAdminRouter } from "./stats.js";
 import { filesAdminRouter } from "./files.js";
@@ -66,6 +67,10 @@ adminRouter.use((_req, res, next) => {
 adminRouter.use(requireUser, requireAdmin);
 
 adminRouter.use("/events", eventsAdminRouter);
+// Nested speakers CRUD — mounted separately (not inside eventsAdminRouter)
+// so the file stays focused. `mergeParams: true` on the sub-router preserves
+// :eventId when Express strips the parent mount path.
+adminRouter.use("/events/:eventId/speakers", eventSpeakersAdminRouter);
 adminRouter.use("/registrations", registrationsAdminRouter);
 adminRouter.use("/stats", statsAdminRouter);
 adminRouter.use("/files", filesAdminRouter);

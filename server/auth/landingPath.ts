@@ -1,3 +1,6 @@
+import { eq } from "drizzle-orm";
+import { db } from "../../db/client.js";
+import { users } from "../../schema/index.js";
 import { loadUserPermissions } from "./permissions.js";
 
 // Roles whose primary daily workflow is the admin console, not the member
@@ -31,8 +34,19 @@ const ADMIN_LANDING_ROLES = new Set([
  * permission machinery, so this adds a single DB hit per login.
  */
 export async function getPostLoginPath(userId: string, isNew: boolean): Promise<string> {
-  if (isNew) return "/onboarding";
   try {
+    // Guest speakers skip /onboarding entirely — the form has no branch
+    // for their role, and they have no CPE/registrations to see on the
+    // member dashboard. Straight to the events they're speaking at.
+    const [row] = await db
+      .select({ primary_role: users.primary_role })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    if (row?.primary_role === "guest") return "/my-speaker-events";
+
+    if (isNew) return "/onboarding";
+
     const perms = await loadUserPermissions(userId);
     for (const code of perms.codes) {
       if (ADMIN_LANDING_ROLES.has(code)) return "/admin";

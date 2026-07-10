@@ -12,7 +12,7 @@ export const usersAdminRouter = Router();
 
 // â”€â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-const PRIMARY_ROLES = ["member", "student", "employer", "employee", "mcm", "chairman", "admin", "staff"] as const;
+const PRIMARY_ROLES = ["member", "student", "employer", "employee", "mcm", "chairman", "admin", "staff", "guest"] as const;
 const USER_STATUSES = ["active", "inactive", "suspended", "pending_approval"] as const;
 
 function pickPrimaryRole(v: unknown): typeof PRIMARY_ROLES[number] {
