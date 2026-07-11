@@ -11,6 +11,7 @@ import {
   annualReports,
   files,
   events,
+  users,
 } from "../../schema/index.js";
 import { ApiError, handleApiError, trim } from "../lib/apiError.js";
 import { storage } from "../lib/storage.js";
@@ -59,6 +60,50 @@ branchContentRouter.get("/paper-presentations", async (_req, res, next) => {
         ...r,
         pdf_url: fileUrl(r.pdf_path),
       })),
+    });
+  } catch (err) { next(err); }
+});
+
+// ─── Best Paper Winner ───────────────────────────────────────────────────────
+// Returns the single most-recent winning paper (highest award_year with
+// is_winner=true). The HomePage's BestPaperShowcase queries this on
+// every load — cached by the frontend's apiCache so the homepage stays
+// fast. 404 when no winner has been flagged yet, so the frontend can
+// hide the section entirely.
+branchContentRouter.get("/paper-presentations/best-paper", async (_req, res, next) => {
+  try {
+    const [row] = await db.select({
+      id:                paperPresentations.id,
+      slug:              paperPresentations.slug,
+      title:             paperPresentations.title,
+      abstract:          paperPresentations.abstract,
+      description:       paperPresentations.description,
+      speaker_name:      paperPresentations.speaker_name,
+      author_designation: paperPresentations.author_designation,
+      author_name:       users.name,
+      author_avatar_id:  users.avatar_id,
+      committee_tag:     paperPresentations.committee_tag,
+      presented_on:      paperPresentations.presented_on,
+      award_year:        paperPresentations.award_year,
+      pdf_path:          files.storage_path,
+      pdf_name:          files.name,
+    })
+      .from(paperPresentations)
+      .leftJoin(files, eq(files.id, paperPresentations.pdf_file_id))
+      .leftJoin(users, eq(users.id, paperPresentations.author_user_id))
+      .where(and(
+        eq(paperPresentations.is_winner, true),
+        eq(paperPresentations.hidden, false),
+        eq(paperPresentations.status, "published"),
+      ))
+      .orderBy(desc(paperPresentations.award_year))
+      .limit(1);
+
+    if (!row) return res.status(404).json({ error: "no_winner_yet" });
+
+    res.json({
+      ...row,
+      pdf_url: fileUrl(row.pdf_path),
     });
   } catch (err) { next(err); }
 });

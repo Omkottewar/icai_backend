@@ -67,10 +67,11 @@ function render(template: string, vars: Record<string, string>): string {
 async function nextTicketNo(): Promise<string> {
   const year = new Date().getFullYear();
   const prefix = `GRV-${year}-`;
+  // Postgres uses POSIX regex — `\d` is not a digit class here, use `[0-9]`.
   const result = await db.execute(sql`
     SELECT LPAD(
       (COALESCE(
-        MAX(NULLIF(REGEXP_REPLACE(ticket_no, '^GRV-\d{4}-', ''), '')::int),
+        MAX(NULLIF(REGEXP_REPLACE(ticket_no, '^GRV-[0-9]{4}-', ''), '')::int),
         0
       ) + 1)::text,
       6, '0'

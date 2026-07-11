@@ -90,6 +90,21 @@ eventsAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
     const q = trim(req.query.q);
     const status = trim(req.query.status);
     const committeeId = trim(req.query.committee_id);
+    // ── extended filters ─────────────────────────────────────────────────
+    // Every one of these is optional. Empty / unknown values fall through
+    // to "no filter" so the admin UI can wire them incrementally without
+    // needing to send the full set on every request.
+    const audience = trim(req.query.audience);         // members | students | all
+    const mode     = trim(req.query.mode);              // in_person | online | hybrid
+    const fee      = trim(req.query.fee);               // free | paid
+    const seats    = trim(req.query.seats);             // available | full | unlimited
+    const hasCpe   = trim(req.query.has_cpe);           // yes | no
+    const fromDate = trim(req.query.from);              // yyyy-mm-dd (starts_at >= from)
+    const toDate   = trim(req.query.to);                // yyyy-mm-dd (starts_at <  to+1d)
+    const when     = trim(req.query.when);              // upcoming | past — quick shortcut
+    // ── sort ─────────────────────────────────────────────────────────────
+    const sort = trim(req.query.sort) || "starts_at";
+    const dir  = trim(req.query.dir).toLowerCase() === "asc" ? "asc" : "desc";
     const page = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(5, Number(req.query.pageSize) || 20));
     const offset = (page - 1) * pageSize;
@@ -107,6 +122,21 @@ eventsAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
     if (status && STATUSES.includes(status as any)) conds.push(eq(events.status, status as any));
     if (committeeId) conds.push(eq(events.committee_id, committeeId));
     if (q) conds.push(ilike(events.title, `%${q}%`));
+    if (audience && AUDIENCES.includes(audience as any)) conds.push(eq(events.audience, audience as any));
+    if (mode && MODES.includes(mode as any)) conds.push(eq(events.mode, mode as any));
+    if (fee === "free") conds.push(eq(events.fee_paise, 0));
+    else if (fee === "paid") conds.push(sql`${events.fee_paise} > 0`);
+    if (seats === "available") conds.push(sql`(${events.capacity} IS NULL OR ${events.registered_count} < ${events.capacity})`);
+    else if (seats === "full") conds.push(sql`(${events.capacity} IS NOT NULL AND ${events.registered_count} >= ${events.capacity})`);
+    else if (seats === "unlimited") conds.push(sql`${events.capacity} IS NULL`);
+    if (hasCpe === "yes") conds.push(sql`${events.cpe_hours} > 0`);
+    else if (hasCpe === "no") conds.push(sql`${events.cpe_hours} = 0`);
+    if (fromDate) conds.push(sql`${events.starts_at} >= ${fromDate}::timestamptz`);
+    if (toDate)   conds.push(sql`${events.starts_at} <  (${toDate}::date + INTERVAL '1 day')`);
+    // 'when=upcoming' overrides an unset date range with a "starts_at >= now"
+    // shortcut so the admin's default view can be a single click.
+    if (when === "upcoming") conds.push(sql`${events.starts_at} >= now()`);
+    else if (when === "past") conds.push(sql`${events.starts_at} <  now()`);
 
     // Committee chairman without branch-level role → restrict to their committees.
     if (!isBranchLevel && perms.committeeChairmanOf.length > 0) {
@@ -115,6 +145,27 @@ eventsAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
       // No branch-level role AND no committees chaired → see nothing.
       return res.json({ rows: [], total: 0, page, pageSize });
     }
+
+    // Whitelist sortable columns — anything else falls back to starts_at.
+    // Composite sorts (fill_pct) live inline in the ORDER BY builder below.
+    const orderExpr = (() => {
+      const isAsc = dir === "asc";
+      switch (sort) {
+        case "title":            return isAsc ? sql`${events.title} asc`             : sql`${events.title} desc`;
+        case "registered_count": return isAsc ? sql`${events.registered_count} asc`  : sql`${events.registered_count} desc`;
+        case "fee_paise":        return isAsc ? sql`${events.fee_paise} asc`         : sql`${events.fee_paise} desc`;
+        case "cpe_hours":        return isAsc ? sql`${events.cpe_hours} asc`         : sql`${events.cpe_hours} desc`;
+        case "capacity":         return isAsc ? sql`${events.capacity} asc nulls last` : sql`${events.capacity} desc nulls last`;
+        case "created_at":       return isAsc ? sql`${events.created_at} asc`        : sql`${events.created_at} desc`;
+        case "fill_pct":
+          // capacity NULL → treat as 0% fill so unlimited events sort last
+          // when descending "most full first".
+          return isAsc
+            ? sql`(case when ${events.capacity} is null or ${events.capacity} = 0 then 0 else ${events.registered_count}::float / ${events.capacity} end) asc`
+            : sql`(case when ${events.capacity} is null or ${events.capacity} = 0 then 0 else ${events.registered_count}::float / ${events.capacity} end) desc`;
+        default:                 return isAsc ? sql`${events.starts_at} asc`         : sql`${events.starts_at} desc`;
+      }
+    })();
 
     const rows = await db
       .select({
@@ -147,7 +198,7 @@ eventsAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
         isNull(checklistInstances.deleted_at),
       ))
       .where(and(...conds))
-      .orderBy(desc(events.starts_at))
+      .orderBy(orderExpr)
       .limit(pageSize)
       .offset(offset);
 
@@ -216,6 +267,9 @@ eventsAdminRouter.post("/", canManageEvents, async (req: AuthedRequest, res, nex
 
     const description = trim(req.body.description) || null;
     const branch_id = trim(req.body.branch_id) || null;
+    // Display-only CPE hour label. Empty / missing → 0. Half-hour steps
+    // are enforced by the UI; server just clamps at ≥ 0 and stores with
+    // one decimal.
     const cpe_hours_n = req.body.cpe_hours === undefined || req.body.cpe_hours === "" ? 0 : Number(req.body.cpe_hours);
     if (!Number.isFinite(cpe_hours_n) || cpe_hours_n < 0) throw new ApiError(400, "CPE hours must be a non-negative number");
     const fee_paise = parseOptInt(req.body.fee_paise, "Fee") ?? 0;

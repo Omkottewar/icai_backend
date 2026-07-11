@@ -472,7 +472,7 @@ const ctx = {
   memberIds: [],
   studentIds: [],
   rooms: [],                 // [{ id, name }]
-  events: [],                // [{ id, slug, isPast, audience, cpe_hours, capacity }]
+  events: [],                // [{ id, slug, isPast, audience, capacity }]
   topicIds: [],
   paperIds: [],
   quizIds: [],
@@ -985,11 +985,11 @@ async function seedRooms() {
 // ─── 11. Events ─────────────────────────────────────────────────────────────
 
 async function seedEvents() {
-  const existing = await sql`SELECT id, slug, status, audience, cpe_hours, capacity FROM events WHERE slug LIKE 'mock-%'`;
+  const existing = await sql`SELECT id, slug, status, audience, capacity FROM events WHERE slug LIKE 'mock-%'`;
   for (const e of existing) {
     ctx.events.push({
       id: e.id, slug: e.slug, isPast: e.status === "completed",
-      audience: e.audience, cpe_hours: e.cpe_hours, capacity: e.capacity,
+      audience: e.audience, capacity: e.capacity,
     });
   }
   const need = Math.max(0, CFG.events - existing.length);
@@ -1012,7 +1012,6 @@ async function seedEvents() {
     const mode = chance(0.7) ? "in_person" : chance(0.5) ? "online" : "hybrid";
     const venue = mode === "online" ? "Online (Zoom)" : pick(VENUES_IN_PERSON);
     const audience = commCode === "WICASA" ? "students" : chance(0.85) ? "members" : "all";
-    const cpeHours = audience === "students" ? "0" : String(Math.min(durationHours, 6));
     const capacity = pick([60, 80, 100, 120, 150, 200, 300]);
     const fee = chance(0.7) ? 0 : pick([10000, 25000, 50000, 100000]);
     const status = isPast ? "completed" : "published";
@@ -1021,21 +1020,21 @@ async function seedEvents() {
     const [row] = await sql`
       INSERT INTO events (
         slug, title, description, committee_id, branch_id, audience, mode, venue,
-        starts_at, ends_at, cpe_hours, fee_paise, capacity, status, highlights, banner_id
+        starts_at, ends_at, fee_paise, capacity, status, highlights, banner_id
       ) VALUES (
         ${slug}, ${title},
         ${`Practical session on ${title.toLowerCase()}. Open to all ${audience}.`},
         ${committeeId}, ${ctx.branchId}, ${audience}, ${mode}, ${venue},
-        ${startsAt}, ${endsAt}, ${cpeHours}, ${fee}, ${capacity}, ${status},
-        ${["Hands-on case-study walkthrough", "Q&A with experienced faculty", `${cpeHours} CPE hours awarded`]},
+        ${startsAt}, ${endsAt}, ${fee}, ${capacity}, ${status},
+        ${["Hands-on case-study walkthrough", "Q&A with experienced faculty"]},
         ${bannerId}
       )
       ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug
-      RETURNING id, slug, audience, cpe_hours, capacity, (xmax = 0) AS inserted
+      RETURNING id, slug, audience, capacity, (xmax = 0) AS inserted
     `;
     ctx.events.push({
       id: row.id, slug: row.slug, isPast,
-      audience: row.audience, cpe_hours: row.cpe_hours, capacity: row.capacity,
+      audience: row.audience, capacity: row.capacity,
     });
     if (row.inserted) inserted++;
   }
@@ -1046,7 +1045,6 @@ async function seedEvents() {
 
 async function seedRegistrationsAndCPE() {
   let regInserted = 0;
-  let cpeInserted = 0;
   const BATCH = 500;
 
   for (const ev of ctx.events) {
@@ -1066,7 +1064,6 @@ async function seedRegistrationsAndCPE() {
     `).map((r) => r.user_id));
 
     const regRows = [];
-    const cpeCandidates = [];
     for (const userId of subset) {
       if (existingRegs.has(userId)) continue;
       let regStatus = "registered";
@@ -1078,19 +1075,6 @@ async function seedRegistrationsAndCPE() {
         else { regStatus = "cancelled"; }
       }
       regRows.push({ event_id: ev.id, user_id: userId, status: regStatus, attended_at: attendedAt });
-
-      const cpeHoursNum = Number(ev.cpe_hours);
-      if (regStatus === "attended" && cpeHoursNum > 0) {
-        cpeCandidates.push({
-          user_id: userId,
-          event_id: ev.id,
-          hours: ev.cpe_hours,
-          type: "structured",
-          year: new Date(attendedAt).getFullYear(),
-          source: "branch_event",
-          issued_at: attendedAt,
-        });
-      }
     }
 
     // Bulk insert registrations.
@@ -1102,22 +1086,7 @@ async function seedRegistrationsAndCPE() {
       `;
       regInserted += result.length;
     }
-
-    // Bulk insert CPE (dedup against existing).
-    if (cpeCandidates.length > 0) {
-      const existingCpe = new Set((await sql`
-        SELECT user_id FROM cpe_credits WHERE event_id = ${ev.id}
-      `).map((r) => r.user_id));
-      const cpeRows = cpeCandidates.filter((r) => !existingCpe.has(r.user_id));
-      for (let off = 0; off < cpeRows.length; off += BATCH) {
-        const chunk = cpeRows.slice(off, off + BATCH);
-        const result = await sql`
-          INSERT INTO cpe_credits ${sql(chunk, "user_id", "event_id", "hours", "type", "year", "source", "issued_at")}
-          RETURNING id
-        `;
-        cpeInserted += result.length;
-      }
-    }
+    // (CPE credit seeding removed alongside the CPE feature — migration 0087.)
 
     await sql`
       UPDATE events SET registered_count = (
@@ -1129,7 +1098,6 @@ async function seedRegistrationsAndCPE() {
     process.stdout.write(".");
   }
   process.stdout.write(" ");
-  console.log(`\n    ${cpeInserted} CPE credits issued`);
   return regInserted;
 }
 
@@ -1839,8 +1807,8 @@ async function seedResourceQuizzes() {
   for (const paperId of pool) {
     const [row] = await sql`
       INSERT INTO resource_quizzes (
-        paper_id, pass_threshold, question_count, cpe_credit_minutes, cooldown_hours, is_published
-      ) VALUES (${paperId}, 4, 5, 30, 24, true)
+        paper_id, pass_threshold, question_count, cooldown_hours, is_published
+      ) VALUES (${paperId}, 4, 5, 24, true)
       ON CONFLICT (paper_id) DO NOTHING
       RETURNING id
     `;

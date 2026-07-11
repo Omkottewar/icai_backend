@@ -1,5 +1,5 @@
 ﻿import { Router } from "express";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { events, eventRegistrations, users, payments, siteSettings } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
@@ -22,7 +22,7 @@ const IST_TIME = new Intl.DateTimeFormat("en-IN", {
   timeZone: "Asia/Kolkata", timeStyle: "short",
 });
 
-function eventNotifyVars(event: { title: string; slug: string; venue: string | null; online_url: string | null; starts_at: Date; cpe_hours: string | number; mode: string }) {
+function eventNotifyVars(event: { title: string; slug: string; venue: string | null; online_url: string | null; starts_at: Date; cpe_hours?: string | number | null; mode: string }) {
   const startsAt = event.starts_at instanceof Date ? event.starts_at : new Date(event.starts_at);
   return {
     event_title:  event.title,
@@ -30,7 +30,7 @@ function eventNotifyVars(event: { title: string; slug: string; venue: string | n
     event_date:   IST_DATE.format(startsAt),
     event_time:   IST_TIME.format(startsAt),
     event_venue:  event.venue || (event.mode === "online" ? "Online" : "TBC"),
-    cpe_hours:    event.cpe_hours,
+    cpe_hours:    event.cpe_hours ?? "",
     calendar_link: `${process.env.APP_URL ?? ""}/events`,
     joining_link_or_directions: event.online_url || event.venue || "Details will be shared closer to the date.",
   };
@@ -104,6 +104,26 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
     const slug = need(trim(req.params.slug), "Event slug");
     const phone = trim(req.body?.phone);
 
+    // Group booking (paid events only): booker picks 1-N portal users as
+    // additional attendees. All seats charged on one payment. On admin
+    // approve every attendee gets their own event_registrations row with
+    // booked_by_user_id set to the booker so their dashboard shows the
+    // attribution. Attendee list is validated below and stashed in
+    // payment.metadata so admin approve can recover it.
+    const rawAttendees = Array.isArray(req.body?.attendee_user_ids) ? req.body.attendee_user_ids : [];
+    const attendeeIds: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of rawAttendees) {
+      const id = trim(raw);
+      if (!id) continue;
+      if (id === user.id) continue;      // Booker is not an attendee — always in seat 1
+      if (seen.has(id)) continue;         // Deduplicate
+      seen.add(id);
+      attendeeIds.push(id);
+    }
+    // Soft cap so a bad client can't try to book 500 seats and DoS the DB.
+    if (attendeeIds.length > 20) throw new ApiError(400, "You can book at most 20 additional seats in one payment.");
+
     // Step 1: load the event and run preflight checks outside the txn â€”
     // these reject the request without touching writable state.
     const [event] = await db
@@ -126,13 +146,52 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
       .limit(1);
     if (existing) throw new ApiError(409, "You are already registered for this event");
 
+    // Validate attendees when the booker is buying group seats. Every
+    // attendee must (a) exist and not be soft-deleted, and (b) not already
+    // be registered for this event. Failing early with a clear message is
+    // better than silently dropping them at admin-approve time.
+    let attendeeUsers: Array<{ id: string; name: string; email: string }> = [];
+    if (attendeeIds.length > 0) {
+      if (event.fee_paise === 0) {
+        // Group bookings on free events don't make sense — each user can
+        // just register themselves in one click. Blocking this keeps the
+        // fee×N math from producing "pay ₹0" edge cases.
+        throw new ApiError(400, "Group booking is only available for paid events. Ask each attendee to register themselves.");
+      }
+      const rows = await db
+        .select({ id: users.id, name: users.name, email: users.email })
+        .from(users)
+        .where(and(inArray(users.id, attendeeIds), isNull(users.deleted_at)));
+      if (rows.length !== attendeeIds.length) {
+        throw new ApiError(400, "One of the selected attendees no longer exists.");
+      }
+      const existingReg = await db
+        .select({ user_id: eventRegistrations.user_id })
+        .from(eventRegistrations)
+        .where(and(
+          eq(eventRegistrations.event_id, event.id),
+          inArray(eventRegistrations.user_id, attendeeIds),
+          isNull(eventRegistrations.deleted_at),
+        ));
+      if (existingReg.length > 0) {
+        const conflictName = rows.find((r) => r.id === existingReg[0].user_id)?.name ?? "One of your attendees";
+        throw new ApiError(409, `${conflictName} is already registered for this event.`);
+      }
+      attendeeUsers = rows;
+    }
+
+    const totalSeats = 1 + attendeeUsers.length;
+
     // Capacity full → fall through to a waitlist registration on the free
     // path. We still reject paid registrations against a full event to
     // avoid charging for a non-confirmed seat — the UI should call
     // /:slug/waitlist below instead in that case.
-    const isFull = event.capacity !== null && event.registered_count >= event.capacity;
-    if (isFull && event.fee_paise > 0) {
-      throw new ApiError(400, "This event is full. Use 'Join waitlist' instead.");
+    const seatsLeft = event.capacity !== null ? event.capacity - event.registered_count : Infinity;
+    const isFull = event.capacity !== null && seatsLeft <= 0;
+    if (event.fee_paise > 0 && seatsLeft < totalSeats) {
+      throw new ApiError(400, isFull
+        ? "This event is full. Use 'Join waitlist' instead."
+        : `Only ${seatsLeft} seat${seatsLeft === 1 ? '' : 's'} left — reduce the number of attendees or try 'Join waitlist'.`);
     }
 
     // Step 2: optionally sync the phone the user just entered back to their
@@ -201,11 +260,14 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
     //
     // GST (H.20): when gst_applicable is true, the fee shown to the user
     // is base + GST. We store both numbers in payment.metadata so the
-    // invoice generator can recover the split deterministically.
-    const baseFee = event.fee_paise;
+    // invoice generator can recover the split deterministically. For group
+    // bookings the total is (base + GST) × seats — same GST rate applied
+    // per seat, matching how branch invoices already work.
+    const perSeatBase = event.fee_paise;
     const gstRate = event.gst_applicable ? Number(event.gst_percent ?? 0) : 0;
-    const gstPaise = Math.round(baseFee * gstRate / 100);
-    const totalPaise = baseFee + gstPaise;
+    const perSeatGst = Math.round(perSeatBase * gstRate / 100);
+    const perSeatTotal = perSeatBase + perSeatGst;
+    const totalPaise = perSeatTotal * totalSeats;
 
     const upi = await loadUpiConfig();
     if (!upi.upi_id) {
@@ -223,10 +285,14 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
       metadata: {
         event_slug: event.slug,
         event_title: event.title,
-        base_paise: baseFee,
+        base_paise: perSeatBase * totalSeats,
         gst_applicable: event.gst_applicable,
         gst_percent: gstRate,
-        gst_paise: gstPaise,
+        gst_paise: perSeatGst * totalSeats,
+        seat_count: totalSeats,
+        // Attendee ids stashed so admin approve can create one
+        // event_registrations row per attendee. NULL/empty means self-only.
+        attendee_user_ids: attendeeUsers.map((a) => a.id),
       },
     }).returning();
 
@@ -244,11 +310,14 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
       paid: true,
       payment_id: payment.id,
       amount_paise: totalPaise,
-      base_paise: baseFee,
-      gst_paise: gstPaise,
+      base_paise: perSeatBase * totalSeats,
+      gst_paise: perSeatGst * totalSeats,
       gst_applicable: event.gst_applicable,
       gst_percent: gstRate,
       currency: "INR",
+      seat_count: totalSeats,
+      per_seat_paise: perSeatTotal,
+      attendees: attendeeUsers,          // [{ id, name, email }, ...]
       upi_id: upi.upi_id,
       upi_payee_name: upi.payee_name,
       upi_uri: upiUri,
@@ -485,10 +554,11 @@ registrationsRouter.get("/my-calendar-url", requireUser, (req: AuthedRequest, re
 });
 
 // ─── GET /api/events/:slug/certificate ────────────────────────────────────
-// Streams an attendance + CPE certificate PDF for the requesting user.
-// Only available when the user's registration is 'attended' AND the event
-// awards CPE hours. Cert numbers are deterministic so the same download is
-// reproducible (no DB write here — we generate on demand).
+// Streams an attendance certificate PDF for the requesting user. Available
+// once their registration is marked 'attended'. Cert numbers are
+// deterministic so the same download is reproducible (no DB write here —
+// we generate on demand). CPE-hour attribution was removed in migration
+// 0087 alongside the rest of the CPE feature.
 registrationsRouter.get("/:slug/certificate", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const user = req.user!;
@@ -500,15 +570,11 @@ registrationsRouter.get("/:slug/certificate", requireUser, async (req: AuthedReq
         slug: events.slug,
         title: events.title,
         starts_at: events.starts_at,
-        cpe_hours: events.cpe_hours,
       })
       .from(events)
       .where(and(eq(events.slug, slug), isNull(events.deleted_at)))
       .limit(1);
     if (!event) throw new ApiError(404, "Event not found");
-    if (Number(event.cpe_hours) <= 0) {
-      throw new ApiError(400, "This event does not award CPE hours");
-    }
 
     const [reg] = await db
       .select({ status: eventRegistrations.status })
@@ -530,7 +596,7 @@ registrationsRouter.get("/:slug/certificate", requireUser, async (req: AuthedReq
       .where(eq(memberProfiles.user_id, user.id))
       .limit(1);
 
-    const certificateNo = `NGP-CPE-${event.slug.slice(-8).toUpperCase()}-${user.id.slice(0, 8).toUpperCase()}`;
+    const certificateNo = `NGP-EVT-${event.slug.slice(-8).toUpperCase()}-${user.id.slice(0, 8).toUpperCase()}`;
     const filename = `certificate-${event.slug}.pdf`;
 
     res.setHeader("Content-Type", "application/pdf");
@@ -541,7 +607,6 @@ registrationsRouter.get("/:slug/certificate", requireUser, async (req: AuthedReq
       memberMrn: profile?.mrn ?? null,
       eventTitle: event.title,
       eventDate: event.starts_at,
-      cpeHours: Number(event.cpe_hours),
       branchName: "ICAI Nagpur Branch (WIRC)",
       certificateNo,
     }, res);

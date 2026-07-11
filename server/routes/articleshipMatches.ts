@@ -26,15 +26,22 @@
 import { Router } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { and, desc, eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { db } from "../../db/client.js";
-import { articleshipMatches, events } from "../../schema/index.js";
+import { articleshipMatches, events, files } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { sameOrigin } from "../middleware/sameOrigin.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
+import { storage } from "../lib/storage.js";
 
 export const articleshipMatchesRouter = Router();
 
 const FIRM_SIZES = new Set(["sole_practitioner", "small", "medium", "large", "big4"]);
+
+// CV upload — PDF only, 5 MB cap. Sized for a résumé; anything larger is
+// almost certainly a scan of a portfolio that belongs in the notes as a
+// link rather than embedded in the file table.
+const CV_MAX_BYTES = 5 * 1024 * 1024;
 
 const submissionLimiter = rateLimit({
   standardHeaders: "draft-7",
@@ -46,6 +53,18 @@ const submissionLimiter = rateLimit({
   message: {
     error: "rate_limited",
     message: "You've submitted an articleship form recently. Please wait an hour before another submission.",
+  },
+});
+
+const cvUploadLimiter = rateLimit({
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  windowMs: 60 * 60 * 1000,
+  limit: 6,
+  keyGenerator: (req: any) => req.user?.id ?? ipKeyGenerator(req.ip),
+  message: {
+    error: "rate_limited",
+    message: "Too many CV uploads recently. Wait a bit before trying again.",
   },
 });
 
@@ -84,6 +103,18 @@ articleshipMatchesRouter.post("/", sameOrigin, requireUser, submissionLimiter, a
     const notes = trim(req.body?.notes) || null;
     if (notes && notes.length > 2000) throw new ApiError(400, "Notes must be 2000 characters or less");
 
+    // Optional CV — the ID must be a file this same student uploaded via
+    // /upload-cv above. Verifying uploaded_by prevents a student stashing
+    // another student's file ID from a leaked API response.
+    const cv_file_id = trim(req.body?.cv_file_id) || null;
+    if (cv_file_id) {
+      const [f] = await db.select({ id: files.id, uploaded_by: files.uploaded_by })
+        .from(files).where(eq(files.id, cv_file_id)).limit(1);
+      if (!f || f.uploaded_by !== user.id) {
+        throw new ApiError(400, "Invalid CV file");
+      }
+    }
+
     // If the student named a seminar event, verify it exists. We don't
     // enforce attendance because attendance-marking runs late and shouldn't
     // block the form.
@@ -99,11 +130,64 @@ articleshipMatchesRouter.post("/", sameOrigin, requireUser, submissionLimiter, a
       preferred_location,
       preferred_firm_size,
       expected_stipend_paise,
+      cv_file_id,
       notes,
       status: "submitted",
     }).returning();
 
     res.status(201).json({ item: row });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/articleship-matches/upload-cv ───────────────────────────────
+// Student-scoped CV upload. PDF only, 5 MB cap, written to the dedicated
+// `articleship_cvs` bucket. Returns { id } — the caller attaches the id to
+// the form submission below.
+articleshipMatchesRouter.post("/upload-cv", sameOrigin, requireUser, cvUploadLimiter, async (req: AuthedRequest, res, next) => {
+  try {
+    const user = req.user!;
+    if (user.primary_role !== "student") {
+      throw new ApiError(403, "Only students can upload an articleship CV");
+    }
+
+    const name = need(trim(req.body?.name), "Filename");
+    const mimeType = trim(req.body?.mime_type);
+    if (mimeType !== "application/pdf") {
+      throw new ApiError(400, "Only PDF files are accepted");
+    }
+    const dataB64 = typeof req.body?.data_base64 === "string" ? req.body.data_base64 : "";
+    if (!dataB64) throw new ApiError(400, "File data is required");
+    const stripped = dataB64.replace(/^data:[^;]+;base64,/, "");
+    const buf = Buffer.from(stripped, "base64");
+    if (buf.length === 0) throw new ApiError(400, "File data is empty or invalid base64");
+    if (buf.length > CV_MAX_BYTES) {
+      throw new ApiError(400, `CV exceeds ${Math.round(CV_MAX_BYTES / (1024 * 1024))} MB limit`);
+    }
+    // %PDF- magic-byte check so a renamed .jpg can't sneak in.
+    if (buf.length < 5
+      || buf[0] !== 0x25 || buf[1] !== 0x50 || buf[2] !== 0x44 || buf[3] !== 0x46 || buf[4] !== 0x2D) {
+      throw new ApiError(400, "File doesn't look like a PDF (bad header)");
+    }
+
+    const ext = (name.match(/\.[a-zA-Z0-9]+$/)?.[0] ?? ".pdf").toLowerCase();
+    const filename = `${randomUUID()}${ext}`;
+    const bucket = "articleship_cvs";
+    const storage_path = await storage().put(bucket, filename, buf, mimeType);
+
+    const [row] = await db.insert(files).values({
+      name,
+      mime_type: mimeType,
+      size_bytes: buf.length,
+      storage_path,
+      bucket,
+      uploaded_by: user.id,
+    }).returning();
+
+    res.status(201).json({
+      id: row.id,
+      name: row.name,
+      size_bytes: row.size_bytes,
+    });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -118,6 +202,7 @@ articleshipMatchesRouter.get("/my", requireUser, async (req: AuthedRequest, res,
       preferred_location:        articleshipMatches.preferred_location,
       preferred_firm_size:       articleshipMatches.preferred_firm_size,
       expected_stipend_paise:    articleshipMatches.expected_stipend_paise,
+      cv_file_id:                articleshipMatches.cv_file_id,
       status:                    articleshipMatches.status,
       notes:                     articleshipMatches.notes,
       recommended_firm_ids:      articleshipMatches.recommended_firm_ids,

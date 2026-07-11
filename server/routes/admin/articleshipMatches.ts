@@ -1,9 +1,10 @@
 import { Router } from "express";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
-import { articleshipMatches, users, events, firms } from "../../../schema/index.js";
+import { articleshipMatches, users, events, firms, files } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { storage } from "../../lib/storage.js";
 
 export const articleshipMatchesAdminRouter = Router();
 
@@ -39,22 +40,31 @@ articleshipMatchesAdminRouter.get("/", async (req, res, next) => {
         seminar_event_id:         articleshipMatches.seminar_event_id,
         seminar_event_title:      events.title,
         placed_firm_name:         firms.name,
+        cv_file_id:               articleshipMatches.cv_file_id,
+        cv_name:                  files.name,
+        cv_storage_path:          files.storage_path,
       })
       .from(articleshipMatches)
       .leftJoin(users,  eq(users.id, articleshipMatches.student_user_id))
       .leftJoin(events, eq(events.id, articleshipMatches.seminar_event_id))
       .leftJoin(firms,  eq(firms.id,  articleshipMatches.placed_firm_id))
+      .leftJoin(files,  eq(files.id,  articleshipMatches.cv_file_id))
       .where(conds.length ? and(...conds) : sql`true`)
       .orderBy(desc(articleshipMatches.created_at))
       .limit(pageSize)
       .offset(offset);
+
+    const rowsWithCvUrl = rows.map(({ cv_storage_path, ...r }) => ({
+      ...r,
+      cv_url: cv_storage_path ? storage().url(cv_storage_path) : null,
+    }));
 
     const [{ total }] = await db
       .select({ total: sql<number>`count(*)::int`.as("total") })
       .from(articleshipMatches)
       .where(conds.length ? and(...conds) : sql`true`);
 
-    res.json({ rows, total, page, pageSize });
+    res.json({ rows: rowsWithCvUrl, total, page, pageSize });
   } catch (err) { handleApiError(err, res, next); }
 });
 

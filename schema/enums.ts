@@ -115,7 +115,9 @@ export const registrationStatusEnum = pgEnum("registration_status", [
   "registered", "waitlisted", "cancelled", "attended", "no_show",
 ]);
 
-export const cpeTypeEnum = pgEnum("cpe_type", ["structured", "unstructured"]);
+// cpeTypeEnum was dropped in migration 0087 alongside the cpe_credits
+// table — the CPE feature was removed because the upstream ICAI publish
+// API is no longer available.
 
 export const postingTypeEnum = pgEnum("posting_type", [
   "job", "articleship", "assignment",

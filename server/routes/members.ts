@@ -86,6 +86,41 @@ membersRouter.get("/directory", optionalUser, async (req: AuthedRequest, res, ne
 // Everything below this point requires a logged-in user.
 membersRouter.use(requireUser);
 
+// ─── GET /api/members/search ─────────────────────────────────────────────
+// Portal user search (not the ICAI directory). Used by the event register
+// modal's "book for others" picker so a member can pick 2-3 fellow
+// portal users and pay for their seats on a single UPI QR.
+//
+// Returns at most 15 rows to keep it cheap. Matches name or email. Excludes
+// the caller so they can't add themselves as a guest by accident.
+membersRouter.get("/search", async (req: AuthedRequest, res, next) => {
+  try {
+    const q = trim(req.query.q);
+    if (q.length < 2) return res.json({ rows: [] });
+
+    const rows = await db
+      .select({
+        id:    users.id,
+        name:  users.name,
+        email: users.email,
+      })
+      .from(users)
+      .where(and(
+        isNull(users.deleted_at),
+        eq(users.status, "active"),
+        sql`${users.id} <> ${req.user!.id}`,
+        or(
+          ilike(users.name,  `%${q}%`),
+          ilike(users.email, `%${q}%`),
+        )!,
+      ))
+      .orderBy(asc(users.name))
+      .limit(15);
+
+    res.json({ rows });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
 // ─── PATCH /api/members/profile ─────────────────────────────────────────
 // Update the editable subset of the current member's profile. Fields that
 // are sourced from ICAI (MRN, FCA status, COP status/number, member-since

@@ -140,7 +140,7 @@ export function buildMessages(input: BuildMessagesInput): BuildMessagesResult {
       "If neither the SOURCES nor a tool can answer, say you don't know — never guess or fabricate. " +
       "If the question looks like it may concern members-only / gated material, " +
       "suggest that the user log in so gated resources can be searched.",
-    "TOOLS: When the user asks about live data (their CPE balance, what they're registered for, " +
+    "TOOLS: When the user asks about live data (what they're registered for, " +
       "upcoming events, who's in a committee, finding a specific paper), prefer calling a tool over " +
       "guessing from SOURCES — the SOURCES may be stale snapshots. After the tool returns, summarize the " +
       "result naturally; do not paste raw JSON. Tools you cannot see are not available — never claim to call " +

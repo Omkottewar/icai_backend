@@ -6,7 +6,7 @@ import {
   oauthLinks,
 } from "./identity";
 import { payments } from "./payments";
-import { events, eventRegistrations, cpeCredits } from "./events";
+import { events, eventRegistrations } from "./events";
 import { firms, jobPostings } from "./firms";
 import { roomBookings } from "./ops";
 import { consultations, cabfAssistanceRequests } from "./counseling";
@@ -31,7 +31,6 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   employerMemberships: many(employerUsers),
   payments:            many(payments),
   eventRegistrations:  many(eventRegistrations),
-  cpeCredits:          many(cpeCredits),
   jobPostings:         many(jobPostings),
   consultationsAsClient: many(consultations, { relationName: "client" }),
   cabfRequests:        many(cabfAssistanceRequests),
@@ -80,18 +79,12 @@ export const eventsRelations = relations(events, ({ one, many }) => ({
   parent:        one(events,   { fields: [events.recurrence_parent_id], references: [events.id], relationName: "recurrence" }),
   children:      many(events,  { relationName: "recurrence" }),
   registrations: many(eventRegistrations),
-  cpeCredits:    many(cpeCredits),
 }));
 
 export const eventRegistrationsRelations = relations(eventRegistrations, ({ one }) => ({
   event:   one(events,   { fields: [eventRegistrations.event_id],   references: [events.id] }),
   user:    one(users,    { fields: [eventRegistrations.user_id],    references: [users.id] }),
   payment: one(payments, { fields: [eventRegistrations.payment_id], references: [payments.id] }),
-}));
-
-export const cpeCreditsRelations = relations(cpeCredits, ({ one }) => ({
-  user:  one(users,  { fields: [cpeCredits.user_id],  references: [users.id] }),
-  event: one(events, { fields: [cpeCredits.event_id], references: [events.id] }),
 }));
 
 // ─── Firms ───────────────────────────────────────────────────────────────────

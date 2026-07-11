@@ -267,21 +267,23 @@ export async function* answerQuestion(
     }
   }
 
-  // ─── Retrieve (hybrid) + rerank ─────────────────────────────────────────
+  // ─── Retrieve (hybrid) + optional rerank ────────────────────────────────
   //
-  // Skip retrieval entirely on a safety block. We over-fetch the candidate
-  // pool (fetchK=20) and then let the LLM reranker pick the top-K — this
-  // is what makes hybrid+rerank deliver materially better grounding than
-  // raw cosine top-K.
+  // Skip retrieval entirely on a safety block. When rerank is enabled we
+  // over-fetch a candidate pool (fetchK=20) and let the LLM reranker pick
+  // top-K; when it's off, hybrid search's RRF fusion is already strong
+  // enough on its own — and skipping the extra LLM round-trip shaves
+  // ~250 ms off every reply. Flip PRAGYAAN_RERANK=1 to re-enable if
+  // answer quality regresses on tough queries.
   const RERANK_POOL = 20;
   let retrieved: { chunks: RetrievedChunk[]; topSimilarity: number | null; noAnswer: boolean } =
     { chunks: [], topSimilarity: null, noAnswer: true };
   if (!safety.block) {
     retrieved = await retrieve(retrievalQuery, input.scopes, {
       topK: pragyaanConfig.topK,
-      fetchK: RERANK_POOL,
+      fetchK: pragyaanConfig.rerankEnabled ? RERANK_POOL : pragyaanConfig.topK,
     });
-    if (retrieved.chunks.length > 1) {
+    if (pragyaanConfig.rerankEnabled && retrieved.chunks.length > 1) {
       retrieved.chunks = await rerank(retrievalQuery, retrieved.chunks, pragyaanConfig.topK);
     } else {
       retrieved.chunks = retrieved.chunks.slice(0, pragyaanConfig.topK);

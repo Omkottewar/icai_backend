@@ -511,7 +511,7 @@ export async function buildPublicDocs(): Promise<PublicDoc[]> {
       if (r.ends_at) parts.push(`Ends: ${new Date(r.ends_at).toISOString()}`);
       if (r.venue) parts.push(`Venue: ${r.venue}`);
       if (r.online_url) parts.push(`Online: ${r.online_url}`);
-      if (r.cpe_hours) parts.push(`CPE hours: ${r.cpe_hours}`);
+      if (r.cpe_hours && Number(r.cpe_hours) > 0) parts.push(`CPE hours: ${r.cpe_hours}`);
       if (Array.isArray(r.highlights) && r.highlights.length) {
         parts.push(`Highlights: ${r.highlights.join("; ")}`);
       }

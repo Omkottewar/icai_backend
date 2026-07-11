@@ -19,7 +19,7 @@
 //   • execute — runs server-side; returns plain JSON the model digests
 //
 // Security: tool visibility is gated by the caller's resolved scopes.
-// `current_user_info` / `my_cpe_balance` / `my_registered_events` only
+// `current_user_info` / `my_registered_events` only
 // appear in the schema we send to the model when there's an
 // authenticated user — so the model can't call them anonymously and
 // can't even mention them.
@@ -76,7 +76,7 @@ function fmtDate(d: Date | string | null): { iso: string; readable: string } | n
 const list_upcoming_events: ToolDef = {
   name: "list_upcoming_events",
   description:
-    "Lists upcoming branch events (CPE seminars, workshops, conferences). " +
+    "Lists upcoming branch events (seminars, workshops, conferences). " +
     "Use this when the user asks about scheduled events, upcoming sessions, what's happening, or 'when is X'.",
   parameters: {
     type: "object",

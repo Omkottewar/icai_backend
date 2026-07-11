@@ -3,7 +3,7 @@ import {
 } from "drizzle-orm/pg-core";
 import {
   eventAudienceEnum, eventModeEnum, eventStatusEnum,
-  registrationStatusEnum, cpeTypeEnum,
+  registrationStatusEnum,
 } from "./enums";
 import { users, branches } from "./identity";
 import { payments } from "./payments";
@@ -25,6 +25,10 @@ export const events = pgTable("events", {
   online_url:           text("online_url"),
   starts_at:            timestamp("starts_at", { withTimezone: true }).notNull(),
   ends_at:              timestamp("ends_at", { withTimezone: true }).notNull(),
+  // Display-only CPE hour attribution — no ledger, no publishing to ICAI,
+  // no compliance calculation. Just a label so members know what the event
+  // is worth. Re-added in migration 0088 after the full CPE feature was
+  // removed in 0087. Half-hour increments (numeric(4,1)).
   cpe_hours:            numeric("cpe_hours", { precision: 4, scale: 1 }).notNull().default("0"),
   fee_paise:            integer("fee_paise").notNull().default(0),
   gst_applicable:       boolean("gst_applicable").notNull().default(false),
@@ -55,6 +59,11 @@ export const eventRegistrations = pgTable("event_registrations", {
   user_id:       uuid("user_id").notNull().references(() => users.id),
   status:        registrationStatusEnum("status").notNull().default("registered"),
   payment_id:    uuid("payment_id").references(() => payments.id, { onDelete: "set null" }),  // Fix #2
+  // Group bookings: when a user books seats for other members on the same
+  // UPI payment, each guest attendee gets their own registration row with
+  // booked_by_user_id set to the payer. NULL for self-registrations. The
+  // attendee's dashboard uses this to render "Booked by <name>". Migration 0086.
+  booked_by_user_id: uuid("booked_by_user_id").references(() => users.id, { onDelete: "set null" }),
   registered_at: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
   attended_at:   timestamp("attended_at", { withTimezone: true }),
   deleted_at:    timestamp("deleted_at", { withTimezone: true }),
@@ -63,18 +72,8 @@ export const eventRegistrations = pgTable("event_registrations", {
 // Legacy event_checklists / event_checklist_items / event_checklist_reviews
 // tables were dropped in migration 0024. The single source of truth for
 // event approval is now checklist_instances (see schema/checklists.ts).
-
-// ─── CPE Credits ──────────────────────────────────────────────────────────────
-
-export const cpeCredits = pgTable("cpe_credits", {
-  id:                  uuid("id").primaryKey().defaultRandom(),
-  user_id:             uuid("user_id").notNull().references(() => users.id),
-  event_id:            uuid("event_id").references(() => events.id),  // NULL for unstructured credits
-  hours:               numeric("hours", { precision: 4, scale: 1 }).notNull(),
-  type:                cpeTypeEnum("type").notNull(),
-  year:                integer("year").notNull(),         // calendar year of credit
-  source:              text("source"),                    // branch_event / icai_self_study
-  issued_at:           timestamp("issued_at", { withTimezone: true }).notNull().defaultNow(),
-  certificate_file_id: uuid("certificate_file_id").references(() => files.id, { onDelete: "set null" }),
-  deleted_at:          timestamp("deleted_at", { withTimezone: true }),
-});
+//
+// cpe_credits table was dropped in migration 0087 (July 2026) — the
+// upstream ICAI CPE publish API stopped being available, and running an
+// internal ledger without a way to reconcile it back to ICAI's central
+// register would mislead members. Attendance certificates still render.

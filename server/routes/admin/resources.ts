@@ -518,7 +518,6 @@ resourcesAdminRouter.put("/papers/:paperId/quiz", async (req: AuthedRequest, res
     if (!paper) throw new ApiError(404, "Paper not found");
 
     const pass_threshold = Number.isFinite(Number(req.body.pass_threshold)) ? Math.trunc(Number(req.body.pass_threshold)) : 4;
-    const cpe_credit_minutes = Number.isFinite(Number(req.body.cpe_credit_minutes)) ? Math.trunc(Number(req.body.cpe_credit_minutes)) : 30;
     const cooldown_hours = Number.isFinite(Number(req.body.cooldown_hours)) ? Math.trunc(Number(req.body.cooldown_hours)) : 24;
 
     const questions: Array<{ text: string; explanation?: string; options: Array<{ text: string; is_correct: boolean }> }> =
@@ -546,7 +545,6 @@ resourcesAdminRouter.put("/papers/:paperId/quiz", async (req: AuthedRequest, res
         const [updated] = await tx.update(resourceQuizzes).set({
           pass_threshold,
           question_count: questions.length,
-          cpe_credit_minutes,
           cooldown_hours,
           updated_at: new Date(),
         }).where(eq(resourceQuizzes.id, existing.id)).returning();
@@ -557,7 +555,6 @@ resourcesAdminRouter.put("/papers/:paperId/quiz", async (req: AuthedRequest, res
           paper_id: paperId,
           pass_threshold,
           question_count: questions.length,
-          cpe_credit_minutes,
           cooldown_hours,
           created_by: req.user!.id,
         }).returning();

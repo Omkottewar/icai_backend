@@ -159,6 +159,16 @@ export const SITE_SLOTS = {
       { key: "view_all_label", label: "View-all link label (e.g. \"All resources →\")", kind: "text" },
     ],
   },
+  home_best_paper: {
+    label: "Home — Best Paper Presentation showcase (caption text only — the paper is picked in Paper Presentations admin)",
+    page:  "Home",
+    fields: [
+      { key: "eyebrow", label: "Eyebrow (small caps above the winner card, e.g. \"AWARD SPOTLIGHT\")", kind: "text" },
+      { key: "title",   label: "Section title (e.g. \"Best Paper Presentation\")",                     kind: "text" },
+      { key: "intro",   label: "One-line intro under the title (e.g. \"Recognising outstanding student research each year.\")", kind: "text" },
+      { key: "cta_label", label: "Read-paper CTA button label (e.g. \"Read the winning paper →\")", kind: "text" },
+    ],
+  },
   home_wicasa_card: {
     label: "Home — WICASA student-wing card (labels + updates list)",
     page:  "Home",

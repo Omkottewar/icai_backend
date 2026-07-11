@@ -49,6 +49,21 @@ export interface PragyaanConfig {
   readonly anonRatePerMin: number;
   /** Per-minute chat rate limit for authenticated callers. */
   readonly userRatePerMin: number;
+  /**
+   * LLM reranker on/off. The reranker is a full extra LLM round-trip
+   * that scores retrieval candidates before generation. It adds ~250 ms
+   * of wall-clock latency for a marginal quality bump — off by default
+   * so the bot feels snappy. Flip on via PRAGYAAN_RERANK=1 if answer
+   * quality regresses on tough queries.
+   */
+  readonly rerankEnabled: boolean;
+}
+
+function bool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
 // `OPENAI_EMBEDDING_MODEL` is the canonical spec name; `EMBEDDING_MODEL`
@@ -60,7 +75,10 @@ const embeddingModel =
 
 export const pragyaanConfig: PragyaanConfig = {
   openaiApiKey:        (process.env.OPENAI_API_KEY ?? "").trim(),
-  chatModel:           str("OPENAI_CHAT_MODEL", ""),
+  // gpt-4o-mini is 2-4× faster than gpt-4o for a chatbot and 20-50× cheaper,
+  // with quality that's still very good on grounded RAG answers. Override via
+  // OPENAI_CHAT_MODEL if a specific model is required.
+  chatModel:           str("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
   embeddingModel:      embeddingModel === "" ? "text-embedding-3-small" : embeddingModel,
   embeddingDimensions: int("EMBEDDING_DIMENSIONS", 1536),
   topK:                int("PRAGYAAN_TOP_K", 6),
@@ -68,4 +86,5 @@ export const pragyaanConfig: PragyaanConfig = {
   maxContextChars:     int("PRAGYAAN_MAX_CONTEXT_CHARS", 12000),
   anonRatePerMin:      int("PRAGYAAN_ANON_RATE_PER_MIN", 8),
   userRatePerMin:      int("PRAGYAAN_USER_RATE_PER_MIN", 30),
+  rerankEnabled:       bool("PRAGYAAN_RERANK", false),
 };

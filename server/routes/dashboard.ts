@@ -1,10 +1,10 @@
 import { Router } from "express";
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { db } from "../../db/client.js";
 import {
   events,
   eventRegistrations,
-  cpeCredits,
   memberProfiles,
   studentProfiles,
   dashboardLayouts,
@@ -106,8 +106,11 @@ dashboardRouter.delete("/layout", requireUser, async (req: AuthedRequest, res, n
 // local copy had a corrupted en-dash byte sequence that rendered as
 // "FY 2026 - 27" mojibake in the dashboard CPE badge.
 
-/** Upcoming events the current user is registered/waitlisted for. */
+/** Upcoming events the current user is registered/waitlisted for.
+ *  Includes `booked_by_name` when someone else paid for this seat so the
+ *  dashboard can show a "Booked by CA X" chip on the event card. */
 async function getUpcomingEvents(userId: string, now: Date) {
+  const bookerUsers = alias(users, "booker_users");
   return db
     .select({
       id: events.id,
@@ -119,9 +122,12 @@ async function getUpcomingEvents(userId: string, now: Date) {
       mode: events.mode,
       venue: events.venue,
       status: eventRegistrations.status,
+      booked_by_user_id: eventRegistrations.booked_by_user_id,
+      booked_by_name:    bookerUsers.name,
     })
     .from(eventRegistrations)
     .innerJoin(events, eq(events.id, eventRegistrations.event_id))
+    .leftJoin(bookerUsers, eq(bookerUsers.id, eventRegistrations.booked_by_user_id))
     .where(
       and(
         eq(eventRegistrations.user_id, userId),
@@ -135,9 +141,9 @@ async function getUpcomingEvents(userId: string, now: Date) {
     .limit(5);
 }
 
-// Past events the user attended that award CPE — these are eligible for
-// certificate download. Capped at 10 most recent for the dashboard tile;
-// fuller "all certificates" history can come later as a dedicated page.
+// Past events the user attended — eligible for attendance certificate
+// download. Capped at 10 most recent for the dashboard tile; fuller
+// "all certificates" history can come later as a dedicated page.
 async function getRecentCertificates(userId: string) {
   return db
     .select({
@@ -155,7 +161,6 @@ async function getRecentCertificates(userId: string) {
         isNull(eventRegistrations.deleted_at),
         isNull(events.deleted_at),
         eq(eventRegistrations.status, "attended"),
-        sql`${events.cpe_hours} > 0`,
       ),
     )
     .orderBy(desc(events.starts_at))
@@ -200,26 +205,8 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
 
       const fy = currentFy(now);
 
-      // Sum CPE hours in the current FY split by structured/unstructured.
-      // numeric() comes back as string from postgres-js - coerce to number on read.
-      const cpeRows = await db
-        .select({
-          type: cpeCredits.type,
-          hours: sql<string>`coalesce(sum(${cpeCredits.hours}), 0)::text`.as("hours"),
-        })
-        .from(cpeCredits)
-        .where(
-          and(
-            eq(cpeCredits.user_id, user.id),
-            isNull(cpeCredits.deleted_at),
-            gte(cpeCredits.issued_at, fy.start),
-            lt(cpeCredits.issued_at, fy.end),
-          ),
-        )
-        .groupBy(cpeCredits.type);
-
-      const structured = Number(cpeRows.find((r) => r.type === "structured")?.hours ?? 0);
-      const unstructured = Number(cpeRows.find((r) => r.type === "unstructured")?.hours ?? 0);
+      // CPE feature removed in migration 0087 — the upstream ICAI publish
+      // API is no longer available, so the branch stopped tracking hours.
 
       // Run the four "extras" in parallel — they're independent reads and
       // each is cheap, so the request stays well under 100ms.
@@ -408,16 +395,6 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
               phone: profile.phone,
             }
           : null,
-        cpe: {
-          fy_label: fy.label,
-          fy_start: fy.start.toISOString(),
-          fy_end: fy.end.toISOString(),
-          structured_hours: structured,
-          unstructured_hours: unstructured,
-          total_hours: structured + unstructured,
-          target: 40,
-          three_year_block_target: 120,
-        },
         upcomingEvents,
         recentCertificates,
         eventsAttendedFy: eventsAttendedFyRow[0]?.count ?? 0,

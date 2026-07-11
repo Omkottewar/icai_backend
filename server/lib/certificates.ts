@@ -1,9 +1,13 @@
-// Attendance / CPE certificate PDF generator.
+// Event attendance certificate PDF generator.
 //
 // Generates a single-page A4 landscape PDF that the user downloads from
 // /api/events/:slug/certificate. Layout is intentionally simple — branch
-// title at top, name and event details in the centre, CPE hours + date
-// + signature blocks at bottom. No external image assets required.
+// title at top, name and event details in the centre, date + signature
+// blocks at bottom. No external image assets required.
+//
+// CPE-hour attribution was removed in migration 0087 alongside the rest
+// of the CPE feature (upstream ICAI publish API withdrawn). Certificates
+// still function as proof of attendance.
 //
 // Notification S.6 ("Certificate ready for download") points the user
 // straight at this endpoint, so the URL is the canonical certificate
@@ -17,9 +21,8 @@ export interface CertificateInput {
   memberMrn: string | null;
   eventTitle: string;
   eventDate: Date;          // event.starts_at
-  cpeHours: number;
   branchName: string;       // "ICAI Nagpur Branch (WIRC)"
-  certificateNo: string;    // e.g. "NGP-CPE-{event.slug.slice(-8)}-{userId.slice(0,8)}"
+  certificateNo: string;    // e.g. "NGP-EVT-{event.slug.slice(-8)}-{userId.slice(0,8)}"
 }
 
 const IST_DATE = new Intl.DateTimeFormat("en-IN", {
@@ -130,7 +133,7 @@ export function streamCertificate(input: CertificateInput, out: Writable): void 
     .fontSize(12)
     .font("Helvetica")
     .text(
-      `held on ${IST_DATE.format(input.eventDate)} and is awarded ${input.cpeHours} CPE hour${input.cpeHours === 1 ? "" : "s"}.`,
+      `held on ${IST_DATE.format(input.eventDate)}.`,
       0, doc.y, { align: "center", width: W }
     );
 

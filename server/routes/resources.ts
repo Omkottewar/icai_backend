@@ -988,7 +988,6 @@ resourcesRouter.get("/papers/:slug/quiz", requireUser, async (req: AuthedRequest
         id: quiz.id,
         pass_threshold: quiz.pass_threshold,
         question_count: quiz.question_count,
-        cpe_credit_minutes: quiz.cpe_credit_minutes,
         cooldown_hours: quiz.cooldown_hours,
       },
       questions: questions.map((q) => ({
@@ -1002,8 +1001,7 @@ resourcesRouter.get("/papers/:slug/quiz", requireUser, async (req: AuthedRequest
 });
 
 // Submit an attempt. Score server-side, enforce cooldown, log to attempts
-// table. CPE credit lookup is up to the dashboard — the attempts row IS
-// the credit record.
+// table.
 resourcesRouter.post("/papers/:slug/quiz-attempt", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const slug = String(req.params.slug);
@@ -1068,35 +1066,7 @@ resourcesRouter.post("/papers/:slug/quiz-attempt", requireUser, async (req: Auth
     res.json({
       ok: true,
       attempt: { id: row.id, score, passed, total: questions.length },
-      cpe_credit_minutes: passed ? quiz.cpe_credit_minutes : 0,
     });
-  } catch (err) { handleApiError(err, res, next); }
-});
-
-// Member CPE summary — total minutes earned across all quiz passes plus
-// the list of papers passed. Used in the dashboard's "CPE earned" tile.
-resourcesRouter.get("/cpe/my", requireUser, async (req: AuthedRequest, res, next) => {
-  try {
-    const rows = await db
-      .select({
-        attempt_id: resourceQuizAttempts.id,
-        completed_at: resourceQuizAttempts.completed_at,
-        minutes: resourceQuizzes.cpe_credit_minutes,
-        paper_id: paperPresentations.id,
-        paper_slug: paperPresentations.slug,
-        paper_title: paperPresentations.title,
-      })
-      .from(resourceQuizAttempts)
-      .innerJoin(resourceQuizzes, eq(resourceQuizzes.id, resourceQuizAttempts.quiz_id))
-      .innerJoin(paperPresentations, eq(paperPresentations.id, resourceQuizzes.paper_id))
-      .where(and(
-        eq(resourceQuizAttempts.user_id, req.user!.id),
-        eq(resourceQuizAttempts.passed, true),
-      ))
-      .orderBy(desc(resourceQuizAttempts.completed_at));
-
-    const total_minutes = rows.reduce((s, r) => s + r.minutes, 0);
-    res.json({ total_minutes, items: rows });
   } catch (err) { handleApiError(err, res, next); }
 });
 

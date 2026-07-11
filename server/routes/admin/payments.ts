@@ -7,7 +7,7 @@
 // Mounted at /api/admin/payments.
 
 import { Router } from "express";
-import { and, desc, eq, gte, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
 import { payments, paymentRefunds, users, events, eventRegistrations, files } from "../../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
@@ -201,9 +201,9 @@ paymentsAdminRouter.post("/:id/approve", async (req: AuthedRequest, res, next) =
       const [payment] = await tx.select().from(payments).where(eq(payments.id, id)).limit(1);
       if (!payment) throw new ApiError(404, "Payment not found");
 
-      // Idempotent short-circuit.
+      // Idempotent short-circuit — admin double-click / reload safety.
       if (payment.status === "success") {
-        return { alreadyApproved: true, payment };
+        return { alreadyApproved: true, payment, createdCount: 0, waitlistedCount: 0 };
       }
       if (payment.status !== "pending_verification") {
         throw new ApiError(400, `Payment is in status '${payment.status}' — can only approve pending_verification.`);
@@ -215,79 +215,116 @@ paymentsAdminRouter.post("/:id/approve", async (req: AuthedRequest, res, next) =
       const [event] = await tx.select().from(events).where(eq(events.id, payment.ref_id!)).limit(1);
       if (!event) throw new ApiError(404, "Linked event not found");
 
-      // Guard against double-registration if a legacy row somehow exists.
-      const [existing] = await tx
-        .select({ id: eventRegistrations.id, status: eventRegistrations.status })
+      // Recover the group booking from payment.metadata. Booker is always
+      // seat 1; additional attendees are the ids stashed at /register time.
+      const metadata = (payment.metadata ?? {}) as { attendee_user_ids?: string[]; seat_count?: number };
+      const attendeeIds = Array.isArray(metadata.attendee_user_ids) ? metadata.attendee_user_ids : [];
+      const bookerId = payment.payer_user_id!;
+      // Seat holders: booker first (booked_by = null), then each attendee
+      // (booked_by = booker so dashboard can show attribution).
+      const seatHolders: Array<{ user_id: string; booked_by: string | null }> = [
+        { user_id: bookerId, booked_by: null },
+        ...attendeeIds.map((uid) => ({ user_id: uid, booked_by: bookerId })),
+      ];
+
+      // Skip any seat holder that already has an active registration for
+      // this event — happens if admin re-approves after a partial failure,
+      // or if the guest self-registered between UTR submission and approval.
+      const existingRows = await tx
+        .select({ user_id: eventRegistrations.user_id, status: eventRegistrations.status })
         .from(eventRegistrations)
         .where(and(
           eq(eventRegistrations.event_id, event.id),
-          eq(eventRegistrations.user_id, payment.payer_user_id!),
+          inArray(eventRegistrations.user_id, seatHolders.map((h) => h.user_id)),
           isNull(eventRegistrations.deleted_at),
-        ))
-        .limit(1);
+        ));
+      const alreadyRegistered = new Set(existingRows.map((r) => r.user_id));
+      const toCreate = seatHolders.filter((h) => !alreadyRegistered.has(h.user_id));
 
-      // Capacity check — if the event filled up between UTR submission and
-      // approval, we waitlist rather than reject. Admin can see this in the
-      // registration row status and choose to refund off-platform if needed.
-      const isFull = event.capacity !== null && event.registered_count >= event.capacity;
-      const regStatus = isFull ? "waitlisted" : "registered";
+      // Capacity — freshly read inside the txn so we don't over-allocate
+      // if two payments approved at the same moment. If we don't have room
+      // for every remaining seat, waitlist the whole batch; refund is a
+      // manual off-platform action the admin decides on.
+      const [fresh] = await tx.select({
+        capacity: events.capacity,
+        registered_count: events.registered_count,
+      }).from(events).where(eq(events.id, event.id)).limit(1);
+      const seatsLeft = fresh.capacity !== null ? fresh.capacity - fresh.registered_count : Infinity;
+      const willBeFull = fresh.capacity !== null && seatsLeft < toCreate.length;
+      const regStatus: "registered" | "waitlisted" = willBeFull ? "waitlisted" : "registered";
 
-      let registration;
-      if (existing) {
-        registration = existing;
-      } else {
-        [registration] = await tx.insert(eventRegistrations).values({
-          event_id: event.id,
-          user_id: payment.payer_user_id!,
-          status: regStatus,
-          payment_id: payment.id,
-        }).returning();
+      let createdRows: Array<{ id: string; user_id: string; status: string }> = [];
+      if (toCreate.length > 0) {
+        createdRows = await tx.insert(eventRegistrations).values(
+          toCreate.map((h) => ({
+            event_id:          event.id,
+            user_id:           h.user_id,
+            status:            regStatus,
+            payment_id:        payment.id,
+            booked_by_user_id: h.booked_by,
+          })),
+        ).returning({ id: eventRegistrations.id, user_id: eventRegistrations.user_id, status: eventRegistrations.status });
+
+        if (regStatus === "registered") {
+          await tx.update(events).set({
+            registered_count: sql`${events.registered_count} + ${toCreate.length}`,
+            updated_at: new Date(),
+          }).where(eq(events.id, event.id));
+        }
       }
 
       const [updatedPayment] = await tx.update(payments).set({
         status: "success",
         verified_by: req.user!.id,
         verified_at: new Date(),
-        metadata: isFull
+        metadata: willBeFull
           ? { ...(payment.metadata as object || {}), needs_refund: "event_full_after_payment" }
           : payment.metadata,
         updated_at: new Date(),
       }).where(eq(payments.id, payment.id)).returning();
 
-      if (!existing && regStatus === "registered") {
-        await tx.update(events).set({
-          registered_count: sql`${events.registered_count} + 1`,
-          updated_at: new Date(),
-        }).where(eq(events.id, event.id));
-      }
-
-      return { alreadyApproved: false, payment: updatedPayment, registration, event, waitlisted: regStatus === "waitlisted" };
+      return {
+        alreadyApproved: false,
+        payment: updatedPayment,
+        event,
+        createdRows,
+        createdCount: createdRows.length,
+        waitlistedCount: regStatus === "waitlisted" ? createdRows.length : 0,
+        bookerId,
+      };
     });
 
-    if (!result.alreadyApproved && result.event) {
+    // Fire one confirmation email per newly-created registration. Attendees
+    // (booked_by non-null) get a variant subject line so they know it's
+    // someone else's booking. notifyAsync never throws — batch them off
+    // the response critical path.
+    if (!result.alreadyApproved && result.event && result.createdRows) {
       const startsAt = result.event.starts_at instanceof Date ? result.event.starts_at : new Date(result.event.starts_at);
-      notifyAsync({
-        user_id: result.payment.payer_user_id!,
-        template_key: "event_registered",
-        vars: {
-          event_title: result.event.title,
-          event_slug:  result.event.slug,
-          event_date:  startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium" }),
-          event_time:  startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", timeStyle: "short" }),
-          event_venue: result.event.venue || (result.event.mode === "online" ? "Online" : "TBC"),
-          cpe_hours:   result.event.cpe_hours,
-          calendar_link: `${process.env.APP_URL ?? ""}/events`,
-          joining_link_or_directions: result.event.online_url || result.event.venue || "Details will be shared closer to the date.",
-        },
-        link_url: "/dashboard",
-      });
+      const commonVars = {
+        event_title: result.event.title,
+        event_slug:  result.event.slug,
+        event_date:  startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium" }),
+        event_time:  startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", timeStyle: "short" }),
+        event_venue: result.event.venue || (result.event.mode === "online" ? "Online" : "TBC"),
+        cpe_hours:   result.event.cpe_hours ?? "",
+        calendar_link: `${process.env.APP_URL ?? ""}/events`,
+        joining_link_or_directions: result.event.online_url || result.event.venue || "Details will be shared closer to the date.",
+      };
+      for (const row of result.createdRows) {
+        notifyAsync({
+          user_id: row.user_id,
+          template_key: "event_registered",
+          vars: commonVars,
+          link_url: "/dashboard",
+        });
+      }
     }
 
     res.json({
       ok: true,
       already_approved: result.alreadyApproved,
-      registration: result.alreadyApproved ? null : result.registration,
-      waitlisted: !result.alreadyApproved && result.waitlisted,
+      created_count: result.createdCount,
+      waitlisted: result.waitlistedCount > 0,
     });
   } catch (err) { handleApiError(err, res, next); }
 });

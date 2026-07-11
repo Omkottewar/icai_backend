@@ -72,6 +72,11 @@ export const paperPresentations = pgTable(
     disclaimer_text: text("disclaimer_text").notNull().default("Views expressed are personal"),
     hidden:        boolean("hidden").notNull().default(false),
     sort_order:    integer("sort_order").notNull().default(0),
+    // Best Paper award (migration 0089). One winner per year enforced by
+    // a partial unique index on (award_year) WHERE is_winner = true.
+    // The homepage BestPaperShowcase queries for the latest winner.
+    is_winner:     boolean("is_winner").notNull().default(false),
+    award_year:    integer("award_year"),
     created_at:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updated_at:    timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -189,13 +194,16 @@ export const resourceComments = pgTable("resource_comments", {
   index("resource_comments_user_idx").on(t.user_id),
 ]);
 
-// ─── CPE quizzes (Phase 3) ───────────────────────────────────────────────
+// ─── Comprehension quizzes on paper presentations (Phase 3) ──────────────
+// Originally these awarded "unstructured CPE minutes" on pass — that column
+// was dropped in migration 0087 alongside the rest of the CPE feature.
+// The quizzes still function as a comprehension check; there's just no
+// hour attribution anymore.
 export const resourceQuizzes = pgTable("resource_quizzes", {
   id:                  uuid("id").primaryKey().defaultRandom(),
   paper_id:            uuid("paper_id").notNull().unique().references(() => paperPresentations.id, { onDelete: "cascade" }),
   pass_threshold:      integer("pass_threshold").notNull().default(4),
   question_count:      integer("question_count").notNull().default(5),
-  cpe_credit_minutes:  integer("cpe_credit_minutes").notNull().default(30),
   cooldown_hours:      integer("cooldown_hours").notNull().default(24),
   is_published:        boolean("is_published").notNull().default(false),
   created_by:          uuid("created_by").references(() => users.id, { onDelete: "set null" }),

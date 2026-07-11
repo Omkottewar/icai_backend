@@ -29,7 +29,7 @@ const EVENTS = [
     mode: "in_person",
     venue: "Hotel Centre Point, Nagpur",
     daysFromNow: 3,
-    cpe_hours: "4",
+
     capacity: 120,
     highlights: [
       "Step-by-step GSTR-9 and GSTR-9C preparation",
@@ -45,7 +45,7 @@ const EVENTS = [
     mode: "in_person",
     venue: "ICAI Bhawan, Nagpur",
     daysFromNow: 5,
-    cpe_hours: "3",
+
     capacity: 80,
     highlights: [
       "Investigating financial irregularities",
@@ -61,7 +61,7 @@ const EVENTS = [
     mode: "online",
     venue: "Online (Zoom)",
     daysFromNow: 7,
-    cpe_hours: "2",
+
     capacity: 200,
     highlights: [
       "Practical AI tools for audit, tax and advisory work",
@@ -77,7 +77,7 @@ const EVENTS = [
     mode: "in_person",
     venue: "Chitnavis Centre, Nagpur",
     daysFromNow: 12,
-    cpe_hours: "4",
+
     capacity: 150,
     highlights: [
       "Schema changes for AY 26-27",
@@ -93,7 +93,7 @@ const EVENTS = [
     mode: "in_person",
     venue: "Branch Premises, Nagpur",
     daysFromNow: 9,
-    cpe_hours: "0",
+
     capacity: 100,
     highlights: [
       "Full-syllabus mocks under exam conditions",
@@ -109,7 +109,7 @@ const EVENTS = [
     mode: "in_person",
     venue: "Hotel Tuli Imperial, Nagpur",
     daysFromNow: 21,
-    cpe_hours: "12",
+
     capacity: 400,
     highlights: [
       "Two days of technical sessions across domains",
@@ -148,12 +148,12 @@ try {
     const result = await sql`
       INSERT INTO events (
         slug, title, committee_id, audience, mode, venue,
-        starts_at, ends_at, cpe_hours, fee_paise, capacity, status, highlights
+        starts_at, ends_at, fee_paise, capacity, status, highlights
       ) VALUES (
         ${e.slug}, ${e.title}, ${committeeIdByCode.get(e.committee_code)},
         ${e.audience}, ${e.mode}, ${e.venue},
         ${startsAt}, ${endsAt},
-        ${e.cpe_hours}, 0, ${e.capacity}, 'published',
+        0, ${e.capacity}, 'published',
         ${e.highlights}
       )
       ON CONFLICT (slug) DO NOTHING

@@ -10,7 +10,6 @@ import { users } from "./identity";
 // FKs into this table (set on the referencing column with onDelete: "set null"):
 //   • users.avatar_id
 //   • events.banner_id
-//   • cpe_credits.certificate_file_id
 //
 // The users.id reference below uses AnyPgColumn to break the
 // files ↔ users circular import (files.uploaded_by → users,
