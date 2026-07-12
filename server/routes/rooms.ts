@@ -23,6 +23,7 @@ import { and, asc, desc, eq, gte, isNull, lt, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { rooms, roomBookings } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
+import { bookingWriteLimiter } from "../middleware/rateLimit.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 
 export const roomsRouter = Router();
@@ -89,7 +90,7 @@ roomsRouter.get("/:id/availability", async (req, res, next) => {
 // Role gate — branch rooms are bookable by ICAI members and CA students
 // only (client_answers §O.2). Employers, staff and other roles cannot
 // hold a slot. Admin is allowed for support / WICASA pre-checks.
-roomsRouter.post("/:id/book", requireUser, async (req: AuthedRequest, res, next) => {
+roomsRouter.post("/:id/book", bookingWriteLimiter, requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const role = req.user!.primary_role;
     if (role !== "member" && role !== "student" && role !== "admin") {

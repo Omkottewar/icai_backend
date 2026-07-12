@@ -5,6 +5,7 @@ export * from "./enums";
 export * from "./files";
 export * from "./committees";
 export * from "./rooms";
+export * from "./readingRoom";
 export * from "./identity";
 export * from "./payments";
 export * from "./events";

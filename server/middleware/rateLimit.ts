@@ -36,3 +36,15 @@ export const forgotPasswordLimiter = rateLimit({
   windowMs: hours(1),
   limit: 3,
 });
+
+/**
+ * Booking / registration write endpoints — 20 write attempts per 5 min per IP.
+ * Legitimate students never hit this ceiling (booking is a one-time action per
+ * month per event); it exists so a script can't brute-book / bulk-register /
+ * flood the UTR-submit endpoint and saturate the DB pool.
+ */
+export const bookingWriteLimiter = rateLimit({
+  ...baseOpts,
+  windowMs: minutes(5),
+  limit: 20,
+});

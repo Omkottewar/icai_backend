@@ -4,6 +4,7 @@ import { db } from "../../db/client.js";
 import { events, eventRegistrations, users, payments, siteSettings } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
+import { bookingWriteLimiter } from "../middleware/rateLimit.js";
 import { notifyAsync } from "../lib/notify.js";
 import { streamCertificate } from "../lib/certificates.js";
 import { buildCalendar } from "../lib/ical.js";
@@ -98,7 +99,7 @@ registrationsRouter.get("/my-registrations", requireUser, async (req: AuthedRequ
 //                   browser can launch Razorpay Checkout. No registration row
 //                   yet â€” that's created on /verify-payment after the
 //                   signature checks out.
-registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedRequest, res, next) => {
+registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const user = req.user!;
     const slug = need(trim(req.params.slug), "Event slug");
@@ -205,12 +206,17 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
     // â”€â”€ Free event: create the registration row right now â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (event.fee_paise === 0) {
       const row = await db.transaction(async (tx) => {
-        // Re-check capacity inside the txn so two concurrent registrations
-        // can't both slip past the soft check above.
+        // Lock the event row FOR UPDATE so concurrent registrations
+        // serialise on capacity. Postgres default isolation is READ
+        // COMMITTED, so without this lock two racing transactions can
+        // both read registered_count=49 and both increment to 50 —
+        // silent over-registration. FOR UPDATE takes a row-level lock
+        // that blocks any other txn also trying to read+increment this
+        // event, but leaves reads of OTHER events / other rows alone.
         const [fresh] = await tx.select({
           capacity: events.capacity,
           registered_count: events.registered_count,
-        }).from(events).where(eq(events.id, event.id)).limit(1);
+        }).from(events).where(eq(events.id, event.id)).for("update").limit(1);
         // If full at this exact moment, register as waitlisted instead of
         // rejecting. The cancel endpoint auto-promotes the oldest waitlist
         // entry, so the user gets in if a seat opens up.
@@ -340,7 +346,7 @@ registrationsRouter.post("/:slug/register", requireUser, async (req: AuthedReque
 //      typically takes 24h".
 //
 // No registration row is created here. That happens only on admin approve.
-registrationsRouter.post("/:slug/submit-utr", requireUser, async (req: AuthedRequest, res, next) => {
+registrationsRouter.post("/:slug/submit-utr", bookingWriteLimiter, requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const user = req.user!;
     const slug = need(trim(req.params.slug), "Event slug");
@@ -713,7 +719,7 @@ registrationsRouter.post("/:slug/cancel", requireUser, async (req: AuthedRequest
 // waitlist transparently for free events when capacity is full, so this
 // route exists primarily for paid events where the UI surfaces "Join
 // waitlist" as a distinct CTA (no payment until promoted).
-registrationsRouter.post("/:slug/waitlist", requireUser, async (req: AuthedRequest, res, next) => {
+registrationsRouter.post("/:slug/waitlist", bookingWriteLimiter, requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const user = req.user!;
     const slug = need(trim(req.params.slug), "Event slug");

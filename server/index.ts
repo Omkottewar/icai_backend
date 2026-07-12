@@ -38,6 +38,7 @@ import { attachEventChatSocket } from "./lib/eventChatSocket.js";
 import { startEscalationCron } from "./lib/escalations.js";
 import { startPragyaanIngestCron } from "./lib/pragyaan/scheduler.js";
 import { roomsRouter } from "./routes/rooms.js";
+import { readingRoomRouter } from "./routes/readingRoom.js";
 import { runNotificationHealthcheck } from "./lib/notifyHealthcheck.js";
 import { publicJobsRouter } from "./routes/jobs.js";
 import { membersRouter } from "./routes/members.js";
@@ -65,11 +66,25 @@ const app = express();
 // safe in dev (no forwarded header) and in any single-proxy deployment.
 app.set("trust proxy", 1);
 
-// Bumped from the default 100kb so event-banner uploads (base64-encoded
-// images up to 6 MB AND videos up to 100 MB on the file endpoint) fit
-// through the JSON parser. Base64 inflates by ~33%, so 150 MB gives the
-// 100 MB video cap (≈ 134 MB base64) comfortable headroom.
-app.use(express.json({ limit: "150mb" }));
+// Layered JSON body limits — the express.json middleware is idempotent
+// (it no-ops when req.body is already parsed), so mounting bigger-limit
+// parsers on specific path prefixes before the small global default
+// gives each route just the headroom it needs. Prior version had a
+// single 150 MB global limit — anyone with a session could send a
+// 100 MB body and OOM the 512 MB Fly machine during JSON.parse.
+//
+// The layering below hard-caps abuse from unauthenticated + regular
+// user traffic to 2 MB while still supporting genuine uploads:
+//   • /api/admin/*             → 150 MB (behind admin auth; gallery videos, PDFs)
+//   • /api/resources/*         → 25 MB  (student paper PDFs)
+//   • /api/scholarships/*      → 25 MB  (scholarship application documents)
+//   • /api/articleship-matches → 25 MB  (student CV uploads)
+//   • everything else          → 2 MB   (default)
+app.use("/api/admin",              express.json({ limit: "150mb" }));
+app.use("/api/resources",          express.json({ limit: "25mb" }));
+app.use("/api/scholarships",       express.json({ limit: "25mb" }));
+app.use("/api/articleship-matches", express.json({ limit: "25mb" }));
+app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
 // Serve uploaded banners/certificates. Local-disk-backed for the MVP;
@@ -118,6 +133,7 @@ app.use("/api/checklist-templates", checklistTemplatesRouter);
 app.use("/api/checklist-instances", checklistInstancesRouter);
 app.use("/api/branch", branchRouter);
 app.use("/api/rooms", roomsRouter);
+app.use("/api/reading-room", readingRoomRouter);
 app.use("/api/forum", forumRouter);
 // Site content slots (text/images on every public page) change rarely —
 // the longer SWR window gives near-instant edge hits while admin edits
@@ -127,9 +143,10 @@ app.use("/api/announcements", publicCache(60), announcementsRouter);
 app.use("/api/employer", employerRouter);
 app.use("/api/jobs", publicCache(60), publicJobsRouter);
 app.use("/api/members", membersRouter);
-app.use("/api/mock-tests", mockTestsRouter);
-// Attempt lifecycle (start / save answer / submit / review). Mounted at
-// /api so the routes can use both /mock-tests/:id/attempt and /attempts/:id.
+// Mock tests: public listings get cached (SWR bypasses on auth cookie so
+// signed-in members always see fresh state). Attempt lifecycle mounts at
+// /api so it can serve both /mock-tests/:id/attempt and /attempts/:id.
+app.use("/api/mock-tests", publicCache(60), mockTestsRouter);
 app.use("/api", mockTestAttemptsRouter);
 app.use("/api/notifications", notificationsRouter);
 app.use("/api/push", pushRouter);
@@ -141,14 +158,16 @@ app.use("/api/checklist-tasks", checklistTasksRouter);
 app.use("/api", publicCache(300), branchContentRouter);
 // Section L (Resources) — papers, e-journal, topics, bookmarks, comments,
 // quizzes. Lives under /api/resources/... so it doesn't collide with the
-// older /paper-presentations endpoint.
-app.use("/api/resources", resourcesRouter);
+// older /paper-presentations endpoint. publicCache safely wraps mixed
+// public+authenticated routers because the middleware self-skips when a
+// session cookie is present — signed-in users always see fresh data.
+app.use("/api/resources", publicCache(120), resourcesRouter);
 app.use("/api/grievances", grievancesRouter);
 app.use("/api/pragyaan", pragyaanRouter);
 app.use("/api/student-suggestions", studentSuggestionsRouter);
 app.use("/api/mentorship", mentorshipRouter);
 app.use("/api/articleship-matches", articleshipMatchesRouter);
-app.use("/api/scholarships", scholarshipsRouter);
+app.use("/api/scholarships", publicCache(300), scholarshipsRouter);
 app.use("/api/my-speaker-events", speakerEventsRouter);
 app.use("/api/admin", adminRouter);
 
@@ -223,6 +242,17 @@ const server = app.listen(port, bindHost, () => {
   // eslint-disable-next-line no-console
   console.log(`API listening on http://${bindHost}:${port}`);
 });
+
+// Request-level timeout. Node's default is 0 (no timeout), so a single
+// slow query can hold a DB pool slot forever and cascade into a fleet-wide
+// slowdown. 30s is well above any legitimate request (uploads are chunked
+// by the client) but shorter than the pool's connection idle timeout, so
+// nothing can starve the pool. keepAliveTimeout is also bumped past the
+// Fly proxy default (60s) to avoid harmless-but-noisy 502s on idle keepalive.
+server.requestTimeout   = 30_000;
+server.headersTimeout   = 35_000;
+server.keepAliveTimeout = 65_000;
+
 attachEventChatSocket(server);
 
 // Approval-stage escalation: chairperson gets pinged when a stage stays

@@ -10,12 +10,19 @@ primary_region = 'sin'
 [http_service]
   internal_port = 4000
   force_https = true
+  # Keep at least one machine warm — kills the ~2s cold-start on the first
+  # request after idle. Auto-start still spins up additional machines on
+  # burst load; auto-stop retires them when the burst clears.
   auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ['app']
 
 [[vm]]
-  memory = '512mb'
-  cpus = 1
-  memory_mb = 512
+  # Bumped from 512mb/1cpu — the previous size left no headroom for a
+  # concurrent burst of JSON parses + DB pool queries. 1GB / 2 shared vCPUs
+  # gives Node room to breathe during 25th-midnight surges + large admin
+  # PDF uploads without OOM restarts.
+  memory = '1gb'
+  cpus = 2
+  memory_mb = 1024
