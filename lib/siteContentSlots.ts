@@ -508,7 +508,56 @@ export const SITE_SLOTS = {
       { key: "job_subtitle",        label: "Subtitle when ?type=job",         kind: "text" },
       { key: "articleship_title",   label: "Title when ?type=articleship",    kind: "text" },
       { key: "articleship_subtitle", label: "Subtitle when ?type=articleship", kind: "text" },
+      { key: "assignment_title",    label: "Title when ?type=assignment",     kind: "text" },
+      { key: "assignment_subtitle", label: "Subtitle when ?type=assignment",  kind: "text" },
       { key: "notice",              label: "Disclaimer notice at top",        kind: "markdown" },
+      { key: "subscribe_banner",    label: "\"Subscribe to alerts\" banner copy", kind: "markdown", hint: "One-liner that appears above the postings list — encourages viewers to subscribe." },
+    ],
+  },
+  job_alerts_subscribe: {
+    label: "Job Alerts — Subscribe page",
+    page:  "Job Alerts",
+    fields: [
+      { key: "title",       label: "Page title",             kind: "text" },
+      { key: "subtitle",    label: "Page subtitle",          kind: "text" },
+      { key: "how_it_works", label: "\"How it works\" block", kind: "markdown", hint: "Short explainer under the subscribe form — supports markdown." },
+      { key: "faq",         label: "FAQ block",              kind: "markdown", hint: "Q&A rendered under the form. One H3 per question." },
+    ],
+  },
+  job_alerts_confirm: {
+    label: "Job Alerts — Confirmation landing",
+    page:  "Job Alerts",
+    fields: [
+      { key: "success_title", label: "Title on success", kind: "text" },
+      { key: "success_body",  label: "Body on success",  kind: "markdown" },
+      { key: "error_title",   label: "Title on expired / invalid token", kind: "text" },
+      { key: "error_body",    label: "Body on expired / invalid token",  kind: "markdown" },
+    ],
+  },
+  job_alerts_manage: {
+    label: "Job Alerts — Preference centre",
+    page:  "Job Alerts",
+    fields: [
+      { key: "title",    label: "Page title",    kind: "text" },
+      { key: "subtitle", label: "Page subtitle", kind: "text" },
+      { key: "empty",    label: "Message when the user has no subs", kind: "markdown" },
+    ],
+  },
+  job_apply_modal: {
+    label: "Jobs — Apply modal",
+    page:  "Job Vacancies",
+    fields: [
+      { key: "heading",    label: "Modal heading",                kind: "text" },
+      { key: "disclaimer", label: "Disclaimer under the form",    kind: "markdown", hint: "Reminder about resume snapshot, contact details, etc." },
+      { key: "no_resume",  label: "Copy shown when the user has no resume yet", kind: "markdown" },
+    ],
+  },
+  job_apply_success: {
+    label: "Jobs — Application received screen",
+    page:  "Job Vacancies",
+    fields: [
+      { key: "title", label: "Title",  kind: "text" },
+      { key: "body",  label: "Body",   kind: "markdown" },
     ],
   },
   // ── Track grievance ────────────────────────────────────────

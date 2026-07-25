@@ -39,6 +39,7 @@ import { pragyaanAdminRouter } from "./pragyaan.js";
 import { roomsAdminRouter } from "./rooms.js";
 import { bookingsAdminRouter } from "./bookings.js";
 import { readingRoomAdminRouter } from "./readingRoom.js";
+import { insightsAdminRouter } from "./insights.js";
 import { cabfAdminRouter } from "./cabf.js";
 import { paymentsAdminRouter } from "./payments.js";
 import { icaiDirectoryAdminRouter } from "./icaiDirectory.js";
@@ -46,6 +47,8 @@ import {
   studentSuggestionsAdminRouter,
   studentSuggestionTopicsAdminRouter,
 } from "./studentSuggestions.js";
+import { jobCategoriesAdminRouter } from "./jobCategories.js";
+import { jobSubscribersAdminRouter } from "./jobSubscribers.js";
 
 export const adminRouter = Router();
 
@@ -113,8 +116,11 @@ adminRouter.use("/pragyaan", pragyaanAdminRouter);
 adminRouter.use("/rooms", roomsAdminRouter);
 adminRouter.use("/bookings", bookingsAdminRouter);
 adminRouter.use("/reading-room", readingRoomAdminRouter);
+adminRouter.use("/insights", insightsAdminRouter);
 adminRouter.use("/cabf", cabfAdminRouter);
 adminRouter.use("/payments", paymentsAdminRouter);
 adminRouter.use("/icai-directory", icaiDirectoryAdminRouter);
 adminRouter.use("/student-suggestions", studentSuggestionsAdminRouter);
 adminRouter.use("/student-suggestion-topics", studentSuggestionTopicsAdminRouter);
+adminRouter.use("/job-categories", jobCategoriesAdminRouter);
+adminRouter.use("/job-subscribers", jobSubscribersAdminRouter);

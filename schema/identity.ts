@@ -45,6 +45,10 @@ export const users = pgTable("users", {
   status:        userStatusEnum("status").notNull().default("active"),
   locale:        localeEnum("locale").notNull().default("en"),
   avatar_id:     uuid("avatar_id").references((): AnyPgColumn => files.id, { onDelete: "set null" }),
+  // Applicant resume — populated when the user uploads a PDF from their
+  // profile. Every job application snapshots this ID at apply time so
+  // later profile edits don't retroactively change what an employer saw.
+  resume_file_id: uuid("resume_file_id").references((): AnyPgColumn => files.id, { onDelete: "set null" }),
   branch_id:     uuid("branch_id").references(() => branches.id),
   last_login_at: timestamp("last_login_at", { withTimezone: true }),
   notify_email:  boolean("notify_email").notNull().default(true),

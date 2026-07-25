@@ -36,4 +36,5 @@ export * from "./grievances";
 export * from "./icaiDirectory";
 export * from "./pragyaan";
 export * from "./studentSuggestions";
+export * from "./jobsExtended";
 export * from "./relations";

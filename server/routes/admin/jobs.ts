@@ -1,9 +1,12 @@
 import { Router } from "express";
 import { and, asc, desc, eq, ilike, isNull, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
-import { jobPostings, firms, employers, users } from "../../../schema/index.js";
+import {
+  jobPostings, firms, employers, users, jobCategories,
+} from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { dispatchJobAlerts } from "../../lib/jobAlerts.js";
 
 export const jobsAdminRouter = Router();
 
@@ -86,7 +89,10 @@ jobsAdminRouter.get("/_meta/lookups", async (_req, res, next) => {
     const es = await db
       .select({ id: employers.id, name: employers.company_name })
       .from(employers).where(isNull(employers.deleted_at)).orderBy(asc(employers.company_name));
-    res.json({ firms: fs, employers: es, fee_paise: FEE_PAISE });
+    const cats = await db
+      .select({ id: jobCategories.id, name: jobCategories.name, code: jobCategories.code, active: jobCategories.active })
+      .from(jobCategories).orderBy(asc(jobCategories.sort_order), asc(jobCategories.name));
+    res.json({ firms: fs, employers: es, categories: cats, fee_paise: FEE_PAISE });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -122,6 +128,7 @@ jobsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
     const location = trim(req.body.location) || null;
     const firm_id = trim(req.body.firm_id) || null;
     const employer_id = trim(req.body.employer_id) || null;
+    const category_id = trim(req.body.category_id) || null;
     const expires_at = parseOptDate(req.body.expires_at, "Expiry date");
 
     const [row] = await db
@@ -133,6 +140,7 @@ jobsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
         poster_user_id: req.user!.id,
         firm_id,
         employer_id,
+        category_id,
         seat_count,
         experience_required,
         location,
@@ -144,6 +152,9 @@ jobsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
         status: "active",
       })
       .returning();
+    // Fan out subscriber alerts. Only fires if category_id is set — a
+    // posting without a category has nobody to notify.
+    await dispatchJobAlerts(row.id);
     res.status(201).json(row);
   } catch (err) { handleApiError(err, res, next); }
 });
@@ -168,10 +179,17 @@ jobsAdminRouter.patch("/:id", async (req, res, next) => {
     if (req.body.location !== undefined) patch.location = trim(req.body.location) || null;
     if (req.body.firm_id !== undefined) patch.firm_id = trim(req.body.firm_id) || null;
     if (req.body.employer_id !== undefined) patch.employer_id = trim(req.body.employer_id) || null;
+    if (req.body.category_id !== undefined) patch.category_id = trim(req.body.category_id) || null;
     if (req.body.status !== undefined && POSTING_STATUSES.includes(req.body.status)) patch.status = req.body.status;
     if (req.body.expires_at !== undefined) patch.expires_at = parseOptDate(req.body.expires_at, "Expiry date");
 
     const [row] = await db.update(jobPostings).set(patch).where(eq(jobPostings.id, id)).returning();
+    // If this PATCH moved a posting from a non-active status to active,
+    // fire subscriber alerts. Same behaviour as POST above so admin edits
+    // don't silently skip the notification for a re-published posting.
+    if (existing.status !== "active" && row.status === "active") {
+      await dispatchJobAlerts(row.id);
+    }
     res.json(row);
   } catch (err) { handleApiError(err, res, next); }
 });
@@ -186,6 +204,9 @@ jobsAdminRouter.post("/:id/activate", async (req, res, next) => {
     if (existing.status === "closed") throw new ApiError(400, "Closed postings cannot be reactivated");
     const [row] = await db.update(jobPostings)
       .set({ status: "active", updated_at: new Date() }).where(eq(jobPostings.id, id)).returning();
+    if (existing.status !== "active") {
+      await dispatchJobAlerts(row.id);
+    }
     res.json(row);
   } catch (err) { handleApiError(err, res, next); }
 });

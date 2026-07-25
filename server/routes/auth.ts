@@ -171,6 +171,18 @@ authRouter.post("/login", loginLimiter, sameOrigin, async (req, res, next) => {
     const token = signSessionToken(user.id);
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions);
     const redirect = await getPostLoginPath(user.id, isNew);
+    // Mobile clients (Flutter / native) can't easily persist HttpOnly
+    // cookies — the "want_token" opt-in returns the same JWT in the body
+    // so they can store it in secure storage and send it as
+    // "Authorization: Bearer <token>" on subsequent requests. Web callers
+    // ignore this field and rely on the cookie as before.
+    const wantToken = req.query?.want_token === "1" || req.body?.want_token === true;
+    if (wantToken) {
+      return res.json({
+        ok: true, redirect, token,
+        user: { id: user.id, email: user.email, name: user.name, primary_role: user.primary_role },
+      });
+    }
     res.json({ ok: true, redirect });
   } catch (err) {
     next(err);

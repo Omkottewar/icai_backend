@@ -41,6 +41,11 @@ import { roomsRouter } from "./routes/rooms.js";
 import { readingRoomRouter } from "./routes/readingRoom.js";
 import { runNotificationHealthcheck } from "./lib/notifyHealthcheck.js";
 import { publicJobsRouter } from "./routes/jobs.js";
+import { jobAlertsRouter } from "./routes/jobAlerts.js";
+import { jobApplicationsRouter } from "./routes/jobApplications.js";
+import { savedJobsRouter } from "./routes/savedJobs.js";
+import { meRouter } from "./routes/me.js";
+import { startJobAlertsCron } from "./lib/jobAlertsCron.js";
 import { membersRouter } from "./routes/members.js";
 import { mockTestsRouter } from "./routes/mockTests.js";
 import { mockTestAttemptsRouter } from "./routes/mockTestAttempts.js";
@@ -142,6 +147,13 @@ app.use("/api/site", publicCache(300), siteRouter);
 app.use("/api/announcements", publicCache(60), announcementsRouter);
 app.use("/api/employer", employerRouter);
 app.use("/api/jobs", publicCache(60), publicJobsRouter);
+// Job alerts: subscription lifecycle + confirm/unsub via signed tokens.
+// The publicCache wrapper self-skips on auth cookies, so /me + /subscribe
+// stay live while the /categories listing gets edge-cached briefly.
+app.use("/api/job-alerts", publicCache(60), jobAlertsRouter);
+app.use("/api/job-applications", jobApplicationsRouter);
+app.use("/api/saved-jobs", savedJobsRouter);
+app.use("/api/me", meRouter);
 app.use("/api/members", membersRouter);
 // Mock tests: public listings get cached (SWR bypasses on auth cookie so
 // signed-in members always see fresh state). Attempt lifecycle mounts at
@@ -263,6 +275,11 @@ startEscalationCron();
 // newly published events/announcements/etc. become answerable without a
 // manual `npm run pragyaan:ingest`. See lib/pragyaan/scheduler.ts.
 startPragyaanIngestCron();
+
+// Job alerts digests — 15-minute tick that fires at 07:00 IST daily and
+// Monday for weekly digests. Instant alerts do NOT go through this — they
+// fire inline from routes/employer.ts + routes/admin/jobs.ts.
+startJobAlertsCron();
 
 // Boot-time notification system sanity check — confirms every template
 // key referenced in code exists + is enabled in DB, and flags missing

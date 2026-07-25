@@ -8,7 +8,7 @@ export type EmployerRequest = AuthedRequest & {
   employer?: {
     id: string;
     company_name: string;
-    role: "owner" | "poster";   // user's role on this employer
+    role: "owner" | "poster" | "viewer";   // user's role on this employer
   };
 };
 

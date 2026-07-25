@@ -36,6 +36,10 @@ export const jobPostings = pgTable("job_postings", {
   poster_user_id:      uuid("poster_user_id").notNull().references(() => users.id),
   employer_id:         uuid("employer_id").references(() => employers.id, { onDelete: "set null" }),  // Fix #5
   firm_id:             uuid("firm_id").references(() => firms.id),   // for CA firm assignments
+  // Job category — drives subscription matching. Nullable to preserve
+  // existing rows that predate the taxonomy; new postings should set it.
+  // FK declared via inline SQL to break the circular dep with jobsExtended.ts.
+  category_id:         uuid("category_id"),
   seat_count:          integer("seat_count").notNull().default(1),
   experience_required: text("experience_required"),
   location:            text("location"),
