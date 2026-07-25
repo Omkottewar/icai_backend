@@ -14,7 +14,7 @@
 --     regardless of room.
 
 -- ─── Rooms catalogue ──────────────────────────────────────────────────────
-CREATE TABLE reading_rooms (
+CREATE TABLE IF NOT EXISTS reading_rooms (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name        text NOT NULL,
   description text,
@@ -26,10 +26,11 @@ CREATE TABLE reading_rooms (
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX reading_rooms_active_idx ON reading_rooms (active, sort_order);
+CREATE INDEX IF NOT EXISTS reading_rooms_active_idx ON reading_rooms (active, sort_order);
 
 -- Seed a default room using the existing site_settings capacity so the
 -- module keeps working while admin fleshes out the real room list.
+-- Guarded so re-runs don't insert a second default row.
 INSERT INTO reading_rooms (name, description, location, capacity, sort_order)
 SELECT
   'Main Reading Room',
@@ -37,13 +38,14 @@ SELECT
   'ICAI Bhawan, Dhantoli · Ground floor',
   COALESCE(NULLIF(ss.value, '')::int, 40),
   1
-FROM (SELECT value FROM site_settings WHERE key = 'reading_room_capacity' UNION ALL SELECT '40' LIMIT 1) ss;
+FROM (SELECT value FROM site_settings WHERE key = 'reading_room_capacity' UNION ALL SELECT '40' LIMIT 1) ss
+WHERE NOT EXISTS (SELECT 1 FROM reading_rooms);
 
 -- ─── room_id on bookings ─────────────────────────────────────────────────
 -- Nullable during the backfill, then flipped to NOT NULL. Any existing
 -- bookings (from 0090's launch) get pointed at the seeded default room.
 ALTER TABLE reading_room_bookings
-  ADD COLUMN room_id uuid REFERENCES reading_rooms(id) ON DELETE RESTRICT;
+  ADD COLUMN IF NOT EXISTS room_id uuid REFERENCES reading_rooms(id) ON DELETE RESTRICT;
 
 UPDATE reading_room_bookings
 SET room_id = (SELECT id FROM reading_rooms ORDER BY sort_order, created_at LIMIT 1)
@@ -52,6 +54,6 @@ WHERE room_id IS NULL;
 ALTER TABLE reading_room_bookings ALTER COLUMN room_id SET NOT NULL;
 
 -- Per-room monthly index — used for capacity checks.
-CREATE INDEX reading_room_bookings_room_month_idx
+CREATE INDEX IF NOT EXISTS reading_room_bookings_room_month_idx
   ON reading_room_bookings (room_id, year, month)
   WHERE cancelled_at IS NULL;

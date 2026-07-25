@@ -18,7 +18,7 @@
 -- student — a refund flips status to 'refunded' but the row stays as an
 -- audit trail; the student can re-pay to get a new row only after admin
 -- clears the old one (via DELETE, done from the admin refund action).
-CREATE TABLE reading_room_deposits (
+CREATE TABLE IF NOT EXISTS reading_room_deposits (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id       uuid NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
   amount_paise  integer NOT NULL DEFAULT 50000,
@@ -35,14 +35,14 @@ CREATE TABLE reading_room_deposits (
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX reading_room_deposits_status_idx
+CREATE INDEX IF NOT EXISTS reading_room_deposits_status_idx
   ON reading_room_deposits (status, created_at DESC);
 
 -- ─── Bookings ──────────────────────────────────────────────────────────────
 -- One row per student per month. Cancelled bookings free the seat and don't
 -- count against capacity — the partial unique index excludes them so a
 -- student who cancels can re-book if space opens up.
-CREATE TABLE reading_room_bookings (
+CREATE TABLE IF NOT EXISTS reading_room_bookings (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id       uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   year          integer NOT NULL,
@@ -51,11 +51,11 @@ CREATE TABLE reading_room_bookings (
   created_at    timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX reading_room_bookings_active_uq
+CREATE UNIQUE INDEX IF NOT EXISTS reading_room_bookings_active_uq
   ON reading_room_bookings (user_id, year, month)
   WHERE cancelled_at IS NULL;
 
-CREATE INDEX reading_room_bookings_month_idx
+CREATE INDEX IF NOT EXISTS reading_room_bookings_month_idx
   ON reading_room_bookings (year, month) WHERE cancelled_at IS NULL;
 
 -- ─── Config ────────────────────────────────────────────────────────────────
