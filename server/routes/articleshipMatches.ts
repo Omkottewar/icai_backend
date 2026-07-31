@@ -195,6 +195,9 @@ articleshipMatchesRouter.post("/upload-cv", sameOrigin, requireUser, cvUploadLim
 articleshipMatchesRouter.get("/my", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const user = req.user!;
+    // Left-join `files` so callers get the attached CV's filename/size and
+    // can render "existing CV: résumé.pdf" without a second lookup. Prefill
+    // in RequestArticleshipModal depends on this.
     const rows = await db.select({
       id:                        articleshipMatches.id,
       seminar_event_id:          articleshipMatches.seminar_event_id,
@@ -203,6 +206,8 @@ articleshipMatchesRouter.get("/my", requireUser, async (req: AuthedRequest, res,
       preferred_firm_size:       articleshipMatches.preferred_firm_size,
       expected_stipend_paise:    articleshipMatches.expected_stipend_paise,
       cv_file_id:                articleshipMatches.cv_file_id,
+      cv_file_name:              files.name,
+      cv_file_size:              files.size_bytes,
       status:                    articleshipMatches.status,
       notes:                     articleshipMatches.notes,
       recommended_firm_ids:      articleshipMatches.recommended_firm_ids,
@@ -211,6 +216,7 @@ articleshipMatchesRouter.get("/my", requireUser, async (req: AuthedRequest, res,
       updated_at:                articleshipMatches.updated_at,
     })
       .from(articleshipMatches)
+      .leftJoin(files, eq(files.id, articleshipMatches.cv_file_id))
       .where(eq(articleshipMatches.student_user_id, user.id))
       .orderBy(desc(articleshipMatches.created_at))
       .limit(20);
