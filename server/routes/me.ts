@@ -8,10 +8,10 @@
 // (PDF-only, smaller cap, private-ish).
 
 import { Router } from "express";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db } from "../../db/client.js";
-import { files, users } from "../../schema/index.js";
+import { files, users, mentorshipRequests } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { sameOrigin } from "../middleware/sameOrigin.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
@@ -120,5 +120,91 @@ meRouter.delete("/resume", sameOrigin, async (req: AuthedRequest, res, next) => 
     await db.update(users).set({ resume_file_id: null, updated_at: new Date() })
       .where(eq(users.id, req.user!.id));
     res.json({ ok: true });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── GET /api/me/mentor-availability ─────────────────────────────────────
+// Returns the caller's current willing_to_mentor flag. Cheap read used by
+// the member-dashboard "Become a mentor" toggle to render the initial state.
+meRouter.get("/mentor-availability", async (req: AuthedRequest, res, next) => {
+  try {
+    const [me] = await db.select({
+      willing: users.willing_to_mentor,
+      role:    users.primary_role,
+    }).from(users).where(eq(users.id, req.user!.id)).limit(1);
+    res.json({
+      willing:    !!me?.willing,
+      // Eligible = member role. Students / employers can't be mentors —
+      // the frontend uses this to hide the toggle for non-members.
+      eligible:   me?.role === "member",
+    });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/me/mentor-availability ────────────────────────────────────
+// Members flip themselves in / out of the mentor pool. Non-members get a
+// 403 — the pool is member-only.
+meRouter.post("/mentor-availability", sameOrigin, async (req: AuthedRequest, res, next) => {
+  try {
+    const user = req.user!;
+    if (user.primary_role !== "member") {
+      throw new ApiError(403, "Only members can be part of the mentor pool");
+    }
+    const willing = req.body?.willing === true;
+    await db.update(users)
+      .set({ willing_to_mentor: willing, updated_at: new Date() })
+      .where(eq(users.id, user.id));
+    res.json({ willing });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── GET /api/me/my-mentees ──────────────────────────────────────────────
+// A member's active mentorship assignments — used by the "My mentees" card
+// on the member dashboard. Returns matched + scheduled + completed rows
+// (dropped: pending, since those aren't assigned yet, and cancelled which
+// don't need to clutter the mentor's inbox).
+meRouter.get("/my-mentees", async (req: AuthedRequest, res, next) => {
+  try {
+    const user = req.user!;
+    // Fetch mentorship rows first, then a single bulk lookup for student
+    // details — cheaper than a per-row join across mentorship + users.
+    const rows = await db.select({
+      id: mentorshipRequests.id,
+      student_user_id: mentorshipRequests.student_user_id,
+      topic: mentorshipRequests.topic,
+      preferred_window: mentorshipRequests.preferred_window,
+      status: mentorshipRequests.status,
+      matched_at: mentorshipRequests.matched_at,
+      scheduled_at: mentorshipRequests.scheduled_at,
+      completed_at: mentorshipRequests.completed_at,
+    })
+      .from(mentorshipRequests)
+      .where(and(
+        eq(mentorshipRequests.mentor_user_id, user.id),
+        // We include completed rows so the mentor can see their history;
+        // cancelled + pending get filtered out.
+        inArray(mentorshipRequests.status, ["matched", "scheduled", "completed"]),
+      ))
+      .orderBy(desc(mentorshipRequests.matched_at))
+      .limit(50);
+
+    const studentIds = Array.from(new Set(rows.map((r) => r.student_user_id).filter(Boolean)));
+    let studentMap = new Map<string, { id: string; name: string; email: string; phone: string | null }>();
+    if (studentIds.length > 0) {
+      const students = await db.select({
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        phone: users.phone,
+      }).from(users).where(inArray(users.id, studentIds));
+      studentMap = new Map(students.map((s) => [s.id, s]));
+    }
+
+    const enriched = rows.map((r) => ({
+      ...r,
+      student: studentMap.get(r.student_user_id) ?? null,
+    }));
+
+    res.json({ items: enriched });
   } catch (err) { handleApiError(err, res, next); }
 });

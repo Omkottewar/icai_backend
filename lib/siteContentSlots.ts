@@ -460,13 +460,6 @@ export const SITE_SLOTS = {
       { key: "all_committees_btn",      label: 'Back button label (e.g. "All committees")',   kind: "text" },
     ],
   },
-  events_committee_fallback: {
-    label: "Events — Committee detail fallback image",
-    page:  "Events",
-    fields: [
-      { key: "image_url", label: "Fallback committee photo (shown when a committee has no admin-supplied image)", kind: "image" },
-    ],
-  },
   // ── Announcements page ──────────────────────────────────────
   announcements_page_header: {
     label: "Announcements — Page header + empty state",

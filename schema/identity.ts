@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, boolean, timestamp, date, integer, jsonb, bigint, AnyPgColumn,
+  pgTable, uuid, text, boolean, timestamp, date, integer, jsonb, bigint, numeric, AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import {
   userRoleEnum, userStatusEnum, localeEnum, genderEnum,
@@ -54,6 +54,11 @@ export const users = pgTable("users", {
   notify_email:  boolean("notify_email").notNull().default(true),
   notify_sms:    boolean("notify_sms").notNull().default(false),
   notify_push:   boolean("notify_push").notNull().default(true),
+  // Members opt themselves into the WICASA mentor pool by flipping this
+  // flag from their dashboard. WICASA's mentor picker filters on it. No
+  // effect for non-member roles — the toggle is member-gated at the API.
+  // See migration 0097.
+  willing_to_mentor: boolean("willing_to_mentor").notNull().default(false),
   // Running total of bytes this user has uploaded into the event chat.
   // Kept on the user row (not summed from `files`) so the per-upload
   // quota check stays O(1).
@@ -124,6 +129,10 @@ export const memberProfiles = pgTable("member_profiles", {
   city:              text("city"),
   pincode:           text("pincode"),
   kym_data:          jsonb("kym_data").notNull().default({}),  // KYM compliance — restored Fix #13
+  // Self-reported CPE credits (migration 0099). Display-only — the branch
+  // doesn't track a ledger anymore (see 0087). Members type in their current
+  // total from the ICAI portal; we just showcase it on the dashboard.
+  cpe_credits:       numeric("cpe_credits", { precision: 5, scale: 1 }),
   deleted_at:        timestamp("deleted_at", { withTimezone: true }),
 });
 

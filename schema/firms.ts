@@ -1,5 +1,5 @@
 import {
-  pgTable, uuid, text, integer, boolean, timestamp,
+  pgTable, uuid, text, integer, bigint, boolean, timestamp,
 } from "drizzle-orm/pg-core";
 import { postingTypeEnum, postingStatusEnum } from "./enums";
 import { users, employers } from "./identity";
@@ -43,6 +43,17 @@ export const jobPostings = pgTable("job_postings", {
   seat_count:          integer("seat_count").notNull().default(1),
   experience_required: text("experience_required"),
   location:            text("location"),
+  // Salary / CTC / stipend range in paise. Both ends nullable so an
+  // employer can list "up to ₹8L" or "from ₹12L" or omit entirely. The
+  // period column separates monthly stipends (articleship), annual CTC
+  // (jobs), and per-engagement fees (assignments). See migration 0094.
+  salary_paise_min:    bigint("salary_paise_min", { mode: "number" }),
+  salary_paise_max:    bigint("salary_paise_max", { mode: "number" }),
+  salary_period:       text("salary_period").notNull().default("monthly"),
+  // Simple view counter incremented on GET /api/jobs/:id. Best-effort —
+  // a dropped update doesn't matter for the ratio the employer cares
+  // about (views vs. applications).
+  view_count:          integer("view_count").notNull().default(0),
   fee_paise:           integer("fee_paise").notNull().default(0),    // posting fee paid by employer
   payment_id:          uuid("payment_id").references(() => payments.id, { onDelete: "set null" }),  // Fix #2
   status:              postingStatusEnum("status").notNull().default("draft"),

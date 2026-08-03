@@ -25,10 +25,10 @@
 
 import { Router } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db } from "../../db/client.js";
-import { articleshipMatches, events, files } from "../../schema/index.js";
+import { articleshipMatches, events, files, firms } from "../../schema/index.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { sameOrigin } from "../middleware/sameOrigin.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
@@ -90,7 +90,10 @@ articleshipMatchesRouter.post("/", sameOrigin, requireUser, submissionLimiter, a
     if (preferred_specialisations.length === 0) {
       throw new ApiError(400, "Pick at least one specialisation of interest");
     }
-    const preferred_location = trim(req.body?.preferred_location) || null;
+    // Location defaults to "Nagpur" — this is a Nagpur-branch portal and
+    // firms are all Nagpur-adjacent. We keep the column so historical rows
+    // stay intact, but new submissions no longer collect it from the form.
+    const preferred_location = trim(req.body?.preferred_location) || "Nagpur";
     const preferred_firm_size = trim(req.body?.preferred_firm_size) || null;
     if (preferred_firm_size && !FIRM_SIZES.has(preferred_firm_size)) {
       throw new ApiError(400, "Invalid firm size");
@@ -212,6 +215,8 @@ articleshipMatchesRouter.get("/my", requireUser, async (req: AuthedRequest, res,
       notes:                     articleshipMatches.notes,
       recommended_firm_ids:      articleshipMatches.recommended_firm_ids,
       placed_firm_id:            articleshipMatches.placed_firm_id,
+      student_confirmed_at:      articleshipMatches.student_confirmed_at,
+      student_declined_at:       articleshipMatches.student_declined_at,
       created_at:                articleshipMatches.created_at,
       updated_at:                articleshipMatches.updated_at,
     })
@@ -220,7 +225,34 @@ articleshipMatchesRouter.get("/my", requireUser, async (req: AuthedRequest, res,
       .where(eq(articleshipMatches.student_user_id, user.id))
       .orderBy(desc(articleshipMatches.created_at))
       .limit(20);
-    res.json({ rows });
+
+    // Enrich each row with the shortlisted firms' details (name / city /
+    // phone / email) so the dashboard can render a proper contact list
+    // for the student instead of just a count. One extra query total,
+    // not one per row — collect all firm IDs and fetch in bulk.
+    const allFirmIds = Array.from(new Set(
+      rows.flatMap((r) => (Array.isArray(r.recommended_firm_ids) ? r.recommended_firm_ids : []))
+    ));
+    let firmMap = new Map<string, { id: string; name: string; city: string | null; phone: string | null; email: string | null }>();
+    if (allFirmIds.length > 0) {
+      const firmRows = await db.select({
+        id: firms.id,
+        name: firms.name,
+        city: firms.city,
+        phone: firms.phone,
+        email: firms.email,
+      }).from(firms).where(inArray(firms.id, allFirmIds));
+      firmMap = new Map(firmRows.map((f) => [f.id, f]));
+    }
+
+    const enriched = rows.map((r) => ({
+      ...r,
+      recommended_firms: (r.recommended_firm_ids ?? [])
+        .map((id) => firmMap.get(id))
+        .filter((f): f is NonNullable<typeof f> => !!f),
+    }));
+
+    res.json({ rows: enriched });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -237,6 +269,81 @@ articleshipMatchesRouter.post("/:id/cancel", sameOrigin, requireUser, async (req
       ))
       .returning();
     if (!row) throw new ApiError(404, "Submission not found");
+    res.json({ item: row });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/articleship-matches/:id/confirm-placement ──────────────────
+// Student marks that they've accepted one of the recommended firms. Records
+// which firm and stamps `placed_firm_id` + status='placed'. Distinct from
+// admin-side placement — this is the student closing the loop themselves.
+// Only valid from status='matched' and only for firms in the shortlist.
+articleshipMatchesRouter.post("/:id/confirm-placement", sameOrigin, requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const user = req.user!;
+    const id = need(trim(req.params.id), "Submission ID");
+    const placed_firm_id = need(trim(req.body?.firm_id), "Firm ID");
+
+    // Verify the row is theirs AND the firm was actually in the shortlist —
+    // stops a student from marking themselves placed at an arbitrary firm.
+    const [row] = await db.select({
+      id: articleshipMatches.id,
+      status: articleshipMatches.status,
+      recommended_firm_ids: articleshipMatches.recommended_firm_ids,
+    })
+      .from(articleshipMatches)
+      .where(and(
+        eq(articleshipMatches.id, id),
+        eq(articleshipMatches.student_user_id, user.id),
+      ))
+      .limit(1);
+    if (!row) throw new ApiError(404, "Submission not found");
+    if (row.status !== "matched") throw new ApiError(400, "You can only confirm placement after WICASA has shortlisted firms");
+    const shortlist = row.recommended_firm_ids ?? [];
+    if (!shortlist.includes(placed_firm_id)) {
+      throw new ApiError(400, "That firm isn't in your shortlist");
+    }
+
+    const [updated] = await db.update(articleshipMatches)
+      .set({
+        status: "placed",
+        placed_firm_id,
+        student_confirmed_at: new Date(),
+        student_declined_at: null,
+        updated_at: new Date(),
+      })
+      .where(eq(articleshipMatches.id, id))
+      .returning();
+
+    res.json({ item: updated });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/articleship-matches/:id/decline-shortlist ──────────────────
+// Student marks that none of the recommended firms worked out. Keeps status
+// at 'matched' (the shortlist stays visible) but sets student_declined_at
+// so WICASA can see the loop closed and re-open the search if needed. A
+// separate cancel endpoint still exists for full withdrawals.
+articleshipMatchesRouter.post("/:id/decline-shortlist", sameOrigin, requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const user = req.user!;
+    const id = need(trim(req.params.id), "Submission ID");
+    const notes = trim(req.body?.notes) || null;
+
+    const [row] = await db.update(articleshipMatches)
+      .set({
+        student_declined_at: new Date(),
+        student_confirmed_at: null,
+        notes,
+        updated_at: new Date(),
+      })
+      .where(and(
+        eq(articleshipMatches.id, id),
+        eq(articleshipMatches.student_user_id, user.id),
+        eq(articleshipMatches.status, "matched"),
+      ))
+      .returning();
+    if (!row) throw new ApiError(404, "Submission not found or not in matched state");
     res.json({ item: row });
   } catch (err) { handleApiError(err, res, next); }
 });

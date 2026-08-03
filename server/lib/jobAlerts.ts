@@ -103,7 +103,11 @@ export async function dispatchJobAlerts(posting_id: string): Promise<void> {
     if (subs.length === 0) return;
 
     const base = publicBaseUrl();
-    const posting_url = `${base}/job-vacancies?type=${encodeURIComponent(posting.type)}#p-${posting.id}`;
+    // Deep-link to the dedicated detail page so email + push click-throughs
+    // land somewhere shareable, indexable, and shows related postings.
+    // /job-vacancies?type=x#p-<id> was fine when there was no detail page —
+    // now that /jobs/<id> exists, use it.
+    const posting_url = `${base}/jobs/${encodeURIComponent(posting.id)}`;
     const org_name = orgLabel(posting);
     const location_line = posting.location ? `\n  ${posting.location}` : "";
     const experience_line = posting.experience_required ? `\n  ${posting.experience_required}` : "";

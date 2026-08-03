@@ -82,15 +82,25 @@ jobAlertsRouter.get("/me", requireUser, async (req: AuthedRequest, res, next) =>
 // Confirmation email is sent if any sub is still unconfirmed after the write.
 jobAlertsRouter.post("/subscribe", requireUser, sameOrigin, async (req: AuthedRequest, res, next) => {
   try {
+    // Job alerts are for anyone with a real account except employers (who
+    // post the jobs, alerting them about their own listings is noise) and
+    // external guest speakers (one-off event attendees, not a career
+    // audience). Members, students, admins, chairman, MCM, staff and
+    // employees can all subscribe — an admin previewing the feature, a
+    // chairman who still practices, and staff filling in for cover all
+    // have legit reasons to receive alerts.
     const userRole = req.user!.primary_role;
-    if (userRole !== "member" && userRole !== "student") {
-      throw new ApiError(403, "Job alerts are for members and students");
+    if (userRole === "employer" || userRole === "guest") {
+      throw new ApiError(403, "Job alerts aren't available for this account type");
     }
 
     const category_ids: string[] = Array.isArray(req.body.category_ids) ? req.body.category_ids : [];
     const posting_types: string[] = Array.isArray(req.body.posting_types) ? req.body.posting_types : [];
     const frequency = FREQUENCIES.has(req.body.frequency) ? req.body.frequency : "instant";
-    const filter_location = trim(req.body.filter_location) || null;
+    // Location filter is deliberately not accepted from the client — every
+    // posting is Nagpur-branch scoped, so filtering by city adds no value.
+    // Column is kept on the table for schema stability; always stored NULL.
+    const filter_location = null;
     const filter_experience = trim(req.body.filter_experience) || null;
 
     if (category_ids.length === 0) throw new ApiError(400, "Pick at least one category");

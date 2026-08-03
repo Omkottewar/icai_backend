@@ -193,6 +193,7 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
           address: memberProfiles.address,
           city: memberProfiles.city,
           pincode: memberProfiles.pincode,
+          cpe_credits: memberProfiles.cpe_credits,
           phone: users.phone,
         })
         .from(memberProfiles)
@@ -392,6 +393,7 @@ dashboardRouter.get("/", requireUser, async (req: AuthedRequest, res, next) => {
               city: profile.city,
               pincode: profile.pincode,
               areas_of_practice: profile.areas_of_practice,
+              cpe_credits: profile.cpe_credits,
               phone: profile.phone,
             }
           : null,

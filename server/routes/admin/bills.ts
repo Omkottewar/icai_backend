@@ -4,6 +4,7 @@ import { db } from "../../../db/client.js";
 import { bills, users, events, committees, vendors, expenseCategories } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { buildCsv, sendCsv } from "../../lib/csv.js";
 
 export const billsAdminRouter = Router();
 
@@ -76,6 +77,58 @@ billsAdminRouter.get("/", async (req, res, next) => {
       .where(and(...conds));
 
     res.json({ rows, total, page, pageSize });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── GET /api/admin/bills/export.csv ──────────────────────────────────────
+// Respects the status filter (matches the currently-active tab on the
+// admin page). Rupee amounts are converted from paise for readability.
+billsAdminRouter.get("/export.csv", async (req, res, next) => {
+  try {
+    const status = pickStatus(req.query.status);
+    const conds = [isNull(bills.deleted_at)] as any[];
+    if (status) conds.push(eq(bills.status, status));
+
+    const rows = await db.select({
+      bill_date:        bills.bill_date,
+      status:           bills.status,
+      vendor_name:      bills.vendor_name,
+      description:      bills.description,
+      amount_paise:     bills.amount_paise,
+      budget_paise:     bills.budget_paise,
+      bill_number:      bills.bill_number,
+      category_label:   expenseCategories.label,
+      committee_name:   committees.name,
+      event_title:      events.title,
+      submitted_at:     bills.submitted_at,
+      submitted_by:     users.name,
+      approved_at:      bills.approved_at,
+      paid_at:          bills.paid_at,
+      rejection_reason: bills.rejection_reason,
+    })
+      .from(bills)
+      .leftJoin(events, eq(events.id, bills.event_id))
+      .leftJoin(committees, eq(committees.id, bills.committee_id))
+      .leftJoin(users, eq(users.id, bills.submitted_by))
+      .leftJoin(expenseCategories, eq(expenseCategories.id, bills.category_id))
+      .where(and(...conds))
+      .orderBy(desc(bills.created_at))
+      .limit(20_000);
+
+    const csv = buildCsv(
+      ["Bill date", "Status", "Vendor", "Description", "Amount (₹)",
+       "Budget (₹)", "Bill number", "Category", "Committee", "Event",
+       "Submitted at", "Submitted by", "Approved at", "Paid at", "Rejection reason"],
+      rows,
+      (r) => [
+        r.bill_date, r.status, r.vendor_name, r.description,
+        r.amount_paise != null ? (Number(r.amount_paise) / 100).toFixed(2) : "",
+        r.budget_paise != null ? (Number(r.budget_paise) / 100).toFixed(2) : "",
+        r.bill_number, r.category_label, r.committee_name, r.event_title,
+        r.submitted_at, r.submitted_by, r.approved_at, r.paid_at, r.rejection_reason,
+      ],
+    );
+    sendCsv(res, `bills-${status || "all"}`, csv);
   } catch (err) { handleApiError(err, res, next); }
 });
 

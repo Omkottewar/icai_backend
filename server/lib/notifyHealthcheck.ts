@@ -26,6 +26,11 @@ export const REFERENCED_TEMPLATE_KEYS = [
   "checklist_submitted",
   "checklist_approved",
   "checklist_rejected",
+  // Articleship matching notification — seeded in migration 0096.
+  "articleship_match_recommended",
+  // Mentorship pairing notifications — seeded in migration 0097.
+  "mentorship_assigned_to_student",
+  "mentorship_assigned_as_mentor",
 ] as const;
 
 export async function runNotificationHealthcheck(): Promise<void> {

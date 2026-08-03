@@ -20,7 +20,8 @@ export const employerRouter = Router();
 employerRouter.use(requireUser, requireEmployer);
 
 // ─── GET /api/employer/me ─────────────────────────────────────────────────
-// Returns the employer the current user can act on, plus aggregate counts.
+// Returns the employer the current user can act on, plus aggregate counts
+// (postings + total views + application funnel across all postings).
 employerRouter.get("/me", async (req: EmployerRequest, res, next) => {
   try {
     const emp = req.employer!;
@@ -30,20 +31,77 @@ employerRouter.get("/me", async (req: EmployerRequest, res, next) => {
       .where(eq(employers.id, emp.id))
       .limit(1);
 
-    const counts = await db
+    // Posting counts + aggregate view count in one round-trip.
+    const [postingStats] = await db
       .select({
-        total: sql<number>`count(*)::int`,
+        total:  sql<number>`count(*)::int`,
         active: sql<number>`count(*) filter (where ${jobPostings.status} = 'active')::int`,
+        views:  sql<number>`coalesce(sum(${jobPostings.view_count}), 0)::int`,
       })
       .from(jobPostings)
       .where(and(eq(jobPostings.employer_id, emp.id), isNull(jobPostings.deleted_at)));
 
+    // Application funnel across all postings owned by this employer.
+    // Filter by status using count(*) filter (where ...) so we get one row
+    // regardless of whether any status bucket is empty — cleaner than a
+    // GROUP BY + client-side stitching.
+    const [funnel] = await db
+      .select({
+        applied:     sql<number>`count(*) filter (where ${jobApplications.status} = 'applied')::int`,
+        shortlisted: sql<number>`count(*) filter (where ${jobApplications.status} = 'shortlisted')::int`,
+        interview:   sql<number>`count(*) filter (where ${jobApplications.status} = 'interview')::int`,
+        offered:     sql<number>`count(*) filter (where ${jobApplications.status} = 'offered')::int`,
+        hired:       sql<number>`count(*) filter (where ${jobApplications.status} = 'hired')::int`,
+        rejected:    sql<number>`count(*) filter (where ${jobApplications.status} = 'rejected')::int`,
+        withdrawn:   sql<number>`count(*) filter (where ${jobApplications.status} = 'withdrawn')::int`,
+        total:       sql<number>`count(*)::int`,
+      })
+      .from(jobApplications)
+      .leftJoin(jobPostings, eq(jobPostings.id, jobApplications.posting_id))
+      .where(and(
+        eq(jobPostings.employer_id, emp.id),
+        isNull(jobPostings.deleted_at),
+      ));
+
     res.json({
       employer: fullRows[0],
       user_role: emp.role,
-      stats: counts[0] ?? { total: 0, active: 0 },
+      stats: {
+        total:  postingStats?.total  ?? 0,
+        active: postingStats?.active ?? 0,
+        views:  postingStats?.views  ?? 0,
+        funnel: funnel ?? { applied: 0, shortlisted: 0, interview: 0, offered: 0, hired: 0, rejected: 0, withdrawn: 0, total: 0 },
+      },
     });
   } catch (err) { next(err); }
+});
+
+// ─── GET /api/employer/postings/_analytics ────────────────────────────────
+// Per-posting view + application counts for the employer's list. Cheap
+// enough to compute in one query — LEFT JOIN + count(*) filter — so the
+// employer sees "how are my postings performing" without a per-row fetch.
+employerRouter.get("/postings/_analytics", async (req: EmployerRequest, res, next) => {
+  try {
+    const emp = req.employer!;
+    const rows = await db
+      .select({
+        posting_id:  jobPostings.id,
+        title:       jobPostings.title,
+        status:      jobPostings.status,
+        view_count:  jobPostings.view_count,
+        applied:     sql<number>`count(${jobApplications.id}) filter (where ${jobApplications.status} = 'applied')::int`,
+        shortlisted: sql<number>`count(${jobApplications.id}) filter (where ${jobApplications.status} = 'shortlisted')::int`,
+        interview:   sql<number>`count(${jobApplications.id}) filter (where ${jobApplications.status} = 'interview')::int`,
+        hired:       sql<number>`count(${jobApplications.id}) filter (where ${jobApplications.status} = 'hired')::int`,
+        total_apps:  sql<number>`count(${jobApplications.id})::int`,
+      })
+      .from(jobPostings)
+      .leftJoin(jobApplications, eq(jobApplications.posting_id, jobPostings.id))
+      .where(and(eq(jobPostings.employer_id, emp.id), isNull(jobPostings.deleted_at)))
+      .groupBy(jobPostings.id, jobPostings.title, jobPostings.status, jobPostings.view_count)
+      .orderBy(desc(jobPostings.created_at));
+    res.json({ items: rows });
+  } catch (err) { handleApiError(err, res, next); }
 });
 
 // ─── PATCH /api/employer/me ───────────────────────────────────────────────
@@ -85,9 +143,33 @@ function parsePostingBody(input: any) {
   const title       = need(trim(input.title), "Title");
   const description = need(trim(input.description), "Description");
   const seat_count  = Math.max(1, Math.min(50, Number(input.seat_count) || 1));
-  const location    = trim(input.location) || null;
+  // Location defaults to "Nagpur" — this is a Nagpur-branch portal and
+  // employers don't submit it from the form. Kept for schema stability and
+  // for the rare case where the admin CRUD overrides it explicitly.
+  const location    = trim(input.location) || "Nagpur";
   const experience_required = trim(input.experience_required) || null;
   const category_id = trim(input.category_id) || null;
+
+  // Salary range — accepted as rupees on the form for readability, then
+  // converted to paise. `null` if the employer omits either end.
+  const parseRupees = (v: any): number | null => {
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) throw new ApiError(400, "Salary must be a non-negative number");
+    return Math.round(n * 100);
+  };
+  const salary_paise_min = parseRupees(input.salary_rupees_min);
+  const salary_paise_max = parseRupees(input.salary_rupees_max);
+  if (salary_paise_min != null && salary_paise_max != null && salary_paise_min > salary_paise_max) {
+    throw new ApiError(400, "Salary minimum can't be higher than the maximum");
+  }
+  const VALID_PERIODS = new Set(["monthly", "annual", "per_engagement"]);
+  const salary_period_input = trim(input.salary_period);
+  // Sensible per-type default so the employer doesn't have to pick:
+  //   articleship → monthly stipend, job → annual CTC, assignment → per engagement.
+  const salary_period = VALID_PERIODS.has(salary_period_input)
+    ? salary_period_input
+    : (type === "articleship" ? "monthly" : type === "job" ? "annual" : "per_engagement");
 
   const expires_at_raw = trim(input.expires_at);
   let expires_at: Date | null = null;
@@ -97,7 +179,11 @@ function parsePostingBody(input: any) {
     if (d <= new Date()) throw new ApiError(400, "Expiry must be in the future");
     expires_at = d;
   }
-  return { type, title, description, seat_count, location, experience_required, expires_at, category_id };
+  return {
+    type, title, description, seat_count, location, experience_required,
+    expires_at, category_id,
+    salary_paise_min, salary_paise_max, salary_period,
+  };
 }
 
 // ─── GET /api/employer/postings ───────────────────────────────────────────

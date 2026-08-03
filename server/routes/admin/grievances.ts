@@ -6,7 +6,7 @@
 // All routes are gated by requireAdmin via the parent router.
 
 import { Router } from "express";
-import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
 import {
   grievances,
@@ -15,6 +15,7 @@ import {
 } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { buildCsv, sendCsv } from "../../lib/csv.js";
 
 export const grievancesAdminRouter = Router();
 export const grievanceRoutesAdminRouter = Router();
@@ -27,19 +28,37 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // ─── GET /api/admin/grievances ──────────────────────────────────────────────
 // Inbox listing. Filters: ?status=, ?subject=, ?ticket_no= (exact match used
 // by the "open in admin" deep-link from the routed admin email).
+// Shared filter builder for the list, count, and CSV export endpoints so
+// filters stay in sync. Supports status, subject, ticket_no, and free-
+// text search on name / email.
+function buildGrievanceFilters(query: Record<string, unknown>) {
+  const status = STATUSES.includes(query.status as Status) ? (query.status as Status) : null;
+  const subject = trim(query.subject) || null;
+  const ticket_no = trim(query.ticket_no) || null;
+  const q = trim(query.q);
+
+  const filters: any[] = [];
+  if (status)    filters.push(eq(grievances.status, status));
+  if (subject)   filters.push(eq(grievances.subject, subject));
+  if (ticket_no) filters.push(eq(grievances.ticket_no, ticket_no));
+  if (q) {
+    filters.push(or(
+      ilike(grievances.name, `%${q}%`),
+      ilike(grievances.email, `%${q}%`),
+      ilike(grievances.ticket_no, `%${q}%`),
+    )!);
+  }
+  return filters;
+}
+
 grievancesAdminRouter.get("/", async (req, res, next) => {
   try {
-    const status = STATUSES.includes(req.query.status as Status)
-      ? (req.query.status as Status)
-      : null;
-    const subject = trim(req.query.subject) || null;
-    const ticket_no = trim(req.query.ticket_no) || null;
+    const filters = buildGrievanceFilters(req.query as any);
+    const page     = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(200, Math.max(5, Number(req.query.pageSize) || 50));
+    const offset   = (page - 1) * pageSize;
 
-    const filters = [
-      status    ? eq(grievances.status, status)        : null,
-      subject   ? eq(grievances.subject, subject)      : null,
-      ticket_no ? eq(grievances.ticket_no, ticket_no)  : null,
-    ].filter(Boolean) as Array<ReturnType<typeof eq>>;
+    const whereExpr = filters.length ? and(...filters) : undefined as any;
 
     const rows = await db
       .select({
@@ -63,11 +82,61 @@ grievancesAdminRouter.get("/", async (req, res, next) => {
       })
       .from(grievances)
       .leftJoin(users, eq(users.id, grievances.assigned_to))
-      .where(filters.length ? and(...filters) : undefined as any)
+      .where(whereExpr)
       .orderBy(desc(grievances.created_at))
-      .limit(500);
-    res.json({ items: rows });
+      .limit(pageSize)
+      .offset(offset);
+
+    const [{ total }] = await db
+      .select({ total: sql<number>`count(*)::int`.as("total") })
+      .from(grievances)
+      .where(whereExpr);
+
+    // Legacy callers used `items`; keep that key + add `rows`/`total`/`page`
+    // so the frontend can migrate to standard pagination without breaking
+    // anything reading `items`.
+    res.json({ items: rows, rows, total, page, pageSize });
   } catch (err) { next(err); }
+});
+
+// ─── GET /api/admin/grievances/export.csv ─────────────────────────────────
+grievancesAdminRouter.get("/export.csv", async (req, res, next) => {
+  try {
+    const filters = buildGrievanceFilters(req.query as any);
+    const whereExpr = filters.length ? and(...filters) : undefined as any;
+    const rows = await db.select({
+      ticket_no: grievances.ticket_no,
+      created_at: grievances.created_at,
+      name: grievances.name,
+      email: grievances.email,
+      phone: grievances.phone,
+      subject: grievances.subject,
+      against_type: grievances.against_type,
+      against_ref: grievances.against_ref,
+      status: grievances.status,
+      assigned_to_name: users.name,
+      resolution_note: grievances.resolution_note,
+      resolved_at: grievances.resolved_at,
+      message: grievances.message,
+    })
+      .from(grievances)
+      .leftJoin(users, eq(users.id, grievances.assigned_to))
+      .where(whereExpr)
+      .orderBy(desc(grievances.created_at))
+      .limit(20_000);
+
+    const csv = buildCsv(
+      ["Ticket", "Raised", "Name", "Email", "Phone", "Subject", "Against",
+       "Reference", "Status", "Assigned to", "Resolution note", "Resolved at", "Message"],
+      rows,
+      (r) => [
+        r.ticket_no, r.created_at, r.name, r.email, r.phone,
+        r.subject, r.against_type, r.against_ref, r.status,
+        r.assigned_to_name, r.resolution_note, r.resolved_at, r.message,
+      ],
+    );
+    sendCsv(res, "grievances", csv);
+  } catch (err) { handleApiError(err, res, next); }
 });
 
 // ─── GET /api/admin/grievances/stats ────────────────────────────────────────

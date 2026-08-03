@@ -7,6 +7,8 @@ import {
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
 import { dispatchJobAlerts } from "../../lib/jobAlerts.js";
+import { logAudit, saveVersion, actorFromReq } from "../../lib/audit.js";
+import { buildCsv, sendCsv } from "../../lib/csv.js";
 
 export const jobsAdminRouter = Router();
 
@@ -80,6 +82,61 @@ jobsAdminRouter.get("/", async (req, res, next) => {
   } catch (err) { handleApiError(err, res, next); }
 });
 
+// ─── GET /api/admin/jobs/export.csv ───────────────────────────────────────
+// Full-dataset CSV honouring the list filters.
+jobsAdminRouter.get("/export.csv", async (req, res, next) => {
+  try {
+    const q = trim(req.query.q);
+    const status = trim(req.query.status);
+    const type = trim(req.query.type);
+    const conds = [isNull(jobPostings.deleted_at)];
+    if (status && POSTING_STATUSES.includes(status as any)) conds.push(eq(jobPostings.status, status as any));
+    if (type && POSTING_TYPES.includes(type as any)) conds.push(eq(jobPostings.type, type as any));
+    if (q) conds.push(ilike(jobPostings.title, `%${q}%`));
+
+    const rows = await db.select({
+      type: jobPostings.type,
+      title: jobPostings.title,
+      status: jobPostings.status,
+      seat_count: jobPostings.seat_count,
+      location: jobPostings.location,
+      experience_required: jobPostings.experience_required,
+      salary_paise_min: jobPostings.salary_paise_min,
+      salary_paise_max: jobPostings.salary_paise_max,
+      salary_period: jobPostings.salary_period,
+      view_count: jobPostings.view_count,
+      firm_name: firms.name,
+      employer_name: employers.company_name,
+      poster_name: users.name,
+      created_at: jobPostings.created_at,
+      expires_at: jobPostings.expires_at,
+    })
+      .from(jobPostings)
+      .leftJoin(users, eq(users.id, jobPostings.poster_user_id))
+      .leftJoin(firms, eq(firms.id, jobPostings.firm_id))
+      .leftJoin(employers, eq(employers.id, jobPostings.employer_id))
+      .where(and(...conds))
+      .orderBy(desc(jobPostings.created_at))
+      .limit(20_000);
+
+    const csv = buildCsv(
+      ["Type", "Title", "Status", "Seats", "Location", "Experience",
+       "Salary min (₹)", "Salary max (₹)", "Period", "Views",
+       "Firm", "Employer", "Posted by", "Created", "Expires"],
+      rows,
+      (r) => [
+        r.type, r.title, r.status, r.seat_count, r.location, r.experience_required,
+        r.salary_paise_min != null ? Math.round(Number(r.salary_paise_min) / 100) : "",
+        r.salary_paise_max != null ? Math.round(Number(r.salary_paise_max) / 100) : "",
+        r.salary_period, r.view_count,
+        r.firm_name, r.employer_name, r.poster_name,
+        r.created_at, r.expires_at,
+      ],
+    );
+    sendCsv(res, "job-postings", csv);
+  } catch (err) { handleApiError(err, res, next); }
+});
+
 // ─── GET /api/admin/jobs/_meta/lookups ────────────────────────────────────────
 jobsAdminRouter.get("/_meta/lookups", async (_req, res, next) => {
   try {
@@ -125,11 +182,32 @@ jobsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
     const description = need(trim(req.body.description), "Description");
     const seat_count = Math.max(1, Number(req.body.seat_count) || 1);
     const experience_required = trim(req.body.experience_required) || null;
-    const location = trim(req.body.location) || null;
+    // Default to "Nagpur" — this is a Nagpur-branch portal and the admin
+    // form no longer submits a location. Admins can still override via API.
+    const location = trim(req.body.location) || "Nagpur";
     const firm_id = trim(req.body.firm_id) || null;
     const employer_id = trim(req.body.employer_id) || null;
     const category_id = trim(req.body.category_id) || null;
     const expires_at = parseOptDate(req.body.expires_at, "Expiry date");
+
+    // Salary range — accepted as rupees, stored as paise. See employer.ts
+    // parsePostingBody for the shared shape.
+    const parseRupees = (v: any): number | null => {
+      if (v == null || v === "") return null;
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) throw new ApiError(400, "Salary must be a non-negative number");
+      return Math.round(n * 100);
+    };
+    const salary_paise_min = parseRupees(req.body.salary_rupees_min);
+    const salary_paise_max = parseRupees(req.body.salary_rupees_max);
+    if (salary_paise_min != null && salary_paise_max != null && salary_paise_min > salary_paise_max) {
+      throw new ApiError(400, "Salary minimum can't be higher than the maximum");
+    }
+    const VALID_PERIODS = new Set(["monthly", "annual", "per_engagement"]);
+    const salary_period_input = trim(req.body.salary_period);
+    const salary_period = VALID_PERIODS.has(salary_period_input)
+      ? salary_period_input
+      : (type === "articleship" ? "monthly" : type === "job" ? "annual" : "per_engagement");
 
     const [row] = await db
       .insert(jobPostings)
@@ -144,6 +222,9 @@ jobsAdminRouter.post("/", async (req: AuthedRequest, res, next) => {
         seat_count,
         experience_required,
         location,
+        salary_paise_min,
+        salary_paise_max,
+        salary_period,
         fee_paise: FEE_PAISE[type],
         expires_at,
         // Admin-created postings auto-publish (mirror of the employer-portal
@@ -176,12 +257,34 @@ jobsAdminRouter.patch("/:id", async (req, res, next) => {
     if (req.body.description !== undefined) patch.description = need(trim(req.body.description), "Description");
     if (req.body.seat_count !== undefined) patch.seat_count = Math.max(1, Number(req.body.seat_count) || 1);
     if (req.body.experience_required !== undefined) patch.experience_required = trim(req.body.experience_required) || null;
-    if (req.body.location !== undefined) patch.location = trim(req.body.location) || null;
+    // PATCH keeps the field editable via API (for admin overrides), but if
+    // the admin sends an empty string we treat that as "reset to Nagpur"
+    // rather than null so the row stays useful in filters/searches.
+    if (req.body.location !== undefined) patch.location = trim(req.body.location) || "Nagpur";
     if (req.body.firm_id !== undefined) patch.firm_id = trim(req.body.firm_id) || null;
     if (req.body.employer_id !== undefined) patch.employer_id = trim(req.body.employer_id) || null;
     if (req.body.category_id !== undefined) patch.category_id = trim(req.body.category_id) || null;
     if (req.body.status !== undefined && POSTING_STATUSES.includes(req.body.status)) patch.status = req.body.status;
     if (req.body.expires_at !== undefined) patch.expires_at = parseOptDate(req.body.expires_at, "Expiry date");
+
+    // Salary — same paise conversion as POST above. Send explicit `null`
+    // to clear a field; omit the key to leave the existing value alone.
+    const parseRupees = (v: any): number | null => {
+      if (v === null) return null;
+      if (v === "" || v === undefined) return null;
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) throw new ApiError(400, "Salary must be a non-negative number");
+      return Math.round(n * 100);
+    };
+    if (req.body.salary_rupees_min !== undefined) patch.salary_paise_min = parseRupees(req.body.salary_rupees_min);
+    if (req.body.salary_rupees_max !== undefined) patch.salary_paise_max = parseRupees(req.body.salary_rupees_max);
+    if (req.body.salary_period !== undefined) {
+      const p = trim(req.body.salary_period);
+      if (!["monthly", "annual", "per_engagement"].includes(p)) {
+        throw new ApiError(400, "Salary period must be monthly, annual, or per_engagement");
+      }
+      patch.salary_period = p;
+    }
 
     const [row] = await db.update(jobPostings).set(patch).where(eq(jobPostings.id, id)).returning();
     // If this PATCH moved a posting from a non-active status to active,
@@ -190,6 +293,31 @@ jobsAdminRouter.patch("/:id", async (req, res, next) => {
     if (existing.status !== "active" && row.status === "active") {
       await dispatchJobAlerts(row.id);
     }
+
+    // Audit — captures the diff between existing → row so the History
+    // tab can render "status: draft → active" clearly. Version snapshot
+    // is optional here; edits are frequent + posting bodies large, so we
+    // only snapshot on status transitions to keep entity_versions lean.
+    const actor = actorFromReq(req as AuthedRequest);
+    const statusChanged = existing.status !== row.status;
+    await logAudit({
+      entity_type: "job_postings",
+      entity_id: row.id,
+      action: statusChanged ? "status_changed" : "updated",
+      actor,
+      before: existing,
+      after: row,
+    });
+    if (statusChanged) {
+      await saveVersion({
+        entity_type: "job_postings",
+        entity_id: row.id,
+        snapshot: row,
+        actor,
+        change_note: `Status ${existing.status} → ${row.status}`,
+      });
+    }
+
     res.json(row);
   } catch (err) { handleApiError(err, res, next); }
 });

@@ -39,6 +39,35 @@ import { handleApiError } from "../../lib/apiError.js";
 
 export const insightsAdminRouter = Router();
 
+// ─── In-process cache ────────────────────────────────────────────────────
+//
+// Both insights endpoints fan out 10+ heavy analytics queries in parallel.
+// The frontend polls them, and admins often have both tabs open — that
+// hammered the Supabase transaction pooler until connections queued past
+// the statement_timeout and unrelated fast queries (myFillQueue etc.)
+// started dying with "canceling statement due to statement timeout".
+//
+// A 60s per-endpoint memo is fine: this data is roll-up counts, not live
+// state, and 1-minute freshness is well within the "check my dashboard"
+// use case. TTL is short enough that stat swings after a big event still
+// show up quickly. No user-scoping — the payload is the same for any
+// admin viewer.
+const INSIGHTS_CACHE = new Map<string, { ts: number; body: unknown }>();
+const INSIGHTS_CACHE_TTL_MS = 60_000;
+
+function insightsCacheGet(key: string): unknown | null {
+  const hit = INSIGHTS_CACHE.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > INSIGHTS_CACHE_TTL_MS) {
+    INSIGHTS_CACHE.delete(key);
+    return null;
+  }
+  return hit.body;
+}
+function insightsCacheSet(key: string, body: unknown) {
+  INSIGHTS_CACHE.set(key, { ts: Date.now(), body });
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 function daysAgo(n: number) {
@@ -52,6 +81,17 @@ function monthsAgo(n: number) {
 function firstOfCurrentMonth() {
   const d = new Date();
   return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+
+// Serialize a Date for interpolation into a raw `sql\`\`` template that
+// applies a `::timestamptz` cast. Passing a Date directly makes postgres.js
+// bind it as `text` (because the parameter position has no column-type
+// context — the cast happens *after* the placeholder) and its serializer
+// then throws "The 'string' argument must be of type string ... Received
+// an instance of Date". ISO 8601 is unambiguous input for timestamptz, so
+// converting to string sidesteps the whole issue.
+function iso(d: Date): string {
+  return d.toISOString();
 }
 
 /**
@@ -68,19 +108,22 @@ function currentFyStartYear(now = new Date()) {
 // title, detail (one line), href (link to the resource that resolves it).
 insightsAdminRouter.get("/alerts", async (_req: AuthedRequest, res, next) => {
   try {
+    // 30s cache — the alerts widget is polled from every admin page's
+    // header, so the same 5 aggregate queries would fire N times per minute
+    // per open admin tab. Cache keeps the pool free for actual work.
+    const cached = insightsCacheGet("alerts");
+    if (cached) return res.json(cached);
+
     const now  = new Date();
     const in5d = new Date(now.getTime() + 5 * 86_400_000);
     const t24h = daysAgo(1);
     const t48h = daysAgo(2);
     const t7d  = daysAgo(7);
 
-    const [
-      underfilling,
-      pendingUtr,
-      slaBreach,
-      staleRefunds,
-      readingPending,
-    ] = await Promise.all([
+    // Promise.allSettled — mirrors chairman/wicasa so a single slow
+    // sub-query degrades that one alert instead of taking down the whole
+    // header widget across the admin panel.
+    const alertsSettled = await Promise.allSettled([
       // Under-filling events: starts within 5 days, capacity set,
       // registered_count < 50% of capacity.
       db.select({
@@ -136,6 +179,22 @@ insightsAdminRouter.get("/alerts", async (_req: AuthedRequest, res, next) => {
         )),
     ]);
 
+    // Unwrap with per-slot fallbacks so a single failure just drops that
+    // alert rather than 500ing the header widget.
+    const alertLabels = ["underfilling", "pendingUtr", "slaBreach", "staleRefunds", "readingPending"];
+    const unwrapA = <T>(i: number, fallback: T): T => {
+      const s = alertsSettled[i];
+      if (s.status === "fulfilled") return s.value as T;
+      // eslint-disable-next-line no-console
+      console.error(`[insights/alerts] ${alertLabels[i]} failed:`, s.reason?.message ?? s.reason);
+      return fallback;
+    };
+    const underfilling    = unwrapA<any[]>(0, []);
+    const pendingUtr      = unwrapA<any[]>(1, [{ n: 0 }]);
+    const slaBreach       = unwrapA<any[]>(2, [{ n: 0 }]);
+    const staleRefunds    = unwrapA<any[]>(3, [{ n: 0 }]);
+    const readingPending  = unwrapA<any[]>(4, [{ n: 0 }]);
+
     const alerts: Array<{
       id: string; severity: "critical" | "warn" | "info";
       title: string; detail: string; href: string;
@@ -190,7 +249,9 @@ insightsAdminRouter.get("/alerts", async (_req: AuthedRequest, res, next) => {
       });
     }
 
-    res.json({ generated_at: now.toISOString(), count: alerts.length, alerts });
+    const payload = { generated_at: now.toISOString(), count: alerts.length, alerts };
+    insightsCacheSet("alerts", payload);
+    res.json(payload);
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -203,6 +264,9 @@ insightsAdminRouter.get("/alerts", async (_req: AuthedRequest, res, next) => {
 // degrades that one section instead of taking down the whole endpoint.
 insightsAdminRouter.get("/chairman", async (_req: AuthedRequest, res, next) => {
   try {
+    const cached = insightsCacheGet("chairman");
+    if (cached) return res.json(cached);
+
     const now       = new Date();
     const fy        = currentFyStartYear(now);
     const fyStart   = new Date(Date.UTC(fy, 3, 1));
@@ -300,7 +364,7 @@ insightsAdminRouter.get("/chairman", async (_req: AuthedRequest, res, next) => {
           count(*)::int                                          AS total
         FROM users
         WHERE deleted_at IS NULL
-          AND created_at >= ${monthsAgo(12)}::timestamptz
+          AND created_at >= ${iso(monthsAgo(12))}::timestamptz
         GROUP BY 1
         ORDER BY 1
       `),
@@ -312,7 +376,7 @@ insightsAdminRouter.get("/chairman", async (_req: AuthedRequest, res, next) => {
           count(*)::int AS registrations
         FROM event_registrations
         WHERE deleted_at IS NULL
-          AND registered_at >= ${monthsAgo(12)}::timestamptz
+          AND registered_at >= ${iso(monthsAgo(12))}::timestamptz
         GROUP BY 1
         ORDER BY 1
       `),
@@ -365,7 +429,7 @@ insightsAdminRouter.get("/chairman", async (_req: AuthedRequest, res, next) => {
             date_trunc('month', created_at) AS cohort_month
           FROM users
           WHERE deleted_at IS NULL
-            AND created_at >= ${monthsAgo(6)}::timestamptz
+            AND created_at >= ${iso(monthsAgo(6))}::timestamptz
         ),
         registrations_by_month AS (
           SELECT
@@ -373,7 +437,7 @@ insightsAdminRouter.get("/chairman", async (_req: AuthedRequest, res, next) => {
             date_trunc('month', r.registered_at) AS reg_month
           FROM event_registrations r
           WHERE r.deleted_at IS NULL
-            AND r.registered_at >= ${monthsAgo(6)}::timestamptz
+            AND r.registered_at >= ${iso(monthsAgo(6))}::timestamptz
         )
         SELECT
           to_char(cu.cohort_month, 'YYYY-MM') AS cohort,
@@ -395,7 +459,7 @@ insightsAdminRouter.get("/chairman", async (_req: AuthedRequest, res, next) => {
         LEFT JOIN events e ON e.committee_id = c.id AND e.deleted_at IS NULL AND e.status IN ('published','completed')
         WHERE c.active = true
         GROUP BY c.id, c.name, c.code
-        HAVING MAX(e.starts_at) IS NULL OR MAX(e.starts_at) < ${daysAgo(60)}::timestamptz
+        HAVING MAX(e.starts_at) IS NULL OR MAX(e.starts_at) < ${iso(daysAgo(60))}::timestamptz
         ORDER BY MAX(e.starts_at) NULLS FIRST
         LIMIT 20
       `),
@@ -430,7 +494,7 @@ insightsAdminRouter.get("/chairman", async (_req: AuthedRequest, res, next) => {
     const signupsThisMonth = signupsList.filter((r) => r.month === new Date().toISOString().slice(0, 7))[0]?.total ?? 0;
     const signupsPrevMonth = signupsList[signupsList.length - 2]?.total ?? 0;
 
-    res.json({
+    const payload = {
       generated_at: now.toISOString(),
       window: { fy_start: fyStart.toISOString(), t90d: t90d.toISOString(), t365d: t365d.toISOString() },
       portfolio: eventPortfolio,
@@ -452,31 +516,28 @@ insightsAdminRouter.get("/chairman", async (_req: AuthedRequest, res, next) => {
       },
       retention_cohort: retentionCohort,
       idle_committees:  idleCommittees,
-    });
+    };
+    insightsCacheSet("chairman", payload);
+    res.json(payload);
   } catch (err) { handleApiError(err, res, next); }
 });
 
 // ─── GET /wicasa ───────────────────────────────────────────────────────────
 insightsAdminRouter.get("/wicasa", async (_req: AuthedRequest, res, next) => {
   try {
+    const cached = insightsCacheGet("wicasa");
+    if (cached) return res.json(cached);
+
     const now  = new Date();
     const t30d = daysAgo(30);
     const t90d = daysAgo(90);
 
-    const [
-      studentPulse,
-      newSignups12m,
-      studentEventStats,
-      upcomingStudentEvents,
-      mockTestSummary,
-      mockTestAttemptStats,
-      articleshipFunnel,
-      scholarshipFunnel,
-      counsellingSummary,
-      studentSuggestionsOpen,
-      readingRoomUsage,
-      readingRoomPendingDeposits,
-    ] = await Promise.all([
+    const wicasaLabels = [
+      "studentPulse", "newSignups12m", "studentEventStats", "upcomingStudentEvents",
+      "mockTestSummary", "mockTestAttemptStats", "articleshipFunnel", "scholarshipFunnel",
+      "counsellingSummary", "studentSuggestionsOpen", "readingRoomUsage", "readingRoomPendingDeposits",
+    ];
+    const wicasaSettled = await Promise.allSettled([
       // Total students + engagement (any registration in last 30d).
       db.execute(sql`
         WITH student_ids AS (
@@ -484,12 +545,12 @@ insightsAdminRouter.get("/wicasa", async (_req: AuthedRequest, res, next) => {
         ),
         active AS (
           SELECT DISTINCT user_id FROM event_registrations
-          WHERE deleted_at IS NULL AND registered_at >= ${t30d}::timestamptz
+          WHERE deleted_at IS NULL AND registered_at >= ${iso(t30d)}::timestamptz
         )
         SELECT
           (SELECT count(*) FROM student_ids)::int AS total_students,
           (SELECT count(*) FROM student_ids WHERE id IN (SELECT user_id FROM active))::int AS active_30d,
-          (SELECT count(*) FROM users WHERE primary_role = 'student' AND deleted_at IS NULL AND created_at >= ${t30d}::timestamptz)::int AS new_30d
+          (SELECT count(*) FROM users WHERE primary_role = 'student' AND deleted_at IS NULL AND created_at >= ${iso(t30d)}::timestamptz)::int AS new_30d
       `),
 
       db.execute(sql`
@@ -498,7 +559,7 @@ insightsAdminRouter.get("/wicasa", async (_req: AuthedRequest, res, next) => {
         FROM users
         WHERE primary_role = 'student'
           AND deleted_at IS NULL
-          AND created_at >= ${monthsAgo(12)}::timestamptz
+          AND created_at >= ${iso(monthsAgo(12))}::timestamptz
         GROUP BY 1 ORDER BY 1
       `),
 
@@ -519,7 +580,7 @@ insightsAdminRouter.get("/wicasa", async (_req: AuthedRequest, res, next) => {
         .where(and(
           isNull(events.deleted_at),
           gte(events.starts_at, t90d),
-          sql`${events.audience} IN ('students', 'both')`,
+          sql`${events.audience} IN ('students', 'all')`,
           sql`${events.status} IN ('published', 'completed')`,
         )),
 
@@ -536,7 +597,7 @@ insightsAdminRouter.get("/wicasa", async (_req: AuthedRequest, res, next) => {
         .where(and(
           isNull(events.deleted_at),
           eq(events.status, "published"),
-          sql`${events.audience} IN ('students', 'both')`,
+          sql`${events.audience} IN ('students', 'all')`,
           gte(events.starts_at, now),
         ))
         .orderBy(events.starts_at)
@@ -549,17 +610,19 @@ insightsAdminRouter.get("/wicasa", async (_req: AuthedRequest, res, next) => {
         completed: sql<number>`count(*) filter (where ${mockTests.status} = 'completed')::int`.as("completed"),
       }).from(mockTests),
 
-      // Attempt & pass stats — last 90d. `passed` is derived per attempt if
-      // we know the pass mark; fall back to score >= 40 as a coarse default.
+      // Attempt & pass stats — last 90d. The final grade lives in
+      // `score_total` (auto + manual combined); `score` never existed as a
+      // column. `passed` uses a 40% floor as a coarse default since the
+      // per-test pass mark isn't stored on the attempts table.
       db.execute(sql`
         SELECT
           count(*)::int AS attempts,
           count(*) FILTER (WHERE submitted_at IS NOT NULL)::int AS submitted,
-          count(*) FILTER (WHERE score IS NOT NULL AND score >= 40)::int AS passed,
-          count(*) FILTER (WHERE score IS NOT NULL AND score <  40)::int AS failed,
-          AVG(score) FILTER (WHERE score IS NOT NULL) AS avg_score
+          count(*) FILTER (WHERE score_total IS NOT NULL AND score_total >= 40)::int AS passed,
+          count(*) FILTER (WHERE score_total IS NOT NULL AND score_total <  40)::int AS failed,
+          AVG(score_total) FILTER (WHERE score_total IS NOT NULL) AS avg_score
         FROM mock_test_attempts
-        WHERE created_at >= ${t90d}::timestamptz
+        WHERE created_at >= ${iso(t90d)}::timestamptz
       `),
 
       // Articleship funnel by status.
@@ -592,7 +655,7 @@ insightsAdminRouter.get("/wicasa", async (_req: AuthedRequest, res, next) => {
           count(*)::int AS bookings
         FROM reading_room_bookings
         WHERE cancelled_at IS NULL
-          AND created_at >= ${monthsAgo(6)}::timestamptz
+          AND created_at >= ${iso(monthsAgo(6))}::timestamptz
         GROUP BY year, month
         ORDER BY year, month
       `),
@@ -603,7 +666,32 @@ insightsAdminRouter.get("/wicasa", async (_req: AuthedRequest, res, next) => {
         .where(eq(readingRoomDeposits.status, "pending_verification")),
     ]);
 
-    res.json({
+    // Fallback shapes match what a successful query would return so the
+    // downstream code below doesn't have to null-check every field. Same
+    // pattern as chairman's `unwrap` — a single slow / broken sub-query
+    // degrades that one tile instead of taking down the whole payload.
+    const unwrapW = <T>(i: number, fallback: T): T => {
+      const s = wicasaSettled[i];
+      if (s.status === "fulfilled") return s.value as T;
+      // eslint-disable-next-line no-console
+      console.error(`[insights/wicasa] ${wicasaLabels[i]} failed:`,
+        s.reason?.message ?? s.reason);
+      return fallback;
+    };
+    const studentPulse              = unwrapW<any[]>(0,  [{ total_students: 0, active_30d: 0, new_30d: 0 }]);
+    const newSignups12m             = unwrapW<any[]>(1,  []);
+    const studentEventStats         = unwrapW<any[]>(2,  [{ events_count: 0, total_registrations: 0, avg_fill: 0 }]);
+    const upcomingStudentEvents     = unwrapW<any[]>(3,  []);
+    const mockTestSummary           = unwrapW<any[]>(4,  [{ total: 0, upcoming: 0, completed: 0 }]);
+    const mockTestAttemptStats      = unwrapW<any[]>(5,  [{ attempts: 0, submitted: 0, passed: 0, failed: 0, avg_score: null }]);
+    const articleshipFunnel         = unwrapW<any[]>(6,  []);
+    const scholarshipFunnel         = unwrapW<any[]>(7,  []);
+    const counsellingSummary        = unwrapW<any[]>(8,  [{}]);
+    const studentSuggestionsOpen    = unwrapW<any[]>(9,  [{ n: 0 }]);
+    const readingRoomUsage          = unwrapW<any[]>(10, []);
+    const readingRoomPendingDeposits = unwrapW<any[]>(11, [{ n: 0 }]);
+
+    const payload = {
       generated_at: now.toISOString(),
       student_pulse: (studentPulse as any)[0],
       new_signups_12m: newSignups12m,
@@ -629,6 +717,8 @@ insightsAdminRouter.get("/wicasa", async (_req: AuthedRequest, res, next) => {
         usage_monthly: readingRoomUsage,
         pending_deposits: readingRoomPendingDeposits[0]?.n ?? 0,
       },
-    });
+    };
+    insightsCacheSet("wicasa", payload);
+    res.json(payload);
   } catch (err) { handleApiError(err, res, next); }
 });

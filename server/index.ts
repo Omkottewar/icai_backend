@@ -237,6 +237,18 @@ process.on("uncaughtException", (err) => {
   console.error("[uncaughtException]", err);
 });
 process.on("unhandledRejection", (reason) => {
+  // Postgres statement-timeout rejections (SQLSTATE 57014) are usually
+  // orphan late-arriving errors from queries whose consumer already gave
+  // up (aborted request, request-timeout fired, socket closed). They
+  // aren't code bugs — they're network / DB cancels that lost their
+  // caller. Downgrade to a single warn line and skip Sentry so the log
+  // stays actionable and Sentry doesn't get spammed on every DB blip.
+  const anyReason = reason as any;
+  if (anyReason && (anyReason.code === "57014" || /statement timeout|canceling statement/i.test(String(anyReason.message ?? "")))) {
+    // eslint-disable-next-line no-console
+    console.warn("[unhandledRejection] (ignored) Postgres statement timeout on an orphaned query");
+    return;
+  }
   Sentry.captureException(reason);
   // eslint-disable-next-line no-console
   console.error("[unhandledRejection]", reason);

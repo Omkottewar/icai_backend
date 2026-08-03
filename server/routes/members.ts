@@ -217,6 +217,21 @@ membersRouter.patch("/profile", async (req: AuthedRequest, res, next) => {
       }
       profUpdate.areas_of_practice = areas;
     }
+    // Self-reported CPE hours — display-only field (see migration 0099).
+    // Accept null/"" to clear. Numeric(5,1): max 9999.9, min 0.
+    if ("cpe_credits" in body) {
+      const raw = body.cpe_credits;
+      if (raw === null || raw === "") {
+        profUpdate.cpe_credits = null;
+      } else {
+        const n = typeof raw === "number" ? raw : Number(raw);
+        if (!Number.isFinite(n) || n < 0 || n > 9999.9) {
+          throw new ApiError(400, "CPE credits must be a number between 0 and 9999.9");
+        }
+        // Drizzle numeric() takes a string; round to 1 decimal.
+        profUpdate.cpe_credits = (Math.round(n * 10) / 10).toFixed(1);
+      }
+    }
 
     if (Object.keys(profUpdate).length > 0) {
       const updated = await db
@@ -246,6 +261,7 @@ membersRouter.patch("/profile", async (req: AuthedRequest, res, next) => {
         city: memberProfiles.city,
         pincode: memberProfiles.pincode,
         areas_of_practice: memberProfiles.areas_of_practice,
+        cpe_credits: memberProfiles.cpe_credits,
       })
       .from(users)
       .innerJoin(memberProfiles, eq(memberProfiles.user_id, users.id))

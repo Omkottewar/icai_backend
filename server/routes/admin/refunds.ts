@@ -4,6 +4,7 @@ import { db } from "../../../db/client.js";
 import { paymentRefunds, payments, users } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { buildCsv, sendCsv } from "../../lib/csv.js";
 
 export const refundsAdminRouter = Router();
 
@@ -55,6 +56,51 @@ refundsAdminRouter.get("/", async (req, res, next) => {
       .where(conds.length ? and(...conds) : sql`true`);
 
     res.json({ rows, total, page, pageSize });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── GET /api/admin/refunds/export.csv ────────────────────────────────────
+refundsAdminRouter.get("/export.csv", async (req, res, next) => {
+  try {
+    const status = trim(req.query.status);
+    const conds = [] as any[];
+    if (status && STATUSES.includes(status as Status)) conds.push(eq(paymentRefunds.status, status));
+
+    const rows = await db.select({
+      requested_at:  paymentRefunds.requested_at,
+      status:        paymentRefunds.status,
+      payer_name:    users.name,
+      payer_email:   users.email,
+      amount_paise:  paymentRefunds.amount_paise,
+      reason:        paymentRefunds.reason,
+      approved_at:   paymentRefunds.approved_at,
+      processed_at:  paymentRefunds.processed_at,
+      razorpay_refund_id: paymentRefunds.razorpay_refund_id,
+      notes:         paymentRefunds.notes,
+      payment_purpose: payments.purpose,
+      payment_amount_paise: payments.amount_paise,
+    })
+      .from(paymentRefunds)
+      .leftJoin(payments, eq(payments.id, paymentRefunds.payment_id))
+      .leftJoin(users, eq(users.id, payments.payer_user_id))
+      .where(conds.length ? and(...conds) : sql`true`)
+      .orderBy(desc(paymentRefunds.requested_at))
+      .limit(20_000);
+
+    const csv = buildCsv(
+      ["Requested at", "Status", "Payer", "Payer email", "Amount (₹)", "Reason",
+       "Approved at", "Processed at", "Razorpay refund ID", "Notes",
+       "Payment purpose", "Payment amount (₹)"],
+      rows,
+      (r) => [
+        r.requested_at, r.status, r.payer_name, r.payer_email,
+        r.amount_paise != null ? (Number(r.amount_paise) / 100).toFixed(2) : "",
+        r.reason, r.approved_at, r.processed_at, r.razorpay_refund_id, r.notes,
+        r.payment_purpose,
+        r.payment_amount_paise != null ? (Number(r.payment_amount_paise) / 100).toFixed(2) : "",
+      ],
+    );
+    sendCsv(res, `refunds-${status || "all"}`, csv);
   } catch (err) { handleApiError(err, res, next); }
 });
 

@@ -35,6 +35,13 @@ export const articleshipMatches = pgTable(
     recommended_firm_ids:        uuid("recommended_firm_ids").array(),
     placed_firm_id:              uuid("placed_firm_id").references(() => firms.id, { onDelete: "set null" }),
     notes:                       text("notes"),
+    // Student-side finalisation loop. Set when the student clicks
+    // "I accepted this firm's offer" or "None of the shortlist worked"
+    // from their dashboard. Distinct from `placed_firm_id` (WICASA's
+    // unilateral flag) — this captures the student's own acknowledgement.
+    // See migration 0096. CHECK on the DB prevents both being non-null.
+    student_confirmed_at:        timestamp("student_confirmed_at", { withTimezone: true }),
+    student_declined_at:         timestamp("student_declined_at",  { withTimezone: true }),
     created_at:                  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updated_at:                  timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

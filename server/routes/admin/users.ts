@@ -7,6 +7,7 @@ import {
 } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { buildCsv, sendCsv } from "../../lib/csv.js";
 
 export const usersAdminRouter = Router();
 
@@ -187,7 +188,52 @@ usersAdminRouter.get("/:id", async (req, res, next) => {
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// â”€â”€â”€ POST /api/admin/users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── GET /api/admin/users/export.csv ─────────────────────────────────────
+// Full-dataset CSV honouring the same filters as the list endpoint.
+// Signup-approvals UI links here with `status=pending_approval` to give
+// admins an offline queue.
+usersAdminRouter.get("/export.csv", async (req, res, next) => {
+  try {
+    const q = trim(req.query.q);
+    const status = trim(req.query.status);
+    const primary_role = trim(req.query.primary_role);
+
+    const conds: any[] = [isNull(users.deleted_at)];
+    if (status && USER_STATUSES.includes(status as any)) conds.push(eq(users.status, status as any));
+    if (primary_role && PRIMARY_ROLES.includes(primary_role as any)) conds.push(eq(users.primary_role, primary_role as any));
+    if (q) conds.push(or(ilike(users.name, `%${q}%`), ilike(users.email, `%${q}%`))!);
+
+    const rows = await db.select({
+      name: users.name,
+      email: users.email,
+      phone: users.phone,
+      primary_role: users.primary_role,
+      status: users.status,
+      signup_mrn: users.signup_mrn,
+      signup_mrn_in_directory: users.signup_mrn_in_directory,
+      created_at: users.created_at,
+      last_login_at: users.last_login_at,
+    })
+      .from(users)
+      .where(and(...conds))
+      .orderBy(desc(users.created_at))
+      .limit(20_000);
+
+    const csv = buildCsv(
+      ["Name", "Email", "Phone", "Role", "Status", "MRN", "MRN in directory", "Signed up", "Last login"],
+      rows,
+      (r) => [
+        r.name, r.email, r.phone, r.primary_role, r.status,
+        r.signup_mrn,
+        r.signup_mrn_in_directory === null ? "" : r.signup_mrn_in_directory ? "yes" : "no",
+        r.created_at, r.last_login_at,
+      ],
+    );
+    sendCsv(res, "users", csv);
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/users ────────────────────────────────────────────────
 // Creates a "shell" user row (no Auth0 link). When that person later signs
 // in via Auth0 with the same verified email, findOrCreateUserFromAuth0
 // step 2 will auto-link them. No password is set here.

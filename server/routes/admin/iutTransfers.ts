@@ -4,6 +4,7 @@ import { db } from "../../../db/client.js";
 import { iutTransfers, users } from "../../../schema/index.js";
 import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { buildCsv, sendCsv } from "../../lib/csv.js";
 
 export const iutTransfersAdminRouter = Router();
 
@@ -59,6 +60,51 @@ iutTransfersAdminRouter.get("/", async (req, res, next) => {
       .where(conds.length ? and(...conds) : sql`true`);
 
     res.json({ rows, total, page, pageSize });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── GET /api/admin/iut-transfers/export.csv ──────────────────────────────
+iutTransfersAdminRouter.get("/export.csv", async (req, res, next) => {
+  try {
+    const status = trim(req.query.status);
+    const conds = [] as any[];
+    if (status && STATUSES.includes(status as Status)) conds.push(eq(iutTransfers.status, status));
+
+    const rows = await db.select({
+      transfer_date:    iutTransfers.transfer_date,
+      status:           iutTransfers.status,
+      amount_paise:     iutTransfers.amount_paise,
+      from_account:     iutTransfers.from_account,
+      to_account:       iutTransfers.to_account,
+      purpose:          iutTransfers.purpose,
+      reference_number: iutTransfers.reference_number,
+      requested_by:     users.name,
+      requested_at:     iutTransfers.requested_at,
+      approved_at:      iutTransfers.approved_at,
+      executed_at:      iutTransfers.executed_at,
+      rejection_reason: iutTransfers.rejection_reason,
+      notes:            iutTransfers.notes,
+    })
+      .from(iutTransfers)
+      .leftJoin(users, eq(users.id, iutTransfers.requested_by))
+      .where(conds.length ? and(...conds) : sql`true`)
+      .orderBy(desc(iutTransfers.requested_at))
+      .limit(20_000);
+
+    const csv = buildCsv(
+      ["Transfer date", "Status", "Amount (₹)", "From", "To", "Purpose",
+       "Reference no", "Requested by", "Requested at", "Approved at",
+       "Executed at", "Rejection reason", "Notes"],
+      rows,
+      (r) => [
+        r.transfer_date, r.status,
+        r.amount_paise != null ? (Number(r.amount_paise) / 100).toFixed(2) : "",
+        r.from_account, r.to_account, r.purpose, r.reference_number,
+        r.requested_by, r.requested_at, r.approved_at, r.executed_at,
+        r.rejection_reason, r.notes,
+      ],
+    );
+    sendCsv(res, `iut-transfers-${status || "all"}`, csv);
   } catch (err) { handleApiError(err, res, next); }
 });
 

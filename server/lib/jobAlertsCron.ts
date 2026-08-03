@@ -136,7 +136,7 @@ async function runDigestSweep(frequency: "daily_digest" | "weekly_digest", windo
 
     const rows = Array.from(matched.values());
     const digest_body = rows.map((p) =>
-      `• ${p.title} — ${orgLabel(p)}${p.location ? " · " + p.location : ""}\n  ${base}/job-vacancies?type=${encodeURIComponent(p.type)}#p-${p.id}`
+      `• ${p.title} — ${orgLabel(p)}\n  ${base}/jobs/${encodeURIComponent(p.id)}`
     ).join("\n\n");
     const digest_summary = rows.slice(0, 3).map((p) => p.title).join(" · ")
       + (rows.length > 3 ? ` +${rows.length - 3} more` : "");
