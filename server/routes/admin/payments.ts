@@ -52,6 +52,8 @@ paymentsAdminRouter.get("/", async (req, res, next) => {
       ${payments.razorpay_order_id} ILIKE ${`%${q}%`}
       OR ${payments.razorpay_payment_id} ILIKE ${`%${q}%`}
       OR ${payments.upi_utr}          ILIKE ${`%${q}%`}
+      OR ${payments.client_txn_id}    ILIKE ${`%${q}%`}
+      OR ${payments.sabpaisa_txn_id}  ILIKE ${`%${q}%`}
     )`);
     const where = conds.length ? and(...conds) : undefined;
 
@@ -64,9 +66,14 @@ paymentsAdminRouter.get("/", async (req, res, next) => {
         amount_paise: payments.amount_paise,
         currency: payments.currency,
         status: payments.status,
+        provider: payments.provider,
         purpose: payments.purpose,
         ref_type: payments.ref_type,
         ref_id: payments.ref_id,
+        client_txn_id: payments.client_txn_id,
+        sabpaisa_txn_id: payments.sabpaisa_txn_id,
+        sabpaisa_payment_mode: payments.sabpaisa_payment_mode,
+        sabpaisa_bank_name: payments.sabpaisa_bank_name,
         razorpay_order_id: payments.razorpay_order_id,
         razorpay_payment_id: payments.razorpay_payment_id,
         upi_utr: payments.upi_utr,
@@ -387,9 +394,20 @@ paymentsAdminRouter.get("/:id", async (req, res, next) => {
         amount_paise: payments.amount_paise,
         currency: payments.currency,
         status: payments.status,
+        provider: payments.provider,
         purpose: payments.purpose,
         ref_type: payments.ref_type,
         ref_id: payments.ref_id,
+        client_txn_id: payments.client_txn_id,
+        sabpaisa_txn_id: payments.sabpaisa_txn_id,
+        sabpaisa_status_code: payments.sabpaisa_status_code,
+        sabpaisa_payment_mode: payments.sabpaisa_payment_mode,
+        sabpaisa_bank_name: payments.sabpaisa_bank_name,
+        sabpaisa_bank_txn_id: payments.sabpaisa_bank_txn_id,
+        sabpaisa_response: payments.sabpaisa_response,
+        last_verified_at: payments.last_verified_at,
+        return_received_at: payments.return_received_at,
+        webhook_received_at: payments.webhook_received_at,
         razorpay_order_id: payments.razorpay_order_id,
         razorpay_payment_id: payments.razorpay_payment_id,
         razorpay_signature: payments.razorpay_signature,

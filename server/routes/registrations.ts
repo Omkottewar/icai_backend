@@ -1,13 +1,14 @@
 ﻿import { Router } from "express";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { events, eventRegistrations, users, payments, siteSettings } from "../../schema/index.js";
+import { events, eventRegistrations, users, payments } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
 import { notifyAsync } from "../lib/notify.js";
 import { streamCertificate } from "../lib/certificates.js";
 import { buildCalendar } from "../lib/ical.js";
+import { buildInitRedirect, paiseToRupees } from "../lib/sabpaisa/client.js";
 import { createHmac } from "node:crypto";
 import { memberProfiles } from "../../schema/index.js";
 
@@ -37,37 +38,6 @@ function eventNotifyVars(event: { title: string; slug: string; venue: string | n
   };
 }
 
-// Fetch the branch's UPI VPA + display name from site_settings. Both are
-// admin-editable via the Site Content admin so switching UPI providers (or
-// account holders) is a one-click change without a redeploy.
-async function loadUpiConfig(): Promise<{ upi_id: string; payee_name: string }> {
-  const rows = await db
-    .select({ key: siteSettings.key, value: siteSettings.value })
-    .from(siteSettings);
-  const map = new Map(rows.map((r) => [r.key, r.value]));
-  return {
-    upi_id: (map.get("payment_upi_id") ?? "").trim(),
-    payee_name: (map.get("payment_upi_payee_name") ?? "ICAI Nagpur Branch").trim(),
-  };
-}
-
-// Build the UPI intent URI (`upi://pay?pa=...&pn=...&am=...&tn=...&cu=INR`)
-// the frontend renders as a QR. Scanning this in any UPI app opens a
-// payment screen with the amount already filled in — the user just picks
-// the source account and hits Pay. `tn` (transaction note) is the payment
-// UUID so the branch can cross-reference the UTR against the payments row.
-function buildUpiUri(input: { upi_id: string; payee_name: string; amount_paise: number; note: string }): string {
-  const amountRupees = (input.amount_paise / 100).toFixed(2);
-  const params = new URLSearchParams({
-    pa: input.upi_id,
-    pn: input.payee_name,
-    am: amountRupees,
-    cu: "INR",
-    tn: input.note,
-  });
-  return `upi://pay?${params.toString()}`;
-}
-
 export const registrationsRouter = Router();
 
 // â”€â”€â”€ GET /api/events/my-registrations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -93,6 +63,14 @@ registrationsRouter.get("/my-registrations", requireUser, async (req: AuthedRequ
 
 // â”€â”€â”€ POST /api/events/:slug/register â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Self-service registration. Two paths depending on the event fee:
+//   fee_paise = 0 → create the registration immediately, return paid=false.
+//   fee_paise > 0 → create a `payments` row in status "pending", build the
+//                   SabPaisa init payload, return { action, clientCode,
+//                   encData } so the browser auto-POSTs to SabPaisa's
+//                   hosted checkout. The event_registrations row is created
+//                   later by sabpaisa/confirm.ts once the gateway confirms
+//                   via callback / webhook. No manual UTR approval anymore.
+// LEGACY (pre-migration-0100):
 //   fee_paise = 0 â†’ create the registration immediately, return paid=false.
 //   fee_paise > 0 â†’ create a `payments` row in status "created", open a
 //                   Razorpay order, return the order id + public key so the
@@ -258,11 +236,13 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
       });
     }
 
-    // ── Paid event: UPI QR flow ────────────────────────────────────────
-    // We DON'T create the registration row yet — that happens only after
-    // an admin verifies the UTR the user submits. The payment row is the
-    // durable handle: user gets its id + the UPI URI, submits UTR against
-    // it, admin approves against it, registration is created against it.
+    // ── Paid event: SabPaisa hosted checkout ──────────────────────────
+    // We DON'T create the registration row yet — that happens in
+    // sabpaisa/confirm.ts once the gateway confirms payment via the
+    // callback/webhook. The payment row is the durable handle: user gets
+    // its id + the SabPaisa redirect form, we route them to SabPaisa's
+    // hosted page, they pay, SabPaisa calls us back, we create the
+    // registration.
     //
     // GST (H.20): when gst_applicable is true, the fee shown to the user
     // is base + GST. We store both numbers in payment.metadata so the
@@ -275,16 +255,12 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
     const perSeatTotal = perSeatBase + perSeatGst;
     const totalPaise = perSeatTotal * totalSeats;
 
-    const upi = await loadUpiConfig();
-    if (!upi.upi_id) {
-      throw new ApiError(503, "Online payments are not configured yet. Please contact the branch office.");
-    }
-
     const [payment] = await db.insert(payments).values({
       payer_user_id: user.id,
       amount_paise: totalPaise,
       currency: "INR",
       status: "pending",
+      provider: "sabpaisa",
       purpose: "event_registration",
       ref_type: "event",
       ref_id: event.id,
@@ -296,21 +272,43 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
         gst_percent: gstRate,
         gst_paise: perSeatGst * totalSeats,
         seat_count: totalSeats,
-        // Attendee ids stashed so admin approve can create one
+        // Payer details stashed so /api/payments/initiate can re-build the
+        // SabPaisa payload without a user table re-fetch on re-initiate.
+        payer_name:  user.name,
+        payer_email: user.email,
+        payer_phone: phone || user.phone || "",
+        // Attendee ids stashed so sabpaisa/confirm.ts can create one
         // event_registrations row per attendee. NULL/empty means self-only.
         attendee_user_ids: attendeeUsers.map((a) => a.id),
       },
     }).returning();
 
-    // The transaction-note token is what the admin cross-references when
-    // reading the bank statement — keep it short + prefixed so it's easy
-    // to grep for "ICAI-<id>" in a UPI statement export.
-    const upiUri = buildUpiUri({
-      upi_id: upi.upi_id,
-      payee_name: upi.payee_name,
-      amount_paise: totalPaise,
-      note: `ICAI-${payment.id.slice(0, 8)}`,
-    });
+    // Deterministic clientTxnId derived from the payment UUID — small
+    // enough to fit SabPaisa's dashboard column, big enough to be globally
+    // unique within our tenancy.
+    const clientTxnId = `NBW-${payment.id.replace(/-/g, "").slice(0, 20)}`;
+
+    let redirect;
+    try {
+      redirect = buildInitRedirect({
+        clientTxnId,
+        amountRupees: paiseToRupees(totalPaise),
+        payerName:  user.name,
+        payerEmail: user.email,
+        payerMobile: phone || user.phone || "",
+        udf1: "event_registration",
+        udf2: event.id,
+      });
+    } catch (e) {
+      // Missing SABPAISA_* env var → surface a clean 503 instead of a 500.
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
+    }
+
+    await db.update(payments).set({
+      client_txn_id: clientTxnId,
+      updated_at: new Date(),
+    }).where(eq(payments.id, payment.id));
 
     return res.status(200).json({
       paid: true,
@@ -324,79 +322,26 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
       seat_count: totalSeats,
       per_seat_paise: perSeatTotal,
       attendees: attendeeUsers,          // [{ id, name, email }, ...]
-      upi_id: upi.upi_id,
-      upi_payee_name: upi.payee_name,
-      upi_uri: upiUri,
+      // SabPaisa hosted-checkout redirect — frontend auto-POSTs an invisible
+      // form carrying these three fields to `action`.
+      sabpaisa: {
+        action:     redirect.action,
+        clientCode: redirect.clientCode,
+        encData:    redirect.encData,
+      },
+      client_txn_id: clientTxnId,
       event: { title: event.title, slug: event.slug },
     });
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// ─── POST /api/events/:slug/submit-utr ───────────────────────────────────
-// User has paid via the UPI QR and is submitting the UTR (UPI transaction
-// reference — 12-digit numeric string that any bank/UPI app returns after
-// a successful transfer) so an admin can cross-check it against the bank
-// statement. Flow:
-//   1. Look up the payment row created by POST /register.
-//   2. Guard: caller owns it, it's still 'pending' (not already submitted
-//      or verified), UTR isn't already in use elsewhere (partial UNIQUE
-//      index on payments.upi_utr).
-//   3. Flip status → 'pending_verification', stash utr + screenshot.
-//   4. Return the payment row so the frontend can show "verification
-//      typically takes 24h".
-//
-// No registration row is created here. That happens only on admin approve.
-registrationsRouter.post("/:slug/submit-utr", bookingWriteLimiter, requireUser, async (req: AuthedRequest, res, next) => {
-  try {
-    const user = req.user!;
-    const slug = need(trim(req.params.slug), "Event slug");
-    const payment_id = need(trim(req.body?.payment_id), "Payment ID");
-    const utr = need(trim(req.body?.utr), "UTR (UPI reference number)");
-    const screenshot_file_id = trim(req.body?.screenshot_file_id) || null;
-
-    // Basic UTR sanity — most banks emit 12-digit numeric, some emit
-    // 22-char alphanumeric. Accept 8-30 alphanumeric chars to cover both
-    // without blocking edge-case wallet providers.
-    if (!/^[A-Za-z0-9]{8,30}$/.test(utr)) {
-      throw new ApiError(400, "UTR looks invalid — enter the 12-digit reference from your UPI app.");
-    }
-
-    const [payment] = await db.select().from(payments).where(eq(payments.id, payment_id)).limit(1);
-    if (!payment) throw new ApiError(404, "Payment not found");
-    if (payment.payer_user_id !== user.id) throw new ApiError(403, "Payment does not belong to this user");
-    if (payment.status !== "pending") {
-      throw new ApiError(400, `Payment is already in status '${payment.status}'. Refresh the page.`);
-    }
-
-    const [event] = await db
-      .select({ id: events.id, slug: events.slug })
-      .from(events)
-      .where(and(eq(events.slug, slug), isNull(events.deleted_at)))
-      .limit(1);
-    if (!event) throw new ApiError(404, "Event not found");
-    if (payment.ref_id !== event.id) throw new ApiError(400, "Payment is for a different event");
-
-    try {
-      const [updated] = await db.update(payments).set({
-        status: "pending_verification",
-        upi_utr: utr,
-        upi_screenshot_file_id: screenshot_file_id,
-        updated_at: new Date(),
-      }).where(eq(payments.id, payment.id)).returning();
-
-      return res.status(200).json({ ok: true, payment: updated });
-    } catch (e) {
-      // Duplicate UTR — someone submitted the same reference against a
-      // different registration. Almost always a copy/paste error; occasionally
-      // a fraud attempt. Either way, block it here and route the human to
-      // support so admin can eyeball both rows.
-      if (e && typeof e === "object" && "code" in e && (e as any).code === "23505") {
-        throw new ApiError(409, "This UTR has already been submitted for another payment. If this is a mistake, please contact the branch office.");
-      }
-      throw e;
-    }
-  } catch (err) { handleApiError(err, res, next); }
-});
+// The POST /api/events/:slug/submit-utr endpoint was removed by migration
+// 0100. In the UPI-manual era, users paid off-platform via a QR, then
+// submitted the UTR here so admin could verify it against the bank
+// statement. The SabPaisa flow eliminates both — payment is handled on
+// SabPaisa's hosted page and confirmation is driven by their callback +
+// webhook, no UTR to submit. Historical pending_verification rows are
+// still visible in the admin queue for backfill approval.
 
 // ─── GET /api/events/my-pending-payments ─────────────────────────────────
 // Returns the caller's payments currently awaiting admin verification, plus

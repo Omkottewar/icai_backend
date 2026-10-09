@@ -61,6 +61,7 @@ import { mentorshipRouter } from "./routes/mentorship.js";
 import { articleshipMatchesRouter } from "./routes/articleshipMatches.js";
 import { scholarshipsRouter } from "./routes/scholarships.js";
 import { speakerEventsRouter } from "./routes/speakerEvents.js";
+import { paymentsRouter } from "./routes/payments.js";
 
 const app = express();
 
@@ -181,6 +182,10 @@ app.use("/api/mentorship", mentorshipRouter);
 app.use("/api/articleship-matches", articleshipMatchesRouter);
 app.use("/api/scholarships", publicCache(300), scholarshipsRouter);
 app.use("/api/my-speaker-events", speakerEventsRouter);
+// SabPaisa posts callback/webhook data as application/x-www-form-urlencoded,
+// so the payments router gets its own urlencoded parser in addition to the
+// JSON parser already mounted above (JSON path handles /initiate + /status).
+app.use("/api/payments", express.urlencoded({ extended: true, limit: "100kb" }), paymentsRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {
