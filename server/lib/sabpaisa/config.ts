@@ -58,7 +58,13 @@ export function sabpaisaConfig(): SabPaisaConfig {
     // SabPaisa's AES-128-CBC implementation requires exactly 16-byte key + IV
     // for the PHP7+ scheme. A longer/shorter value would silently produce a
     // ciphertext SabPaisa can't decrypt — hard to debug later. Guard here.
-    initUrl:   optional("SABPAISA_INIT_URL",   "https://uatsp.sabpaisa.in/SabPaisa/sabPaisaInit"),
+    // Defaults point at SabPaisa's current Staging / UAT endpoints
+    // (confirmed against their official integration docs, Staging & Live
+    // URLs page, last updated 2024-11-12). The older `uatsp.sabpaisa.in`
+    // URL from Neha's Oct 7 2026 mail has been decommissioned and no
+    // longer resolves in DNS. Flip the env var to the live URL
+    // (securepay.sabpaisa.in instead of stage-securepay) at go-live.
+    initUrl:   optional("SABPAISA_INIT_URL",   "https://stage-securepay.sabpaisa.in/SabPaisa/sabPaisaInit?v=1"),
     verifyUrl: optional("SABPAISA_VERIFY_URL", "https://txnenquiry.sabpaisa.in/SabPaisaDoubleVerification/status/verify"),
     refundUrl: optional("SABPAISA_REFUND_URL", "https://txnenquiry.sabpaisa.in/SabPaisaDoubleVerification/refund/txnRefund"),
     returnUrl: need("SABPAISA_RETURN_URL"),

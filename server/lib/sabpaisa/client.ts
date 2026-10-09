@@ -63,11 +63,16 @@ export function buildInitRedirect(input: SabPaisaInitInput): SabPaisaInitRedirec
     currencyCode:      "INR",
   };
 
-  const encData = encrypt(JSON.stringify(payload), cfg.authKey, cfg.authIv);
+  // SabPaisa's PHP7+ init scheme embeds a fresh random IV in each encData,
+  // delimited by `:` — see crypto.ts for the wire format. The AUTH_IV from
+  // credentials is NOT used here; it's only a fallback on the decrypt path
+  // for legacy response payloads.
+  const encData = encrypt(JSON.stringify(payload), cfg.authKey);
 
   return {
-    action:     cfg.initUrl,
-    clientCode: cfg.clientCode,
+    action:      cfg.initUrl,
+    clientCode:  cfg.clientCode,
+    clientTxnId: input.clientTxnId,
     encData,
   };
 }

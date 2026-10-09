@@ -62,12 +62,16 @@ export interface SabPaisaInitPayload {
 }
 
 // Shape returned to the browser so it can auto-POST a form to SabPaisa's
-// hosted checkout. Three fields total; the actual payment data is inside
-// `encData`.
+// hosted checkout. `encData` carries the full encrypted payload; the
+// other three are routing fields SabPaisa needs in plaintext BEFORE it
+// decrypts (so it can look up which merchant to decrypt for, which
+// transaction this is, and reject the request fast if any of them are
+// malformed).
 export interface SabPaisaInitRedirect {
-  action:     string;           // SabPaisa init URL
-  clientCode: string;
-  encData:    string;           // AES-encrypted base64 of SabPaisaInitPayload
+  action:      string;          // SabPaisa init URL
+  clientCode:  string;
+  clientTxnId: string;          // echoed on every callback for correlation
+  encData:     string;          // AES-encrypted base64 of SabPaisaInitPayload
 }
 
 // Response fields SabPaisa posts back to our return URL. These are also

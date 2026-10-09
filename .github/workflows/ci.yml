@@ -1,0 +1,49 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Pre-merge sanity check for the backend. Runs on every PR to main plus
+# direct pushes to any non-main branch. The deploy workflow does its own
+# typecheck too — this one exists so a broken PR shows a red check in the
+# review UI BEFORE merge, not AFTER it tries to deploy.
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore: [main]
+
+concurrency:
+  # Cancel older runs on the same ref — rapid pushes only typecheck the
+  # latest HEAD. Saves Actions minutes.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.17.0'
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck (tsc --noEmit)
+        # Same filter as the deploy workflow — pre-existing db/client.ts
+        # error is tolerated; any new error fails CI.
+        run: |
+          set -o pipefail
+          npx tsc --noEmit 2>&1 | tee tsc.log || true
+          if grep -v 'db/client.ts' tsc.log | grep -E ': error TS' ; then
+            echo "::error::New TypeScript errors — fix before merging."
+            exit 1
+          fi

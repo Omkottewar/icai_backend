@@ -286,7 +286,7 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
     // Deterministic clientTxnId derived from the payment UUID — small
     // enough to fit SabPaisa's dashboard column, big enough to be globally
     // unique within our tenancy.
-    const clientTxnId = `NBW-${payment.id.replace(/-/g, "").slice(0, 20)}`;
+    const clientTxnId = `NBWRI-${payment.id.replace(/-/g, "").slice(0, 18)}`;
 
     let redirect;
     try {
@@ -325,9 +325,10 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
       // SabPaisa hosted-checkout redirect — frontend auto-POSTs an invisible
       // form carrying these three fields to `action`.
       sabpaisa: {
-        action:     redirect.action,
-        clientCode: redirect.clientCode,
-        encData:    redirect.encData,
+        action:      redirect.action,
+        clientCode:  redirect.clientCode,
+        clientTxnId: redirect.clientTxnId,
+        encData:     redirect.encData,
       },
       client_txn_id: clientTxnId,
       event: { title: event.title, slug: event.slug },

@@ -63,7 +63,7 @@ paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: A
     // Generate a fresh clientTxnId if the row doesn't have one yet. UUID
     // segments are too long for some SabPaisa dashboards — use a 24-char
     // slug that's still globally unique within the branch's txn history.
-    const clientTxnId = payment.client_txn_id ?? `NBW-${payment.id.replace(/-/g, "").slice(0, 20)}`;
+    const clientTxnId = payment.client_txn_id ?? `NBWRI-${payment.id.replace(/-/g, "").slice(0, 18)}`;
 
     const metadata = (payment.metadata ?? {}) as Record<string, unknown>;
     const payerName  = String(metadata.payer_name  ?? req.user!.name  ?? "");
@@ -95,6 +95,7 @@ paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: A
     return res.json({
       action:        redirect.action,
       clientCode:    redirect.clientCode,
+      clientTxnId:   redirect.clientTxnId,
       encData:       redirect.encData,
       client_txn_id: clientTxnId,
     });
@@ -288,6 +289,12 @@ paymentsRouter.post("/webhook", async (req, res, next) => {
 paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const id = need(trim(req.params.id), "Payment ID");
+    // Scope the lookup to the current user — otherwise any logged-in caller
+    // who learns a payment ID (easy: it's in the /payments/result URL after
+    // the SabPaisa redirect) can poll /status and read someone else's
+    // transaction, including whether it succeeded. Mirrors the ownership
+    // check in /initiate above. Returning 404 (not 403) avoids confirming
+    // the id exists for a non-owner.
     const [p] = await db.select({
       id: payments.id,
       status: payments.status,
@@ -300,7 +307,10 @@ paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, n
       rejected_reason: payments.rejected_reason,
       metadata: payments.metadata,
       updated_at: payments.updated_at,
-    }).from(payments).where(eq(payments.id, id)).limit(1);
+    }).from(payments).where(and(
+      eq(payments.id, id),
+      eq(payments.payer_user_id, req.user!.id),
+    )).limit(1);
     if (!p) throw new ApiError(404, "Payment not found");
     if (p.id !== id) throw new ApiError(404, "Payment not found");
 
