@@ -151,16 +151,22 @@ async function handleReturn(req: import("express").Request, res: import("express
       updated_at: new Date(),
     }).where(eq(payments.id, payment.id));
 
-    // The callback status is advisory. Call double-verify to get the
-    // authoritative outcome — SabPaisa's own docs say never trust the
-    // callback alone.
-    const { outcome: verifiedOutcome, response: verified } = await verifyPayment(clientTxnId).catch((e) => {
-      // Verify API down? Treat as pending — webhook will arrive separately
-      // and reconfirm. The SPA will poll /status in the meantime.
+    // The callback payload is itself AES-decrypted with the merchant's
+    // secret key, so a spoofed callback would need our key. Treat the
+    // callback's status as the primary signal; call double-verify as a
+    // defence-in-depth check but DON'T let a verify-API failure override
+    // a legit callback. (Earlier logic hard-defaulted to 'pending' on
+    // verify failure which left visibly-successful payments stuck.)
+    const callbackOutcome = mapSabPaisaStatus(payload.status);
+
+    const verifyResult = await verifyPayment(clientTxnId).catch((e) => {
       // eslint-disable-next-line no-console
-      console.error("[sabpaisa] verify failed on /return:", e);
-      return { outcome: "pending" as const, response: {} as import("../lib/sabpaisa/types.js").SabPaisaVerifyResponse };
+      console.error("[sabpaisa] verify failed on /return — falling back to callback status:", e);
+      return null;
     });
+
+    const verifiedOutcome = verifyResult?.outcome ?? callbackOutcome;
+    const verified = verifyResult?.response ?? payload;
 
     const sabpaisaTxnId = verified.sabpaisaTxnId ?? payload.sabpaisaTxnId ?? null;
 

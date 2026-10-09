@@ -15,7 +15,8 @@ import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { notifyAsync } from "../../lib/notify.js";
 import { sendEmail } from "../../lib/email.js";
 import { storage } from "../../lib/storage.js";
-import { buildInitRedirect, paiseToRupees } from "../../lib/sabpaisa/client.js";
+import { buildInitRedirect, paiseToRupees, verifyPayment } from "../../lib/sabpaisa/client.js";
+import { confirmPaymentAndFulfil, markPaymentFailed } from "../../lib/sabpaisa/confirm.js";
 
 // Compact helper: null for empty paths so the admin UI can skip the
 // "View screenshot" link when no attachment was submitted.
@@ -512,5 +513,59 @@ paymentsAdminRouter.post("/test", async (req: AuthedRequest, res, next) => {
         encData:     redirect.encData,
       },
     });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/payments/:id/reverify ────────────────────────────────
+// Manually re-runs the SabPaisa server-to-server verify call against a
+// stuck payment row and, if SabPaisa confirms success, triggers the same
+// fulfilment path (`confirmPaymentAndFulfil`) that the return/webhook
+// handlers would. Use this when:
+//   • The webhook hasn't arrived (push URL not registered yet with SabPaisa)
+//   • An earlier version of /return failed verify and left the row pending
+//   • Reconciliation discovers a successful SabPaisa txn with no local row
+//
+// Only works on `provider = 'sabpaisa'` rows that are still 'pending' or
+// 'created'. Terminal states (success/failed/refunded) are left alone.
+paymentsAdminRouter.post("/:id/reverify", async (req, res, next) => {
+  try {
+    const id = trim(req.params.id);
+    const [payment] = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
+    if (!payment) throw new ApiError(404, "Payment not found");
+    if (payment.provider !== "sabpaisa") {
+      throw new ApiError(400, "Re-verify only applies to SabPaisa payments");
+    }
+    if (!payment.client_txn_id) {
+      throw new ApiError(400, "Payment has no client_txn_id (never submitted to SabPaisa?)");
+    }
+    if (payment.status === "success" || payment.status === "refunded" || payment.status === "partially_refunded") {
+      return res.json({ ok: true, note: "Payment already in terminal success state", payment });
+    }
+
+    const { outcome, response } = await verifyPayment(payment.client_txn_id);
+
+    const sabpaisaTxnId = response.sabpaisaTxnId ?? null;
+    await db.update(payments).set({
+      sabpaisa_txn_id:       sabpaisaTxnId ?? payment.sabpaisa_txn_id,
+      sabpaisa_status_code:  response.statusCode ?? payment.sabpaisa_status_code,
+      sabpaisa_payment_mode: response.paymentMode ?? payment.sabpaisa_payment_mode,
+      sabpaisa_bank_name:    response.bankName ?? payment.sabpaisa_bank_name,
+      sabpaisa_bank_txn_id:  response.bankTxnId ?? payment.sabpaisa_bank_txn_id,
+      sabpaisa_response:     { ...(payment.sabpaisa_response as object || {}), reverify: response } as any,
+      last_verified_at:      new Date(),
+      updated_at:            new Date(),
+    }).where(eq(payments.id, payment.id));
+
+    if (outcome === "success") {
+      await confirmPaymentAndFulfil(payment.id);
+      return res.json({ ok: true, outcome: "success", sabpaisaTxnId });
+    }
+    if (outcome === "failed" || outcome === "aborted") {
+      const reason = response.bankErrorMessage ?? `SabPaisa reverify reported ${outcome}`;
+      await markPaymentFailed(payment.id, reason);
+      return res.json({ ok: true, outcome, reason });
+    }
+    // Still pending at SabPaisa.
+    return res.json({ ok: true, outcome: "pending", note: "SabPaisa has not resolved this txn yet. Try again in a minute." });
   } catch (err) { handleApiError(err, res, next); }
 });
