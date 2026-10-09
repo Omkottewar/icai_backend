@@ -15,6 +15,7 @@ import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { notifyAsync } from "../../lib/notify.js";
 import { sendEmail } from "../../lib/email.js";
 import { storage } from "../../lib/storage.js";
+import { buildInitRedirect, paiseToRupees } from "../../lib/sabpaisa/client.js";
 
 // Compact helper: null for empty paths so the admin UI can skip the
 // "View screenshot" link when no attachment was submitted.
@@ -433,5 +434,83 @@ paymentsAdminRouter.get("/:id", async (req, res, next) => {
       .orderBy(desc(paymentRefunds.requested_at));
 
     res.json({ payment: p, refunds });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/payments/test ────────────────────────────────────────
+// Admin-only SabPaisa smoke-test launcher. Creates a throwaway payment row
+// with the admin as the payer, marks it `is_test` in metadata, and returns
+// the SabPaisa init payload so the admin UI can open a popup to the
+// hosted checkout — no need to log out, create a dummy member, and go
+// through the full event-registration flow every time you need to retest
+// an SabPaisa integration change.
+//
+// Body: { amount_paise?: number, description?: string }
+//   amount_paise defaults to 100 (₹1) so a mis-click costs a rupee at
+//   most if the admin accidentally runs it against live credentials.
+//
+// Rows created here are tagged `metadata.is_test = true` so they can be
+// filtered out of financial reports and treasurer dashboards.
+paymentsAdminRouter.post("/test", async (req: AuthedRequest, res, next) => {
+  try {
+    const amount = Math.max(100, Math.min(10_000_00, Number(req.body?.amount_paise ?? 100)));
+    const description = String(req.body?.description ?? "SabPaisa integration test").slice(0, 200);
+
+    const admin = req.user;
+    if (!admin) throw new ApiError(401, "Unauthenticated");
+
+    const [payment] = await db.insert(payments).values({
+      payer_user_id: admin.id,
+      amount_paise: amount,
+      currency: "INR",
+      status: "pending",
+      provider: "sabpaisa",
+      purpose: "other",
+      ref_type: "admin_test",
+      ref_id: null,
+      metadata: {
+        is_test:         true,
+        description,
+        created_from:    "admin_test_panel",
+        payer_name:      admin.name,
+        payer_email:     admin.email,
+        payer_phone:     admin.phone ?? "9999999999",
+      },
+    }).returning();
+
+    // Match the clientTxnId format used by the real register path.
+    const clientTxnId = `NBWRI-${payment.id.replace(/-/g, "").slice(0, 18)}`;
+
+    let redirect;
+    try {
+      redirect = buildInitRedirect({
+        clientTxnId,
+        amountRupees: paiseToRupees(amount),
+        payerName:  admin.name,
+        payerEmail: admin.email,
+        payerMobile: admin.phone ?? "9999999999",
+        udf1: "admin_test",
+        udf2: payment.id,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new ApiError(503, `SabPaisa is not configured (${msg}). Set SABPAISA_* env vars first.`);
+    }
+
+    await db.update(payments).set({
+      client_txn_id: clientTxnId,
+      updated_at: new Date(),
+    }).where(eq(payments.id, payment.id));
+
+    res.json({
+      payment_id: payment.id,
+      amount_paise: amount,
+      sabpaisa: {
+        action:      redirect.action,
+        clientCode:  redirect.clientCode,
+        clientTxnId: redirect.clientTxnId,
+        encData:     redirect.encData,
+      },
+    });
   } catch (err) { handleApiError(err, res, next); }
 });
