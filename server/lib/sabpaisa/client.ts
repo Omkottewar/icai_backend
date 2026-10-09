@@ -63,11 +63,16 @@ export function buildInitRedirect(input: SabPaisaInitInput): SabPaisaInitRedirec
     currencyCode:      "INR",
   };
 
-  // SabPaisa's PHP7+ init scheme embeds a fresh random IV in each encData,
-  // delimited by `:` — see crypto.ts for the wire format. The AUTH_IV from
-  // credentials is NOT used here; it's only a fallback on the decrypt path
-  // for legacy response payloads.
-  const encData = encrypt(JSON.stringify(payload), cfg.authKey);
+  // SabPaisa's `v=1` init expects the decrypted plaintext as a
+  // URL-encoded query string (`clientCode=X&transUserName=Y&...`), NOT
+  // JSON. Discovered empirically — sending JSON got past DECRYPT_FAILED
+  // but then triggered "clientTxnId is required" because their parser
+  // couldn't read the JSON object.
+  //
+  // Random IV embedded in the encData string per PHP7+ scheme — see
+  // crypto.ts. The AUTH_IV from credentials is only used as a fallback
+  // when decrypting legacy response payloads.
+  const encData = encrypt(toQueryString(payload as unknown as Record<string, string>), cfg.authKey);
 
   return {
     action:      cfg.initUrl,
@@ -208,4 +213,19 @@ function truncate(v: string | null | undefined, max: number): string {
 // SabPaisa expects on the wire. 10000 paise → "100.00".
 export function paiseToRupees(paise: number): string {
   return (paise / 100).toFixed(2);
+}
+
+// Serialises a payload object as a URL-encoded query string in the exact
+// order the keys appear in the source object. SabPaisa's `v=1` endpoint
+// decrypts encData and parses the result as `k=v&k=v` (not JSON) — see
+// the comment in buildInitRedirect for the discovery context.
+//
+// Values are passed through encodeURIComponent so special chars in the
+// payer address / udf1 (event id with hyphens) don't break the parser.
+// Empty-string values are kept (SabPaisa requires udf1-20 to all be
+// present even when blank — a dropped key triggers a MISSING_FIELD).
+function toQueryString(obj: Record<string, string>): string {
+  return Object.entries(obj)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v ?? "")}`)
+    .join("&");
 }
