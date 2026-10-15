@@ -350,6 +350,19 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
 // the events page and the dashboard. Members can see status + submitted
 // timestamp but not the reject reason (that lives in the rejection email
 // only, to keep the UI copy simple).
+//
+// Stale-pending suppression: a `pending` row is created the moment the user
+// clicks Register (before SabPaisa), so hitting Back without paying leaves
+// an orphan. We hide:
+//   • `pending` rows older than 15 minutes — SabPaisa confirms successful
+//     payments within seconds; anything older is almost certainly abandoned.
+//   • rows flagged `metadata.abandoned_at` — user explicitly cancelled via
+//     the abandon endpoint below.
+// We DO NOT touch `status` for either case: if SabPaisa's webhook arrives
+// late with a successful payment, the normal confirm flow still runs and
+// creates the registration. The UI just stops nagging the user.
+// `pending_verification` rows (legacy UPI-manual) are always shown — those
+// need admin action and have no auto-timeout.
 registrationsRouter.get("/my-pending-payments", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const rows = await db
@@ -369,10 +382,42 @@ registrationsRouter.get("/my-pending-payments", requireUser, async (req: AuthedR
         eq(payments.payer_user_id, req.user!.id),
         eq(payments.purpose, "event_registration"),
         isNull(payments.deleted_at),
-        sql`${payments.status} in ('pending', 'pending_verification')`,
+        sql`(
+          ${payments.status} = 'pending_verification'
+          OR (
+            ${payments.status} = 'pending'
+            AND ${payments.created_at} > now() - interval '15 minutes'
+            AND (${payments.metadata} ->> 'abandoned_at') IS NULL
+          )
+        )`,
       ))
       .orderBy(sql`${payments.created_at} desc`);
     res.json({ rows });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/events/my-pending-payments/:id/abandon ────────────────────
+// User-initiated cancel for a pending SabPaisa payment they bailed on.
+// Soft-flags `metadata.abandoned_at` so the pill disappears immediately.
+// Status stays 'pending' so a late webhook can still promote it to success.
+// Only the payer may abandon their own payment, and only while it's still
+// `pending` (not after success/failure/refund).
+registrationsRouter.post("/my-pending-payments/:id/abandon", requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const [payment] = await db
+      .select({ id: payments.id, status: payments.status, payer: payments.payer_user_id, metadata: payments.metadata })
+      .from(payments)
+      .where(eq(payments.id, req.params.id))
+      .limit(1);
+    if (!payment || payment.payer !== req.user!.id) throw new ApiError(404, "Payment not found");
+    if (payment.status !== "pending") throw new ApiError(400, `Cannot abandon a payment in status '${payment.status}'`);
+
+    await db.update(payments).set({
+      metadata: { ...(payment.metadata as object), abandoned_at: new Date().toISOString() },
+      updated_at: new Date(),
+    }).where(eq(payments.id, payment.id));
+
+    res.json({ ok: true });
   } catch (err) { handleApiError(err, res, next); }
 });
 
