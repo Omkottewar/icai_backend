@@ -86,7 +86,7 @@ export const SITE_SLOTS = {
       { key: "title_prefix",     label: "Title prefix (e.g. \"Nagpur Branch of\")",    kind: "text" },
       { key: "title_highlight",  label: "Title highlight (e.g. \"ICAI\")",             kind: "text", hint: "Coloured part of the headline" },
       { key: "cta_events_label", label: "Primary CTA — Events button label",           kind: "text" },
-      { key: "cta_ai_label",     label: "Secondary CTA — PrayGyaan AI button label",   kind: "text" },
+      { key: "cta_ai_label",     label: "Secondary CTA — Pragyaan AI button label",    kind: "text" },
       { key: "cta_signup_label", label: "Signup CTA (shown only to logged-out users)", kind: "text" },
     ],
   },
