@@ -99,7 +99,12 @@ branchContentRouter.get("/paper-presentations/best-paper", async (_req, res, nex
       .orderBy(desc(paperPresentations.award_year))
       .limit(1);
 
-    if (!row) return res.status(404).json({ error: "no_winner_yet" });
+    // No winning paper yet (either none seeded or branch hasn't picked one).
+    // Return 200 with an empty object rather than 404 so the Best Paper
+    // homepage popup component's fetch resolves cleanly without surfacing a
+    // network error in the browser devtools. Frontend already checks for
+    // `j.slug` before showing the popup.
+    if (!row) return res.json({});
 
     res.json({
       ...row,
