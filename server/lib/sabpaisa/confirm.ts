@@ -13,14 +13,19 @@
 
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
-import { payments, events, eventRegistrations } from "../../../schema/index.js";
+import { payments, events, eventRegistrations, jobPostings } from "../../../schema/index.js";
 import { notifyAsync } from "../notify.js";
+import { dispatchJobAlerts } from "../jobAlerts.js";
 
 export interface ConfirmResult {
   ok: true;
   alreadyConfirmed: boolean;
   createdCount: number;
   waitlistedCount: number;
+  // For job_posting purpose: the posting_id that was published, if any.
+  // Lets the return handler surface it in the result page redirect so
+  // the employer lands back on their posting after SabPaisa's bounce.
+  activatedPostingId?: string | null;
 }
 
 // Caller already decided the SabPaisa outcome is "success" — this fn
@@ -34,6 +39,57 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
     // Idempotent short-circuit — webhook/return race safety.
     if (payment.status === "success") {
       return { alreadyConfirmed: true, event: null, createdRows: [] as Array<{ id: string; user_id: string; status: string }>, waitlistedCount: 0 };
+    }
+
+    if (payment.purpose === "job_posting") {
+      // Publish the job posting the payment paid for. The posting was
+      // created in 'pending_payment' state by POST /api/employer/postings;
+      // we flip it to 'active' only now that money actually landed.
+      // Idempotent — if the posting is already active we just no-op.
+      if (!payment.ref_id) {
+        throw new Error(`Payment ${paymentId}: job_posting purpose but no ref_id`);
+      }
+      const [posting] = await tx.select().from(jobPostings)
+        .where(and(eq(jobPostings.id, payment.ref_id), isNull(jobPostings.deleted_at)))
+        .limit(1);
+      if (!posting) {
+        // Posting got deleted between pending-payment and confirmation —
+        // flip the payment to success anyway (money landed) and tag the
+        // row for the treasurer's refund attention.
+        await tx.update(payments).set({
+          status: "success",
+          metadata: { ...(payment.metadata as object || {}), needs_refund: "posting_deleted_after_payment" },
+          updated_at: new Date(),
+        }).where(eq(payments.id, payment.id));
+        return {
+          alreadyConfirmed: false,
+          event: null,
+          createdRows: [] as Array<{ id: string; user_id: string; status: string }>,
+          waitlistedCount: 0,
+          activatedPostingId: null as string | null,
+        };
+      }
+
+      if (posting.status !== "active") {
+        await tx.update(jobPostings).set({
+          status:     "active",
+          payment_id: payment.id,
+          updated_at: new Date(),
+        }).where(eq(jobPostings.id, posting.id));
+      }
+
+      await tx.update(payments).set({
+        status: "success",
+        updated_at: new Date(),
+      }).where(eq(payments.id, payment.id));
+
+      return {
+        alreadyConfirmed: false,
+        event: null,
+        createdRows: [] as Array<{ id: string; user_id: string; status: string }>,
+        waitlistedCount: 0,
+        activatedPostingId: posting.id,
+      };
     }
 
     if (payment.purpose !== "event_registration") {
@@ -115,8 +171,17 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
       event,
       createdRows,
       waitlistedCount: regStatus === "waitlisted" ? createdRows.length : 0,
+      activatedPostingId: null as string | null,
     };
   });
+
+  // Fire job-alert dispatch outside the txn — a posting that just went
+  // live from pending_payment should fan out to its category subscribers
+  // just like a free posting would have on creation. dispatchJobAlerts
+  // never throws (it logs internally) so it's safe to await here.
+  if (!result.alreadyConfirmed && result.activatedPostingId) {
+    await dispatchJobAlerts(result.activatedPostingId).catch(() => { /* swallow */ });
+  }
 
   // Fire S.1 confirmations outside the txn. notifyAsync never throws so
   // these are fire-and-forget.
@@ -149,6 +214,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
     alreadyConfirmed: result.alreadyConfirmed,
     createdCount: result.createdRows.length,
     waitlistedCount: result.waitlistedCount,
+    activatedPostingId: result.activatedPostingId,
   };
 }
 

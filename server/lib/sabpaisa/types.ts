@@ -110,11 +110,18 @@ export type SabPaisaVerifyResponse = SabPaisaCallbackPayload;
 // outcome yet — the double-verify loop retries until it resolves.
 export type SabPaisaOutcome = "success" | "failed" | "pending" | "aborted";
 
+// SabPaisa's Transaction Enquiry API documents these numeric status codes:
+//   SUCCESS   = "0000"
+//   INITIATED = "0100"   (treated as pending — not yet resolved)
+//   ABORTED   = "0200"   (user cancelled)
+//   FAILED    = "0300"
+// The `status` field also carries the WORD form (SUCCESS / FAILED / ...),
+// so the mapper accepts either and normalises on uppercase.
 export function mapSabPaisaStatus(raw: string | undefined | null): SabPaisaOutcome {
   const s = (raw ?? "").toUpperCase().trim();
   if (s === "SUCCESS" || s === "SUCCESSFUL" || s === "0000") return "success";
-  if (s === "FAILED" || s === "FAILURE")                     return "failed";
-  if (s === "ABORTED" || s === "CANCELLED" || s === "CANCELED") return "aborted";
-  // CHALLENGED / PENDING / INITIATED / anything else — treat as pending.
+  if (s === "FAILED" || s === "FAILURE" || s === "0300")     return "failed";
+  if (s === "ABORTED" || s === "CANCELLED" || s === "CANCELED" || s === "0200") return "aborted";
+  // CHALLENGED / PENDING / INITIATED / 0100 / anything else → pending.
   return "pending";
 }

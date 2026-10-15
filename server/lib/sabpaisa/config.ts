@@ -59,14 +59,17 @@ export function sabpaisaConfig(): SabPaisaConfig {
     // for the PHP7+ scheme. A longer/shorter value would silently produce a
     // ciphertext SabPaisa can't decrypt — hard to debug later. Guard here.
     // Defaults point at SabPaisa's current Staging / UAT endpoints
-    // (confirmed against their official integration docs, Staging & Live
-    // URLs page, last updated 2024-11-12). The older `uatsp.sabpaisa.in`
-    // URL from Neha's Oct 7 2026 mail has been decommissioned and no
-    // longer resolves in DNS. Flip the env var to the live URL
-    // (securepay.sabpaisa.in instead of stage-securepay) at go-live.
+    // (confirmed against their official integration docs). The older
+    // `uatsp.sabpaisa.in` + `/SabPaisaDoubleVerification/status/verify`
+    // URLs have been decommissioned. Flip to the live URLs at go-live:
+    //   SABPAISA_INIT_URL   → https://securepay.sabpaisa.in/SabPaisa/sabPaisaInit?v=1
+    //   SABPAISA_VERIFY_URL → https://txnenquiry.sabpaisa.in/SPTxtnEnquiry/getTxnStatusByClientxnId
+    //   SABPAISA_REFUND_URL → confirm with Sushanta — the stage URL for
+    //                         refund hasn't been shared yet so this default
+    //                         is a best guess; it will fail cleanly if wrong.
     initUrl:   optional("SABPAISA_INIT_URL",   "https://stage-securepay.sabpaisa.in/SabPaisa/sabPaisaInit?v=1"),
-    verifyUrl: optional("SABPAISA_VERIFY_URL", "https://txnenquiry.sabpaisa.in/SabPaisaDoubleVerification/status/verify"),
-    refundUrl: optional("SABPAISA_REFUND_URL", "https://txnenquiry.sabpaisa.in/SabPaisaDoubleVerification/refund/txnRefund"),
+    verifyUrl: optional("SABPAISA_VERIFY_URL", "https://stage-txnenquiry.sabpaisa.in/SPTxtnEnquiry/getTxnStatusByClientxnId"),
+    refundUrl: optional("SABPAISA_REFUND_URL", "https://stage-txnenquiry.sabpaisa.in/SPTxtnEnquiry/refundRequest"),
     returnUrl: need("SABPAISA_RETURN_URL"),
   };
 

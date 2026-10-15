@@ -542,7 +542,18 @@ paymentsAdminRouter.post("/:id/reverify", async (req, res, next) => {
       return res.json({ ok: true, note: "Payment already in terminal success state", payment });
     }
 
-    const { outcome, response } = await verifyPayment(payment.client_txn_id);
+    let outcome, response;
+    try {
+      ({ outcome, response } = await verifyPayment(payment.client_txn_id));
+    } catch (e) {
+      // Surface the SabPaisa error verbatim so the admin UI shows a
+      // useful message (not a generic 500). Common causes: verify URL
+      // wrong, auth credentials rejected, response shape unexpected.
+      const msg = e instanceof Error ? e.message : String(e);
+      // eslint-disable-next-line no-console
+      console.error("[sabpaisa] reverify fetch failed:", msg);
+      throw new ApiError(502, `SabPaisa verify API call failed: ${msg}`);
+    }
 
     const sabpaisaTxnId = response.sabpaisaTxnId ?? null;
     await db.update(payments).set({

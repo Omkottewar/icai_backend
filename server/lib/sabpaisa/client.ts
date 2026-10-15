@@ -7,7 +7,7 @@
 // job posting payment surface.
 
 import { sabpaisaConfig } from "./config.js";
-import { encrypt, decrypt } from "./crypto.js";
+import { encrypt, decrypt, encryptLegacyHex, decryptLegacyHex } from "./crypto.js";
 import {
   type SabPaisaInitInput,
   type SabPaisaInitPayload,
@@ -111,13 +111,25 @@ function parsePayloadString(plain: string): SabPaisaCallbackPayload {
   return out;
 }
 
-// ─── Double verification ──────────────────────────────────────────────────
-// Server-to-server status check. We call this before trusting a success
-// callback — SabPaisa documents say the callback can be spoofed by anyone
-// who knows the return URL + a plausible payload, so an authoritative
-// status read is a strict pre-approval.
+// ─── Transaction Enquiry (status verification) ───────────────────────────
+// Server-to-server status check per SabPaisa's "Transaction Enquiry API"
+// spec. Uses the LEGACY PHP5 encryption scheme (hex ciphertext, fixed IV
+// from credentials) — distinct from the init endpoint's PHP7+ scheme.
 //
-// Returns the normalised outcome plus the raw response for storage.
+// Request:
+//   POST <verifyUrl>
+//   Content-Type: application/json
+//   Body: {
+//     "clientCode": "<code>",
+//     "statusTransEncData": "<hex ciphertext of 'clientCode=X&clientTxnId=Y'>"
+//   }
+//
+// Response:
+//   { "clientCode": "<code>", "statusResponseData": "<hex ciphertext of 'k=v&k=v&...'>" }
+//
+// Decrypted response is a query string with fields: payerName, payerEmail,
+// amount, paymentMode, bankName, status (SUCCESS/INITIATED/FAILED/ABORTED),
+// statusCode (0000/0100/0300/0200), sabpaisaTxnId, sabpaisaMessage, etc.
 
 export async function verifyPayment(clientTxnId: string): Promise<{
   outcome: SabPaisaOutcome;
@@ -125,19 +137,16 @@ export async function verifyPayment(clientTxnId: string): Promise<{
 }> {
   const cfg = sabpaisaConfig();
 
-  // SabPaisa's verify API accepts: { clientCode, transUserName,
-  // transUserPassword, clientTxnId }. Same credential block as init.
-  const body = {
-    clientCode:        cfg.clientCode,
-    transUserName:     cfg.username,
-    transUserPassword: cfg.password,
-    clientTxnId,
-  };
+  const enquiryPlaintext = `clientCode=${cfg.clientCode}&clientTxnId=${clientTxnId}`;
+  const statusTransEncData = encryptLegacyHex(enquiryPlaintext, cfg.authKey, cfg.authIv);
 
   const res = await fetch(cfg.verifyUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
-    body: JSON.stringify(body),
+    headers: sabpaisaFetchHeaders(),
+    body: JSON.stringify({
+      clientCode: cfg.clientCode,
+      statusTransEncData,
+    }),
   });
 
   if (!res.ok) {
@@ -145,13 +154,22 @@ export async function verifyPayment(clientTxnId: string): Promise<{
   }
 
   const parsed = await res.json().catch(() => ({})) as any;
+  const encrypted = parsed?.statusResponseData ?? parsed?.data?.statusResponseData ?? "";
+  if (!encrypted || typeof encrypted !== "string") {
+    throw new Error(`SabPaisa verify: no statusResponseData in response body: ${JSON.stringify(parsed).slice(0, 200)}`);
+  }
 
-  // SabPaisa wraps the response in a `data` or `response` envelope on
-  // different endpoints. Normalise so callers always see the flat payload.
-  const payload: SabPaisaVerifyResponse = parsed?.data ?? parsed?.response ?? parsed;
-  const outcome = mapSabPaisaStatus(payload?.status);
+  const decoded = decryptLegacyHex(encrypted, cfg.authKey, cfg.authIv);
+  const response: SabPaisaVerifyResponse = {};
+  for (const [k, v] of new URLSearchParams(decoded)) {
+    response[k] = v;
+  }
 
-  return { outcome, response: payload };
+  // SabPaisa reports status in both the word form (SUCCESS/FAILED/...) and
+  // the numeric code form (0000/0300/...). mapSabPaisaStatus takes either.
+  const outcome = mapSabPaisaStatus(response.status ?? response.statusCode);
+
+  return { outcome, response };
 }
 
 // ─── Refund ───────────────────────────────────────────────────────────────
@@ -186,7 +204,7 @@ export async function refundPayment(input: SabPaisaRefundInput): Promise<{
 
   const res = await fetch(cfg.refundUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    headers: sabpaisaFetchHeaders(),
     body: JSON.stringify(body),
   });
 
@@ -203,6 +221,24 @@ export async function refundPayment(input: SabPaisaRefundInput): Promise<{
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
+// Headers for every server-to-server call to SabPaisa (verify, refund).
+// Fly.io's shared outbound IPs + Node's default empty User-Agent were
+// getting flagged as a bot by Cloudflare's protection in front of
+// `sabpaisa.in` — HTTP 403 "Sorry, you have been blocked". Sending a
+// realistic set of headers from an identifiable merchant integration
+// gets through the standard bot-score filter.
+//
+// If the block persists, the next step is to ask Sushanta to whitelist
+// our Fly machine's outbound IP range on their WAF / Cloudflare rules.
+function sabpaisaFetchHeaders(): Record<string, string> {
+  return {
+    "Content-Type":    "application/json",
+    "Accept":          "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent":      "ICAINagpurPortal/1.0 (+https://icainagpur.in; merchant=NBWRI; integration=SabPaisa)",
+  };
+}
 
 function truncate(v: string | null | undefined, max: number): string {
   const s = (v ?? "").trim();

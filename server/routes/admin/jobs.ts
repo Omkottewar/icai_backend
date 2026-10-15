@@ -9,18 +9,12 @@ import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
 import { dispatchJobAlerts } from "../../lib/jobAlerts.js";
 import { logAudit, saveVersion, actorFromReq } from "../../lib/audit.js";
 import { buildCsv, sendCsv } from "../../lib/csv.js";
+import { JOB_POSTING_FEE_PAISE as FEE_PAISE } from "../../lib/jobPostingFees.js";
 
 export const jobsAdminRouter = Router();
 
 const POSTING_TYPES = ["job", "articleship", "assignment"] as const;
 const POSTING_STATUSES = ["draft", "pending_payment", "active", "filled", "expired", "closed"] as const;
-
-// Fixed fee per posting type (paise). Payment flow not wired yet — stored for future use.
-const FEE_PAISE: Record<typeof POSTING_TYPES[number], number> = {
-  job:         100000,  // ₹1,000
-  articleship:  50000,  // ₹500
-  assignment:  100000,  // ₹1,000 — short-term / freelance engagements for members
-};
 
 function pickType(v: unknown): typeof POSTING_TYPES[number] {
   return POSTING_TYPES.includes(v as any) ? (v as typeof POSTING_TYPES[number]) : "job";

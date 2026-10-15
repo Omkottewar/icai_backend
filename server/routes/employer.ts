@@ -2,15 +2,16 @@ import { Router } from "express";
 import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import {
-  employers, jobPostings, jobApplications, jobCategories, users, files,
+  employers, jobPostings, jobApplications, jobCategories, users, files, payments,
 } from "../../schema/index.js";
 import { requireUser } from "../middleware/requireUser.js";
 import { requireEmployer, type EmployerRequest } from "../middleware/requireEmployer.js";
 import { sameOrigin } from "../middleware/sameOrigin.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
-import { dispatchJobAlerts } from "../lib/jobAlerts.js";
 import { notify } from "../lib/notify.js";
 import { storage } from "../lib/storage.js";
+import { JOB_POSTING_FEE_PAISE } from "../lib/jobPostingFees.js";
+import { buildInitRedirect, paiseToRupees } from "../lib/sabpaisa/client.js";
 
 export const employerRouter = Router();
 
@@ -212,25 +213,193 @@ employerRouter.get("/postings/:id", async (req: EmployerRequest, res, next) => {
 });
 
 // ─── POST /api/employer/postings ──────────────────────────────────────────
-// Auto-publish (Q2 from plan): new postings go straight to status='active'.
-// Server stamps employer_id from session — client cannot spoof it.
+// Creates a posting in `pending_payment` state + initiates a SabPaisa
+// payment for the per-type fee. The posting goes LIVE only after the
+// payment confirms via SabPaisa's callback/webhook — see
+// confirmPaymentAndFulfil's `job_posting` branch which flips status to
+// 'active' and fires job alerts.
+//
+// Returns:
+//   {
+//     item: <posting row>,
+//     payment: {
+//       payment_id, amount_paise,
+//       sabpaisa: { action, clientCode, clientTxnId, encData }
+//     }
+//   }
+//
+// The browser auto-POSTs the sabpaisa block to SabPaisa's hosted checkout
+// (same pattern as event-registration flow).
 employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, next) => {
   try {
     const parsed = parsePostingBody(req.body);
-    const [row] = await db.insert(jobPostings).values({
-      ...parsed,
-      employer_id:    req.employer!.id,
-      poster_user_id: req.user!.id,
-      status:         "active",
-      fee_paise:      0,                // free for v1 (Q3)
-    }).returning();
-    // Fire per-subscriber instant alerts — safe to await (dispatchJobAlerts
-    // never throws) so any DB error inside is logged instead of leaking a
-    // 500 back to the poster after the row is already saved.
-    await dispatchJobAlerts(row.id);
-    res.json({ item: row });
+    const feePaise = JOB_POSTING_FEE_PAISE[parsed.type];
+
+    // Both inserts happen in one txn so a crash between them doesn't leave
+    // an orphaned posting with no payment or vice versa.
+    const { posting, payment } = await db.transaction(async (tx) => {
+      const [posting] = await tx.insert(jobPostings).values({
+        ...parsed,
+        employer_id:    req.employer!.id,
+        poster_user_id: req.user!.id,
+        status:         "pending_payment",
+        fee_paise:      feePaise,
+      }).returning();
+
+      const [payment] = await tx.insert(payments).values({
+        payer_user_id: req.user!.id,
+        amount_paise:  feePaise,
+        currency:      "INR",
+        status:        "pending",
+        provider:      "sabpaisa",
+        purpose:       "job_posting",
+        ref_type:      "job_posting",
+        ref_id:        posting.id,
+        metadata: {
+          posting_title: posting.title,
+          posting_type:  posting.type,
+          employer_id:   req.employer!.id,
+          payer_name:    req.user!.name,
+          payer_email:   req.user!.email,
+          payer_phone:   req.user!.phone ?? "",
+        },
+      }).returning();
+
+      // Link the posting back to the payment (nullable so we can clear
+      // it on refund without cascading).
+      await tx.update(jobPostings)
+        .set({ payment_id: payment.id, updated_at: new Date() })
+        .where(eq(jobPostings.id, posting.id));
+
+      return { posting, payment };
+    });
+
+    const clientTxnId = `NBWRI-${payment.id.replace(/-/g, "").slice(0, 18)}`;
+
+    let redirect;
+    try {
+      redirect = buildInitRedirect({
+        clientTxnId,
+        amountRupees: paiseToRupees(feePaise),
+        payerName:  req.user!.name,
+        payerEmail: req.user!.email,
+        payerMobile: req.user!.phone ?? "",
+        udf1: "job_posting",
+        udf2: posting.id,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
+    }
+
+    await db.update(payments).set({
+      client_txn_id: clientTxnId,
+      updated_at: new Date(),
+    }).where(eq(payments.id, payment.id));
+
+    res.json({
+      item: posting,
+      payment: {
+        payment_id:   payment.id,
+        amount_paise: feePaise,
+        sabpaisa: {
+          action:      redirect.action,
+          clientCode:  redirect.clientCode,
+          clientTxnId: redirect.clientTxnId,
+          encData:     redirect.encData,
+        },
+      },
+    });
   } catch (err) { handleApiError(err, res, next); }
 });
+
+// ─── POST /api/employer/postings/:id/pay ─────────────────────────────────
+// Re-initiate SabPaisa for a posting that's still in `pending_payment`
+// — happens when the employer closed the SabPaisa tab, their card was
+// declined, or the first payment attempt timed out. We create a FRESH
+// payment row (don't try to retry the old one — SabPaisa doesn't allow
+// reusing a clientTxnId after failure) and link the posting to it.
+//
+// Returns the same `payment` shape as POST /postings so the frontend's
+// SabPaisa redirect form can be reused as-is.
+employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest, res, next) => {
+  try {
+    const postingId = String(req.params.id);
+    const [posting] = await db.select().from(jobPostings).where(and(
+      eq(jobPostings.id, postingId),
+      eq(jobPostings.employer_id, req.employer!.id),
+      isNull(jobPostings.deleted_at),
+    )).limit(1);
+    if (!posting) throw new ApiError(404, "Posting not found");
+    if (posting.status !== "pending_payment") {
+      throw new ApiError(400, `Posting is '${posting.status}' — only pending_payment postings can retry payment.`);
+    }
+
+    const feePaise = posting.fee_paise > 0 ? posting.fee_paise : JOB_POSTING_FEE_PAISE[posting.type as "job" | "articleship" | "assignment"];
+
+    const [payment] = await db.insert(payments).values({
+      payer_user_id: req.user!.id,
+      amount_paise:  feePaise,
+      currency:      "INR",
+      status:        "pending",
+      provider:      "sabpaisa",
+      purpose:       "job_posting",
+      ref_type:      "job_posting",
+      ref_id:        posting.id,
+      metadata: {
+        posting_title: posting.title,
+        posting_type:  posting.type,
+        employer_id:   req.employer!.id,
+        payer_name:    req.user!.name,
+        payer_email:   req.user!.email,
+        payer_phone:   req.user!.phone ?? "",
+        retry_of:      posting.payment_id,  // audit trail for the retried attempt
+      },
+    }).returning();
+
+    const clientTxnId = `NBWRI-${payment.id.replace(/-/g, "").slice(0, 18)}`;
+
+    let redirect;
+    try {
+      redirect = buildInitRedirect({
+        clientTxnId,
+        amountRupees: paiseToRupees(feePaise),
+        payerName:  req.user!.name,
+        payerEmail: req.user!.email,
+        payerMobile: req.user!.phone ?? "",
+        udf1: "job_posting",
+        udf2: posting.id,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new ApiError(503, `Online payments are not configured yet (${msg}).`);
+    }
+
+    await db.update(payments).set({
+      client_txn_id: clientTxnId,
+      updated_at: new Date(),
+    }).where(eq(payments.id, payment.id));
+
+    // Repoint the posting at the fresh payment so confirmation lands on
+    // the right row. We keep the old payment row (status probably 'failed'
+    // or still 'pending') for audit — don't delete it.
+    await db.update(jobPostings)
+      .set({ payment_id: payment.id, updated_at: new Date() })
+      .where(eq(jobPostings.id, posting.id));
+
+    res.json({
+      payment_id:   payment.id,
+      amount_paise: feePaise,
+      sabpaisa: {
+        action:      redirect.action,
+        clientCode:  redirect.clientCode,
+        clientTxnId: redirect.clientTxnId,
+        encData:     redirect.encData,
+      },
+    });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
 
 // ─── PATCH /api/employer/postings/:id ─────────────────────────────────────
 employerRouter.patch("/postings/:id", sameOrigin, async (req: EmployerRequest, res, next) => {

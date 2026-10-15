@@ -41,7 +41,36 @@ export function encrypt(plaintext: string, key: string): string {
   return `${ciphertext.toString("base64")}:${iv.toString("base64")}`;
 }
 
-// ─── Decrypt ─────────────────────────────────────────────────────────────
+// ─── Legacy PHP5 scheme (hex ciphertext, fixed IV) ────────────────────────
+// Used by SabPaisa's Transaction Enquiry API (status check + refund). The
+// init endpoint uses a different, PHP7+ scheme — see `encrypt` / `decrypt`
+// above. Confirmed against SabPaisa's own docs:
+//   "statusTransEncData is the encrypted string which is made using
+//    clientCode and clientTxnId using the encryption method."
+//
+// Input plaintext is a query string `clientCode=X&clientTxnId=Y`; output
+// is UPPERCASE HEX of the AES-128-CBC ciphertext encrypted under the
+// merchant's AUTH_KEY with the AUTH_IV from credentials as the fixed IV.
+
+export function encryptLegacyHex(plaintext: string, key: string, iv: string): string {
+  const cipher = createCipheriv(ALGORITHM, Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  const encrypted = Buffer.concat([
+    cipher.update(plaintext, "utf8"),
+    cipher.final(),
+  ]);
+  return encrypted.toString("hex").toUpperCase();
+}
+
+export function decryptLegacyHex(hexCiphertext: string, key: string, iv: string): string {
+  const decipher = createDecipheriv(ALGORITHM, Buffer.from(key, "utf8"), Buffer.from(iv, "utf8"));
+  const decrypted = Buffer.concat([
+    decipher.update(hexCiphertext, "hex"),
+    decipher.final(),
+  ]);
+  return decrypted.toString("utf8");
+}
+
+// ─── Decrypt (PHP7+ scheme, used on init callback) ───────────────────────
 // Accepts both the new `base64ct:base64iv` format (PHP7+) and the legacy
 // bare `base64ct` format (uses the merchant's AUTH_IV from credentials as
 // a fallback IV). This lets us handle every SabPaisa response variant

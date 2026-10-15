@@ -29,7 +29,7 @@
 import { Router } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { payments, events } from "../../schema/index.js";
+import { payments, events, jobPostings } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
@@ -323,13 +323,22 @@ paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, n
     // For event payments, surface the event slug so the SPA can link back
     // ("Back to <event name>") without a second request.
     let event: { slug: string; title: string } | null = null;
+    let posting: { id: string; title: string; status: string; type: string } | null = null;
     if (p.purpose === "event_registration" && p.ref_id) {
       const [e] = await db.select({ slug: events.slug, title: events.title })
         .from(events).where(and(eq(events.id, p.ref_id), isNull(events.deleted_at))).limit(1);
       if (e) event = e;
+    } else if (p.purpose === "job_posting" && p.ref_id) {
+      const [row] = await db.select({
+        id: jobPostings.id, title: jobPostings.title,
+        status: jobPostings.status, type: jobPostings.type,
+      })
+        .from(jobPostings)
+        .where(and(eq(jobPostings.id, p.ref_id), isNull(jobPostings.deleted_at))).limit(1);
+      if (row) posting = row;
     }
 
-    res.json({ payment: p, event });
+    res.json({ payment: p, event, posting });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -348,5 +357,10 @@ function buildResultRedirect(
     purpose:    payment.purpose,
   });
   if (md.event_slug) params.set("event_slug", md.event_slug);
+  // For job_posting payments we carry the posting_id (= ref_id) so the
+  // result page can show a "Back to my postings → <title>" CTA.
+  if (payment.purpose === "job_posting" && payment.ref_id) {
+    params.set("posting_id", payment.ref_id);
+  }
   return `${appUrl}/payments/result?${params.toString()}`;
 }
