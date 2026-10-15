@@ -11,11 +11,95 @@
 // `case` branches as other paid surfaces come online (job_posting is on
 // the roadmap — see FEATURES_DELIVERED FUTURE log).
 
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
-import { payments, events, eventRegistrations, jobPostings } from "../../../schema/index.js";
+import { payments, events, eventRegistrations, jobPostings, userRoleAssignments, roles, users } from "../../../schema/index.js";
 import { notifyAsync } from "../notify.js";
 import { dispatchJobAlerts } from "../jobAlerts.js";
+
+function paiseToRupees(p: number): string {
+  return (p / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+async function activeTreasurerIds(branchId: string | null): Promise<string[]> {
+  // Branch-scoped treasurers for the event's branch, plus any global
+  // treasurers (scope_branch_id IS NULL). Active = effective_to is NULL or
+  // still in the future.
+  const rows = await db
+    .select({ user_id: userRoleAssignments.user_id })
+    .from(userRoleAssignments)
+    .innerJoin(roles, eq(roles.id, userRoleAssignments.role_id))
+    .innerJoin(users, eq(users.id, userRoleAssignments.user_id))
+    .where(and(
+      eq(roles.code, "branch_treasurer"),
+      isNull(users.deleted_at),
+      or(
+        isNull(userRoleAssignments.effective_to),
+        sql`${userRoleAssignments.effective_to} >= CURRENT_DATE`,
+      )!,
+      branchId
+        ? or(
+            isNull(userRoleAssignments.scope_branch_id),
+            eq(userRoleAssignments.scope_branch_id, branchId),
+          )!
+        : isNull(userRoleAssignments.scope_branch_id),
+    ));
+  // Dedup — a treasurer might be assigned twice (overlapping terms) and we
+  // don't want to spam them.
+  return Array.from(new Set(rows.map((r) => r.user_id)));
+}
+
+async function fireSoldOutNotifications(opts: {
+  payment_id: string;
+  payer_user_id: string;
+  payer_name: string;
+  payer_email: string;
+  amount_paise: number;
+  sabpaisa_txn_id: string | null;
+  event_title: string;
+  event_date: string;
+  branch_id: string | null;
+}): Promise<void> {
+  const amount_rupees = paiseToRupees(opts.amount_paise);
+  const refundQueueLink = `${process.env.APP_URL ?? ""}/admin/refunds`;
+
+  // Refund ETA shown to payer: today + 7 business days, rendered as a date.
+  // 7 business days ≈ 10 calendar days with a weekend; close enough for a
+  // "chase us if you don't see it by X" copy line.
+  const etaDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000);
+  const refund_eta_date = etaDate.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium" });
+
+  const treasurerIds = await activeTreasurerIds(opts.branch_id);
+  for (const user_id of treasurerIds) {
+    notifyAsync({
+      user_id,
+      template_key: "payment_sold_out_treasurer",
+      vars: {
+        payer_name:       opts.payer_name,
+        payer_email:      opts.payer_email,
+        amount_rupees,
+        payment_id:       opts.payment_id,
+        sabpaisa_txn_id:  opts.sabpaisa_txn_id ?? "—",
+        event_title:      opts.event_title,
+        event_date:       opts.event_date,
+        refund_queue_link: refundQueueLink,
+      },
+      link_url: "/admin/refunds",
+    });
+  }
+
+  notifyAsync({
+    user_id: opts.payer_user_id,
+    template_key: "payment_sold_out_payer",
+    vars: {
+      event_title:  opts.event_title,
+      amount_rupees,
+      payment_id:   opts.payment_id,
+      refund_eta_date,
+    },
+    link_url: "/dashboard",
+  });
+}
 
 export interface ConfirmResult {
   ok: true;
@@ -38,7 +122,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
 
     // Idempotent short-circuit — webhook/return race safety.
     if (payment.status === "success") {
-      return { alreadyConfirmed: true, event: null, createdRows: [] as Array<{ id: string; user_id: string; status: string }>, waitlistedCount: 0 };
+      return { alreadyConfirmed: true, event: null, createdRows: [] as Array<{ id: string; user_id: string; status: string }>, waitlistedCount: 0, payerSummary: null };
     }
 
     if (payment.purpose === "job_posting") {
@@ -67,6 +151,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
           createdRows: [] as Array<{ id: string; user_id: string; status: string }>,
           waitlistedCount: 0,
           activatedPostingId: null as string | null,
+          payerSummary: null,
         };
       }
 
@@ -89,6 +174,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
         createdRows: [] as Array<{ id: string; user_id: string; status: string }>,
         waitlistedCount: 0,
         activatedPostingId: posting.id,
+        payerSummary: null,
       };
     }
 
@@ -99,7 +185,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
         status: "success",
         updated_at: new Date(),
       }).where(eq(payments.id, payment.id));
-      return { alreadyConfirmed: false, event: null, createdRows: [], waitlistedCount: 0 };
+      return { alreadyConfirmed: false, event: null, createdRows: [], waitlistedCount: 0, payerSummary: null };
     }
 
     const [event] = await tx.select().from(events).where(eq(events.id, payment.ref_id!)).limit(1);
@@ -166,12 +252,27 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
       updated_at: new Date(),
     }).where(eq(payments.id, payment.id));
 
+    // Payer summary — only needed when we're about to fire the sold-out
+    // notifications, but cheap enough to always collect so the caller
+    // doesn't need a second round-trip. Null name/email are tolerated by
+    // the template's render step (unknown vars become empty string).
+    const metadataForPayer = (payment.metadata ?? {}) as { payer_name?: string; payer_email?: string };
+    const payerSummary = willBeFull ? {
+      payment_id:      payment.id,
+      payer_user_id:   bookerId,
+      payer_name:      metadataForPayer.payer_name ?? "",
+      payer_email:     metadataForPayer.payer_email ?? "",
+      amount_paise:    payment.amount_paise,
+      sabpaisa_txn_id: payment.sabpaisa_txn_id ?? null,
+    } : null;
+
     return {
       alreadyConfirmed: false,
       event,
       createdRows,
       waitlistedCount: regStatus === "waitlisted" ? createdRows.length : 0,
       activatedPostingId: null as string | null,
+      payerSummary,
     };
   });
 
@@ -207,6 +308,33 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
         link_url: "/dashboard",
       });
     }
+  }
+
+  // Sold-out alert: event filled up between pay-click and payment-confirm.
+  // Treasurer gets the refund request; payer gets a "sorry, you're on the
+  // waitlist, refund incoming" note. Fires outside the txn + after the
+  // registration notifications so a notify failure never prevents the
+  // confirmation from completing.
+  if (!result.alreadyConfirmed && result.waitlistedCount > 0 && result.event && result.payerSummary) {
+    const startsAt = result.event.starts_at instanceof Date
+      ? result.event.starts_at
+      : new Date(result.event.starts_at);
+    await fireSoldOutNotifications({
+      payment_id:      result.payerSummary.payment_id,
+      payer_user_id:   result.payerSummary.payer_user_id,
+      payer_name:      result.payerSummary.payer_name,
+      payer_email:     result.payerSummary.payer_email,
+      amount_paise:    result.payerSummary.amount_paise,
+      sabpaisa_txn_id: result.payerSummary.sabpaisa_txn_id,
+      event_title:     result.event.title,
+      event_date:      startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium" }),
+      branch_id:       result.event.branch_id ?? null,
+    }).catch((err) => {
+      // Don't let a notify failure propagate — the payment and
+      // registration-as-waitlisted work has already landed.
+      // eslint-disable-next-line no-console
+      console.error("[confirm] sold-out notification dispatch failed:", err);
+    });
   }
 
   return {

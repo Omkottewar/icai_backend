@@ -46,6 +46,7 @@ import { jobApplicationsRouter } from "./routes/jobApplications.js";
 import { savedJobsRouter } from "./routes/savedJobs.js";
 import { meRouter } from "./routes/me.js";
 import { startJobAlertsCron } from "./lib/jobAlertsCron.js";
+import { startPaymentReconciliationCron } from "./lib/paymentReconciliationCron.js";
 import { membersRouter } from "./routes/members.js";
 import { mockTestsRouter } from "./routes/mockTests.js";
 import { mockTestAttemptsRouter } from "./routes/mockTestAttempts.js";
@@ -297,6 +298,12 @@ startPragyaanIngestCron();
 // Monday for weekly digests. Instant alerts do NOT go through this — they
 // fire inline from routes/employer.ts + routes/admin/jobs.ts.
 startJobAlertsCron();
+
+// Payment reconciliation — 30-minute tick that picks SabPaisa payments
+// stuck in `pending` for over an hour, re-verifies them, and routes the
+// outcome through confirmPaymentAndFulfil / markPaymentFailed. Prevents
+// silent money loss when both /return and /webhook fail to resolve a row.
+startPaymentReconciliationCron();
 
 // Boot-time notification system sanity check — confirms every template
 // key referenced in code exists + is enabled in DB, and flags missing

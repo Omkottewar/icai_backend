@@ -181,15 +181,30 @@ async function handleReturn(req: import("express").Request, res: import("express
     }).where(eq(payments.id, payment.id));
 
     if (verifiedOutcome === "success") {
-      await confirmPaymentAndFulfil(payment.id).catch((e) => {
-        // Confirmation shouldn't fail — but if it does we don't want the
-        // user to see "payment failed" when SabPaisa really did take the
-        // money. Fall through to a pending redirect so the webhook can
-        // retry fulfilment.
+      try {
+        await confirmPaymentAndFulfil(payment.id);
+        return res.redirect(302, buildResultRedirect(appUrl, "success", payment, payload));
+      } catch (confirmErr) {
+        // Confirmation shouldn't fail. If it does, SabPaisa took the money
+        // but we failed to create the registration — redirect to the
+        // "pending" result page (not success) so the user doesn't walk
+        // away thinking they're registered. The reconciliation cron
+        // (every 30 min) will retry; the webhook may also arrive and
+        // retry via its own path.
         // eslint-disable-next-line no-console
-        console.error("[sabpaisa] confirm failed on /return:", e);
-      });
-      return res.redirect(302, buildResultRedirect(appUrl, "success", payment, payload));
+        console.error("[sabpaisa] confirm failed on /return — redirecting to pending:", confirmErr);
+        // Surface to Sentry (SENTRY_DSN wired in index.ts). Dynamic import
+        // avoids bundling Sentry into this file's import graph when it's
+        // not configured.
+        try {
+          const Sentry = await import("@sentry/node").catch(() => null);
+          Sentry?.captureException?.(confirmErr, {
+            tags: { source: "sabpaisa_return_confirm" },
+            extra: { payment_id: payment.id, client_txn_id: clientTxnId },
+          });
+        } catch { /* Sentry optional */ }
+        return res.redirect(302, buildResultRedirect(appUrl, "pending", payment, payload));
+      }
     }
 
     if (verifiedOutcome === "failed" || verifiedOutcome === "aborted") {
