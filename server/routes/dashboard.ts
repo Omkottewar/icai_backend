@@ -124,6 +124,10 @@ async function getUpcomingEvents(userId: string, now: Date) {
       status: eventRegistrations.status,
       booked_by_user_id: eventRegistrations.booked_by_user_id,
       booked_by_name:    bookerUsers.name,
+      cancellation_requested_at:   eventRegistrations.cancellation_requested_at,
+      cancellation_decided_at:     eventRegistrations.cancellation_decided_at,
+      cancellation_decision:       eventRegistrations.cancellation_decision,
+      cancellation_reject_reason:  eventRegistrations.cancellation_reject_reason,
     })
     .from(eventRegistrations)
     .innerJoin(events, eq(events.id, eventRegistrations.event_id))

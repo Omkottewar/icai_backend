@@ -66,6 +66,15 @@ export const eventRegistrations = pgTable("event_registrations", {
   booked_by_user_id: uuid("booked_by_user_id").references(() => users.id, { onDelete: "set null" }),
   registered_at: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
   attended_at:   timestamp("attended_at", { withTimezone: true }),
+  // Cancellation-request flow (migration 0102). Members no longer self-cancel;
+  // they file a request + reason that an admin approves or rejects. NULL
+  // cancellation_requested_at means no pending request.
+  cancellation_requested_at:  timestamp("cancellation_requested_at", { withTimezone: true }),
+  cancellation_reason:        text("cancellation_reason"),
+  cancellation_decided_at:    timestamp("cancellation_decided_at", { withTimezone: true }),
+  cancellation_decided_by:    uuid("cancellation_decided_by").references(() => users.id, { onDelete: "set null" }),
+  cancellation_decision:      text("cancellation_decision"),       // 'approved' | 'rejected'
+  cancellation_reject_reason: text("cancellation_reject_reason"),
   deleted_at:    timestamp("deleted_at", { withTimezone: true }),
 });
 

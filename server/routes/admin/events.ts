@@ -2,7 +2,9 @@ import { Router } from "express";
 import { and, asc, desc, eq, ilike, isNull, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "../../../db/client.js";
-import { events, eventRegistrations, committees, branches, files, checklistInstances, checklistInstanceApprovals, eventOverrideLog } from "../../../schema/index.js";
+import { events, eventRegistrations, committees, branches, files, checklistInstances, checklistInstanceApprovals, eventOverrideLog, users, payments } from "../../../schema/index.js";
+import { notifyAsync } from "../../lib/notify.js";
+import { performRegistrationCancellation, notifyWaitlistPromotion } from "../registrations.js";
 
 // Same trick as the public route — `files` is joined twice on the GET /:id
 // endpoint (banner + speaker photo) so we need an alias to disambiguate.
@@ -728,4 +730,170 @@ eventsAdminRouter.patch("/:id/series", canManageEvents, async (req, res, next) =
   } catch (err) { handleApiError(err, res, next); }
 });
 
+
+// ─── GET /api/admin/events/cancellation-requests ─────────────────────────
+// All pending cancellation requests across the branch — the admin review
+// queue. Scoped by role: branch leadership sees everything; a committee
+// chairman sees only requests for events in their committees.
+eventsAdminRouter.get("/cancellation-requests", async (req: AuthedRequest, res, next) => {
+  try {
+    const perms = await (await import("../../auth/permissions.js")).loadUserPermissions(req.user!.id);
+    const isBranchLevel = perms.isAdmin
+      || perms.codes.has("branch_chairman")
+      || perms.codes.has("branch_vice_chairman")
+      || perms.codes.has("branch_secretary")
+      || perms.codes.has("branch_treasurer")
+      || perms.codes.has("branch_manager");
+
+    const conds: any[] = [
+      isNull(eventRegistrations.deleted_at),
+      sql`${eventRegistrations.cancellation_requested_at} IS NOT NULL`,
+      sql`${eventRegistrations.cancellation_decided_at} IS NULL`,
+    ];
+    if (!isBranchLevel) {
+      if (perms.committeeChairmanOf.length === 0) {
+        return res.json({ rows: [] });
+      }
+      conds.push(sql`${events.committee_id} = ANY(${perms.committeeChairmanOf})`);
+    }
+
+    const rows = await db
+      .select({
+        registration_id: eventRegistrations.id,
+        event_id:        events.id,
+        event_slug:      events.slug,
+        event_title:     events.title,
+        event_starts_at: events.starts_at,
+        committee_name:  committees.name,
+        member_id:       users.id,
+        member_name:     users.name,
+        member_email:    users.email,
+        payment_id:      eventRegistrations.payment_id,
+        reg_status:      eventRegistrations.status,
+        requested_at:    eventRegistrations.cancellation_requested_at,
+        reason:          eventRegistrations.cancellation_reason,
+      })
+      .from(eventRegistrations)
+      .innerJoin(events, eq(events.id, eventRegistrations.event_id))
+      .innerJoin(users, eq(users.id, eventRegistrations.user_id))
+      .leftJoin(committees, eq(committees.id, events.committee_id))
+      .where(and(...conds))
+      .orderBy(desc(eventRegistrations.cancellation_requested_at));
+
+    res.json({ rows });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/events/registrations/:id/approve-cancellation ─────────
+// Admin approves the user's cancellation request. Delegates to the shared
+// performRegistrationCancellation helper (flips status, decrements counter,
+// promotes waitlist). For paid registrations, flags the payment with
+// needs_refund so the treasurer picks it up from the refund queue.
+eventsAdminRouter.post("/registrations/:id/approve-cancellation", canManageEvents, async (req: AuthedRequest, res, next) => {
+  try {
+    const registrationId = need(trim(req.params.id), "Registration ID");
+
+    // Pre-flight: confirm there's actually a pending request. Approving a
+    // registration that was already cancelled or has no pending request is
+    // a bug on the admin UI's side, so reject with a 400.
+    const [reg] = await db.select().from(eventRegistrations).where(eq(eventRegistrations.id, registrationId)).limit(1);
+    if (!reg) throw new ApiError(404, "Registration not found");
+    if (!reg.cancellation_requested_at || reg.cancellation_decided_at) {
+      throw new ApiError(400, "No pending cancellation request on this registration");
+    }
+
+    // Stamp the decision BEFORE performing the cancellation so the audit
+    // trail survives even if the cancellation transaction fails.
+    await db.update(eventRegistrations).set({
+      cancellation_decided_at: new Date(),
+      cancellation_decided_by: req.user!.id,
+      cancellation_decision:   "approved",
+    }).where(eq(eventRegistrations.id, reg.id));
+
+    const result = await performRegistrationCancellation(registrationId);
+
+    // Flag the payment for treasurer refund if this was a paid registration.
+    // Uses the same metadata.needs_refund convention as the sold-out flow in
+    // confirm.ts so both refund types land in one admin queue.
+    let refundLine = "This was a free event — nothing to refund.";
+    let refundLineShort = "";
+    if (reg.payment_id) {
+      const [payment] = await db.select().from(payments).where(eq(payments.id, reg.payment_id)).limit(1);
+      if (payment && payment.status === "success") {
+        await db.update(payments).set({
+          metadata: { ...(payment.metadata as object || {}), needs_refund: "cancellation_approved" },
+          updated_at: new Date(),
+        }).where(eq(payments.id, payment.id));
+        refundLine = "Your paid amount will be refunded to the original payment method by the branch treasurer within 5–7 business days.";
+        refundLineShort = "Refund to source: 5–7 business days.";
+      }
+    }
+
+    // Fire waitlist-promotion email (if someone got promoted) + the member's
+    // approval confirmation. Both outside the txn.
+    if (result.promoted) {
+      notifyWaitlistPromotion(result.event, result.promoted.user_id);
+    }
+    const startsAt = result.event.starts_at instanceof Date ? result.event.starts_at : new Date(result.event.starts_at);
+    notifyAsync({
+      user_id: reg.user_id,
+      template_key: "cancellation_approved_payer",
+      vars: {
+        event_title: result.event.title,
+        event_date:  startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium" }),
+        refund_line: refundLine,
+        refund_line_short: refundLineShort,
+      },
+      link_url: "/dashboard",
+    });
+
+    res.json({ ok: true, promoted: !!result.promoted });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/admin/events/registrations/:id/reject-cancellation ──────────
+// Admin declines the user's cancellation request. Clears the pending state
+// so the user could file a fresh request later with a better reason. The
+// admin's rejection reason is stored + emailed to the user.
+eventsAdminRouter.post("/registrations/:id/reject-cancellation", canManageEvents, async (req: AuthedRequest, res, next) => {
+  try {
+    const registrationId = need(trim(req.params.id), "Registration ID");
+    const rejectReason = need(trim(req.body?.reject_reason), "Rejection reason").slice(0, 1000);
+    if (rejectReason.length < 5) throw new ApiError(400, "Please give a short reason (at least 5 characters)");
+
+    const [reg] = await db.select().from(eventRegistrations).where(eq(eventRegistrations.id, registrationId)).limit(1);
+    if (!reg) throw new ApiError(404, "Registration not found");
+    if (!reg.cancellation_requested_at || reg.cancellation_decided_at) {
+      throw new ApiError(400, "No pending cancellation request on this registration");
+    }
+
+    await db.update(eventRegistrations).set({
+      cancellation_decided_at:    new Date(),
+      cancellation_decided_by:    req.user!.id,
+      cancellation_decision:      "rejected",
+      cancellation_reject_reason: rejectReason,
+    }).where(eq(eventRegistrations.id, reg.id));
+
+    // Member-facing rejection notification. Pull event + user details for
+    // the template.
+    const [event] = await db.select().from(events).where(eq(events.id, reg.event_id)).limit(1);
+    const rejectShort = rejectReason.length > 60 ? rejectReason.slice(0, 57) + "…" : rejectReason;
+    if (event) {
+      const startsAt = event.starts_at instanceof Date ? event.starts_at : new Date(event.starts_at);
+      notifyAsync({
+        user_id: reg.user_id,
+        template_key: "cancellation_rejected_payer",
+        vars: {
+          event_title: event.title,
+          event_date:  startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium" }),
+          reject_reason: rejectReason,
+          reject_reason_short: rejectShort,
+        },
+        link_url: "/dashboard",
+      });
+    }
+
+    res.json({ ok: true });
+  } catch (err) { handleApiError(err, res, next); }
+});
 

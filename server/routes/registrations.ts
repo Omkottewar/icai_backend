@@ -1,7 +1,7 @@
 ﻿import { Router } from "express";
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { events, eventRegistrations, users, payments } from "../../schema/index.js";
+import { events, eventRegistrations, users, payments, roles, userRoleAssignments } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
@@ -586,100 +586,201 @@ registrationsRouter.get("/:slug/certificate", requireUser, async (req: AuthedReq
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// ─── POST /api/events/:slug/cancel ────────────────────────────────────────
-// User cancels their own registration. Soft-deletes the row, decrements
-// registered_count, and auto-promotes the oldest waitlisted user (S.3 fires
-// to them). Idempotent: cancelling something already cancelled is a no-op.
-// Paid registrations remain canceled here but refund processing is manual
-// (see admin refunds module).
-registrationsRouter.post("/:slug/cancel", requireUser, async (req: AuthedRequest, res, next) => {
+// ─── POST /api/events/:slug/request-cancellation ──────────────────────────
+// Members no longer cancel directly. They file a REQUEST with a reason that
+// a branch_chairman / admin reviews from the admin console. This endpoint:
+//   • Validates the user has an active, cancellable registration.
+//   • Rejects duplicate requests (one pending at a time per registration).
+//   • Stamps cancellation_requested_at + cancellation_reason on the row.
+//   • Notifies every active branch_chairman + admin so someone picks it up.
+//
+// The actual cancellation (status flip, counter decrement, waitlist promote,
+// refund flag) happens later in POST /api/admin/events/registrations/:id/
+// approve-cancellation — which calls performRegistrationCancellation() below.
+registrationsRouter.post("/:slug/request-cancellation", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const user = req.user!;
     const slug = need(trim(req.params.slug), "Event slug");
+    const reason = need(trim(req.body?.reason), "Reason").slice(0, 1000);
+    if (reason.length < 5) throw new ApiError(400, "Please give a short reason (at least 5 characters)");
 
-    const result = await db.transaction(async (tx) => {
-      const [event] = await tx
-        .select()
-        .from(events)
-        .where(and(eq(events.slug, slug), isNull(events.deleted_at)))
-        .limit(1);
-      if (!event) throw new ApiError(404, "Event not found");
+    const [event] = await db
+      .select()
+      .from(events)
+      .where(and(eq(events.slug, slug), isNull(events.deleted_at)))
+      .limit(1);
+    if (!event) throw new ApiError(404, "Event not found");
 
-      const [reg] = await tx
-        .select()
+    const [reg] = await db
+      .select()
+      .from(eventRegistrations)
+      .where(and(
+        eq(eventRegistrations.event_id, event.id),
+        eq(eventRegistrations.user_id, user.id),
+        isNull(eventRegistrations.deleted_at),
+      ))
+      .limit(1);
+    if (!reg) throw new ApiError(404, "You don't have an active registration for this event");
+    if (reg.status === "attended") throw new ApiError(400, "Cannot cancel after attendance has been recorded");
+    if (reg.status === "cancelled") throw new ApiError(400, "This registration is already cancelled");
+
+    // Pending request already exists — don't let a user flood the admin
+    // queue with the same registration. They can wait or contact the branch.
+    if (reg.cancellation_requested_at && !reg.cancellation_decided_at) {
+      throw new ApiError(409, "A cancellation request for this registration is already pending review");
+    }
+
+    await db.update(eventRegistrations).set({
+      cancellation_requested_at:  new Date(),
+      cancellation_reason:        reason,
+      // Clear any prior decision fields in case this is a re-request after
+      // a rejected one.
+      cancellation_decided_at:    null,
+      cancellation_decided_by:    null,
+      cancellation_decision:      null,
+      cancellation_reject_reason: null,
+    }).where(eq(eventRegistrations.id, reg.id));
+
+    // Fire S.n to every active branch_chairman + admin so a human picks it
+    // up. Fire-and-forget — a notify failure must not block the request
+    // from being saved.
+    (async () => {
+      try {
+        const recipientIds = await adminReviewerIds(event.branch_id ?? null);
+        if (recipientIds.length === 0) return;
+        const vars = eventNotifyVars(event);
+        const memberName = user.name || user.email || "A member";
+        const memberEmail = user.email || "—";
+        const reviewLink = `${process.env.APP_URL ?? ""}/admin/cancellation-requests`;
+        const reasonShort = reason.length > 60 ? reason.slice(0, 57) + "…" : reason;
+        for (const uid of recipientIds) {
+          notifyAsync({
+            user_id: uid,
+            template_key: "cancellation_requested_admin",
+            vars: {
+              ...vars,
+              member_name:  memberName,
+              member_email: memberEmail,
+              cancellation_reason: reason,
+              cancellation_reason_short: reasonShort,
+              review_link: reviewLink,
+            },
+            link_url: "/admin/cancellation-requests",
+          });
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[request-cancellation] admin notify dispatch failed:", err);
+      }
+    })();
+
+    res.json({
+      ok: true,
+      request: {
+        registration_id: reg.id,
+        requested_at: new Date().toISOString(),
+      },
+    });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// Shared helper — actually performs the cancellation: flips status, decrements
+// seat count, promotes the oldest waitlisted user. Returns the event + the
+// promoted user (if any) so the caller can fire notifications outside the
+// transaction. Called from the admin approve-cancellation endpoint.
+export async function performRegistrationCancellation(registrationId: string): Promise<{
+  event: typeof events.$inferSelect;
+  reg:   typeof eventRegistrations.$inferSelect;
+  wasConfirmed: boolean;
+  promoted: { id: string; user_id: string } | null;
+}> {
+  return db.transaction(async (tx) => {
+    const [reg] = await tx.select().from(eventRegistrations).where(eq(eventRegistrations.id, registrationId)).limit(1);
+    if (!reg) throw new ApiError(404, "Registration not found");
+    if (reg.status === "cancelled" || reg.deleted_at) throw new ApiError(400, "Registration is already cancelled");
+    if (reg.status === "attended") throw new ApiError(400, "Cannot cancel after attendance has been recorded");
+
+    const [event] = await tx.select().from(events).where(eq(events.id, reg.event_id)).limit(1);
+    if (!event) throw new ApiError(404, "Linked event not found");
+
+    const wasConfirmed = reg.status === "registered";
+
+    await tx.update(eventRegistrations).set({
+      status:     "cancelled",
+      deleted_at: new Date(),
+    }).where(eq(eventRegistrations.id, reg.id));
+
+    if (wasConfirmed) {
+      await tx.update(events).set({
+        registered_count: sql`GREATEST(${events.registered_count} - 1, 0)`,
+        updated_at: new Date(),
+      }).where(eq(events.id, event.id));
+    }
+
+    let promoted: { id: string; user_id: string } | null = null;
+    if (wasConfirmed) {
+      const [next] = await tx
+        .select({ id: eventRegistrations.id, user_id: eventRegistrations.user_id })
         .from(eventRegistrations)
         .where(and(
           eq(eventRegistrations.event_id, event.id),
-          eq(eventRegistrations.user_id, user.id),
+          eq(eventRegistrations.status, "waitlisted"),
           isNull(eventRegistrations.deleted_at),
         ))
+        .orderBy(eventRegistrations.registered_at)
         .limit(1);
-      if (!reg) throw new ApiError(404, "You don't have an active registration for this event");
-      if (reg.status === "attended") {
-        throw new ApiError(400, "Cannot cancel after attendance has been recorded");
-      }
 
-      const wasConfirmed = reg.status === "registered";
-
-      // Mark cancelled (soft delete preserves the audit trail).
-      await tx.update(eventRegistrations).set({
-        status: "cancelled",
-        deleted_at: new Date(),
-      }).where(eq(eventRegistrations.id, reg.id));
-
-      // Only decrement the counter for confirmed cancellations.
-      if (wasConfirmed) {
+      if (next) {
+        await tx.update(eventRegistrations).set({ status: "registered" }).where(eq(eventRegistrations.id, next.id));
         await tx.update(events).set({
-          registered_count: sql`GREATEST(${events.registered_count} - 1, 0)`,
+          registered_count: sql`${events.registered_count} + 1`,
           updated_at: new Date(),
         }).where(eq(events.id, event.id));
+        promoted = next;
       }
-
-      // Auto-promote the oldest waitlisted user — only if a confirmed seat
-      // opened up (cancelling a waitlist entry doesn't free anything).
-      let promoted: { id: string; user_id: string } | null = null;
-      if (wasConfirmed) {
-        const [next] = await tx
-          .select({ id: eventRegistrations.id, user_id: eventRegistrations.user_id })
-          .from(eventRegistrations)
-          .where(and(
-            eq(eventRegistrations.event_id, event.id),
-            eq(eventRegistrations.status, "waitlisted"),
-            isNull(eventRegistrations.deleted_at),
-          ))
-          .orderBy(eventRegistrations.registered_at)
-          .limit(1);
-
-        if (next) {
-          await tx.update(eventRegistrations).set({
-            status: "registered",
-          }).where(eq(eventRegistrations.id, next.id));
-
-          await tx.update(events).set({
-            registered_count: sql`${events.registered_count} + 1`,
-            updated_at: new Date(),
-          }).where(eq(events.id, event.id));
-
-          promoted = next;
-        }
-      }
-
-      return { event, promoted };
-    });
-
-    // Fire S.3 to the promoted user (outside the txn — notify is async).
-    if (result.promoted) {
-      notifyAsync({
-        user_id: result.promoted.user_id,
-        template_key: "event_waitlist_promoted",
-        vars: eventNotifyVars(result.event),
-        link_url: `/dashboard`,
-      });
     }
 
-    res.json({ ok: true, promoted: !!result.promoted });
-  } catch (err) { handleApiError(err, res, next); }
-});
+    return { event, reg, wasConfirmed, promoted };
+  });
+}
+
+// Fire the waitlist-promoted notification. Separated so the admin approve
+// endpoint can reuse it alongside its own notifications.
+export function notifyWaitlistPromotion(event: typeof events.$inferSelect, promoted_user_id: string): void {
+  notifyAsync({
+    user_id: promoted_user_id,
+    template_key: "event_waitlist_promoted",
+    vars: eventNotifyVars(event),
+    link_url: `/dashboard`,
+  });
+}
+
+// Lookup the user_ids that should be notified when a cancellation request
+// lands: every active branch_chairman + anyone with the global admin role.
+// Scoped to the event's branch when possible; falls back to global if branch
+// is null.
+async function adminReviewerIds(branchId: string | null): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ user_id: userRoleAssignments.user_id })
+    .from(userRoleAssignments)
+    .innerJoin(roles, eq(roles.id, userRoleAssignments.role_id))
+    .innerJoin(users, eq(users.id, userRoleAssignments.user_id))
+    .where(and(
+      isNull(users.deleted_at),
+      or(
+        isNull(userRoleAssignments.effective_to),
+        sql`${userRoleAssignments.effective_to} >= CURRENT_DATE`,
+      )!,
+      inArray(roles.code, ["branch_chairman", "admin"]),
+      // admin role is global; branch_chairman gets the branch filter.
+      or(
+        eq(roles.code, "admin"),
+        isNull(userRoleAssignments.scope_branch_id),
+        branchId ? eq(userRoleAssignments.scope_branch_id, branchId) : sql`FALSE`,
+      )!,
+    ));
+  return rows.map((r) => r.user_id).filter(Boolean);
+}
 
 // ─── POST /api/events/:slug/waitlist ──────────────────────────────────────
 // Explicit join-waitlist endpoint. The /register path already adds to the
