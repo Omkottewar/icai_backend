@@ -19,12 +19,8 @@ import type { Request, Response, NextFunction } from "express";
 // without depending on Render env vars. Glob `*` is supported.
 const FRONTEND_ORIGINS = [
   // Custom production domain — bare + www variants.
-  "https://icainagpur.in",
-  "https://www.icainagpur.in",
+  "https://nagpur.icai.org",
   // Vercel preview + production deploys for icai-frontend
-  "https://icai-frontend-*-om-kottewars-projects.vercel.app",
-  "https://icai-frontend.vercel.app",
-  "https://icai-frontend-om-kottewars-projects.vercel.app",
 ];
 
 function buildMatchers(): Array<(origin: string) => boolean> {
