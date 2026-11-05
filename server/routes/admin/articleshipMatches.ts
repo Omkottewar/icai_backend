@@ -258,7 +258,7 @@ articleshipMatchesAdminRouter.post("/:id/recommend", async (req: AuthedRequest, 
       }).join("\n");
       const firmNamesCsv = firmRows.map((f) => f.name).join(", ");
 
-      const base = (process.env.PUBLIC_APP_URL || process.env.VITE_PUBLIC_APP_URL || "https://icainagpur.in").replace(/\/+$/, "");
+      const base = (process.env.PUBLIC_APP_URL || process.env.VITE_PUBLIC_APP_URL || "https://nagpur.icai.org").replace(/\/+$/, "");
       const dashboardUrl = `${base}/dashboard#articleship`;
       // Pre-compute pluralised label + optional "Notes from WICASA" line
       // since our notify() renderer only substitutes {{plain_vars}} —

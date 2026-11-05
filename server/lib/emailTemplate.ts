@@ -22,9 +22,12 @@ const SENDER_EMAIL    = process.env.EMAIL_FROM_ADDR || "no-reply@icainagpur.in";
 
 // Logo hosted on Supabase Storage via scripts/upload-email-logo.mjs. Override
 // per-environment by setting EMAIL_LOGO_URL — useful if you re-host or A/B
-// test a different logo without redeploying the backend.
+// test a different logo without redeploying the backend. The fallback derives
+// from SUPABASE_URL + SUPABASE_BUCKET so a storage project migration doesn't
+// need a code change — just re-upload the logo at email-assets/icai-nagpur-logo.png
+// in the new bucket.
 const LOGO_URL = process.env.EMAIL_LOGO_URL
-  || "https://ohpjavugvpqjbloxzluf.supabase.co/storage/v1/object/public/public-content/email-assets/icai-nagpur-logo.png";
+  || `${(process.env.SUPABASE_URL || "").replace(/\/+$/, "")}/storage/v1/object/public/${process.env.SUPABASE_BUCKET || "public-content"}/email-assets/icai-nagpur-logo.png`;
 
 // Palette mirrors the frontend's ICAI navy + slate scale (--primary etc).
 const C_PRIMARY     = "#1e40af";

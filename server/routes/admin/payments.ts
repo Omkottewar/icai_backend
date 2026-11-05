@@ -1,8 +1,9 @@
-// Admin payments API — read-only listing with Razorpay reconciliation refs.
-//
-// Refunds live in routes/admin/refunds.ts (already mounted); this router
-// surfaces the underlying payment rows so admin can audit what's happened
-// against Razorpay. Aggregated totals at /summary back the dashboard tiles.
+// Admin payments API — read-only listing plus a handful of admin actions
+// (approve/reject the legacy UPI queue, re-verify stuck Razorpay rows,
+// smoke-test launcher). Refunds live in routes/admin/refunds.ts (already
+// mounted); this router surfaces the underlying payment rows so admin can
+// audit what's happened against Razorpay. Aggregated totals at /summary
+// back the dashboard tiles.
 //
 // Mounted at /api/admin/payments.
 
@@ -15,8 +16,9 @@ import type { AuthedRequest } from "../../middleware/requireUser.js";
 import { notifyAsync } from "../../lib/notify.js";
 import { sendEmail } from "../../lib/email.js";
 import { storage } from "../../lib/storage.js";
-import { buildInitRedirect, paiseToRupees, verifyPayment } from "../../lib/sabpaisa/client.js";
-import { confirmPaymentAndFulfil, markPaymentFailed } from "../../lib/sabpaisa/confirm.js";
+import { createOrder, verifyOrderOutcome } from "../../lib/razorpay/client.js";
+import { razorpayConfig } from "../../lib/razorpay/config.js";
+import { confirmPaymentAndFulfil, markPaymentFailed } from "../../lib/razorpay/confirm.js";
 
 // Compact helper: null for empty paths so the admin UI can skip the
 // "View screenshot" link when no attachment was submitted.
@@ -51,11 +53,9 @@ paymentsAdminRouter.get("/", async (req, res, next) => {
     if (from) conds.push(gte(payments.created_at, new Date(from)));
     if (to)   conds.push(lt(payments.created_at, new Date(to)));
     if (q)    conds.push(sql`(
-      ${payments.razorpay_order_id} ILIKE ${`%${q}%`}
+      ${payments.razorpay_order_id}   ILIKE ${`%${q}%`}
       OR ${payments.razorpay_payment_id} ILIKE ${`%${q}%`}
-      OR ${payments.upi_utr}          ILIKE ${`%${q}%`}
-      OR ${payments.client_txn_id}    ILIKE ${`%${q}%`}
-      OR ${payments.sabpaisa_txn_id}  ILIKE ${`%${q}%`}
+      OR ${payments.upi_utr}             ILIKE ${`%${q}%`}
     )`);
     const where = conds.length ? and(...conds) : undefined;
 
@@ -72,11 +72,7 @@ paymentsAdminRouter.get("/", async (req, res, next) => {
         purpose: payments.purpose,
         ref_type: payments.ref_type,
         ref_id: payments.ref_id,
-        client_txn_id: payments.client_txn_id,
-        sabpaisa_txn_id: payments.sabpaisa_txn_id,
-        sabpaisa_payment_mode: payments.sabpaisa_payment_mode,
-        sabpaisa_bank_name: payments.sabpaisa_bank_name,
-        razorpay_order_id: payments.razorpay_order_id,
+        razorpay_order_id:   payments.razorpay_order_id,
         razorpay_payment_id: payments.razorpay_payment_id,
         upi_utr: payments.upi_utr,
         upi_screenshot_file_id: payments.upi_screenshot_file_id,
@@ -400,19 +396,9 @@ paymentsAdminRouter.get("/:id", async (req, res, next) => {
         purpose: payments.purpose,
         ref_type: payments.ref_type,
         ref_id: payments.ref_id,
-        client_txn_id: payments.client_txn_id,
-        sabpaisa_txn_id: payments.sabpaisa_txn_id,
-        sabpaisa_status_code: payments.sabpaisa_status_code,
-        sabpaisa_payment_mode: payments.sabpaisa_payment_mode,
-        sabpaisa_bank_name: payments.sabpaisa_bank_name,
-        sabpaisa_bank_txn_id: payments.sabpaisa_bank_txn_id,
-        sabpaisa_response: payments.sabpaisa_response,
-        last_verified_at: payments.last_verified_at,
-        return_received_at: payments.return_received_at,
-        webhook_received_at: payments.webhook_received_at,
-        razorpay_order_id: payments.razorpay_order_id,
+        razorpay_order_id:   payments.razorpay_order_id,
         razorpay_payment_id: payments.razorpay_payment_id,
-        razorpay_signature: payments.razorpay_signature,
+        razorpay_signature:  payments.razorpay_signature,
         upi_utr: payments.upi_utr,
         upi_screenshot_file_id: payments.upi_screenshot_file_id,
         verified_by: payments.verified_by,
@@ -439,12 +425,12 @@ paymentsAdminRouter.get("/:id", async (req, res, next) => {
 });
 
 // ─── POST /api/admin/payments/test ────────────────────────────────────────
-// Admin-only SabPaisa smoke-test launcher. Creates a throwaway payment row
-// with the admin as the payer, marks it `is_test` in metadata, and returns
-// the SabPaisa init payload so the admin UI can open a popup to the
-// hosted checkout — no need to log out, create a dummy member, and go
-// through the full event-registration flow every time you need to retest
-// an SabPaisa integration change.
+// Admin-only Razorpay smoke-test launcher. Creates a throwaway payment row
+// with the admin as the payer, marks it `is_test` in metadata, opens a
+// Razorpay Order, and returns the checkout payload so the admin UI can
+// pop the Razorpay modal — no need to log out, create a dummy member, and
+// go through the full event-registration flow every time you need to
+// retest a Razorpay integration change.
 //
 // Body: { amount_paise?: number, description?: string }
 //   amount_paise defaults to 100 (₹1) so a mis-click costs a rupee at
@@ -455,7 +441,7 @@ paymentsAdminRouter.get("/:id", async (req, res, next) => {
 paymentsAdminRouter.post("/test", async (req: AuthedRequest, res, next) => {
   try {
     const amount = Math.max(100, Math.min(10_000_00, Number(req.body?.amount_paise ?? 100)));
-    const description = String(req.body?.description ?? "SabPaisa integration test").slice(0, 200);
+    const description = String(req.body?.description ?? "Razorpay integration test").slice(0, 200);
 
     const admin = req.user;
     if (!admin) throw new ApiError(401, "Unauthenticated");
@@ -465,7 +451,7 @@ paymentsAdminRouter.post("/test", async (req: AuthedRequest, res, next) => {
       amount_paise: amount,
       currency: "INR",
       status: "pending",
-      provider: "sabpaisa",
+      provider: "razorpay",
       purpose: "other",
       ref_type: "admin_test",
       ref_id: null,
@@ -479,104 +465,108 @@ paymentsAdminRouter.post("/test", async (req: AuthedRequest, res, next) => {
       },
     }).returning();
 
-    // Match the clientTxnId format used by the real register path.
-    const clientTxnId = `NBWRI-${payment.id.replace(/-/g, "").slice(0, 18)}`;
-
-    let redirect;
+    let order;
     try {
-      redirect = buildInitRedirect({
-        clientTxnId,
-        amountRupees: paiseToRupees(amount),
-        payerName:  admin.name,
-        payerEmail: admin.email,
-        payerMobile: admin.phone ?? "9999999999",
-        udf1: "admin_test",
-        udf2: payment.id,
+      order = await createOrder({
+        amountPaise: amount,
+        receipt:     payment.id,
+        notes: {
+          payment_id: payment.id,
+          purpose:    "admin_test",
+          is_test:    "true",
+        },
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      throw new ApiError(503, `SabPaisa is not configured (${msg}). Set SABPAISA_* env vars first.`);
+      throw new ApiError(503, `Razorpay is not configured (${msg}). Set RAZORPAY_* env vars first.`);
     }
 
     await db.update(payments).set({
-      client_txn_id: clientTxnId,
+      razorpay_order_id: order.id,
       updated_at: new Date(),
     }).where(eq(payments.id, payment.id));
 
     res.json({
       payment_id: payment.id,
       amount_paise: amount,
-      sabpaisa: {
-        action:      redirect.action,
-        clientCode:  redirect.clientCode,
-        clientTxnId: redirect.clientTxnId,
-        encData:     redirect.encData,
+      razorpay: {
+        key_id:       razorpayConfig().keyId,
+        order_id:     order.id,
+        amount_paise: amount,
+        currency:     order.currency,
+        prefill: {
+          name:    admin.name,
+          email:   admin.email,
+          contact: admin.phone ?? "9999999999",
+        },
       },
     });
   } catch (err) { handleApiError(err, res, next); }
 });
 
 // ─── POST /api/admin/payments/:id/reverify ────────────────────────────────
-// Manually re-runs the SabPaisa server-to-server verify call against a
-// stuck payment row and, if SabPaisa confirms success, triggers the same
-// fulfilment path (`confirmPaymentAndFulfil`) that the return/webhook
-// handlers would. Use this when:
-//   • The webhook hasn't arrived (push URL not registered yet with SabPaisa)
-//   • An earlier version of /return failed verify and left the row pending
-//   • Reconciliation discovers a successful SabPaisa txn with no local row
+// Manually polls Razorpay for the order's payment history and, if Razorpay
+// shows a captured payment, triggers the same fulfilment path
+// (`confirmPaymentAndFulfil`) that the verify/webhook handlers would. Use
+// this when:
+//   • The webhook hasn't arrived (webhook URL not registered yet, or a
+//     network partition dropped the push past retry budget).
+//   • The browser handler never fired /verify (user closed the tab after
+//     paying).
+//   • Reconciliation discovers a captured Razorpay payment with our row
+//     still pending.
 //
-// Only works on `provider = 'sabpaisa'` rows that are still 'pending' or
+// Only works on `provider = 'razorpay'` rows that are still 'pending' or
 // 'created'. Terminal states (success/failed/refunded) are left alone.
 paymentsAdminRouter.post("/:id/reverify", async (req, res, next) => {
   try {
     const id = trim(req.params.id);
     const [payment] = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
     if (!payment) throw new ApiError(404, "Payment not found");
-    if (payment.provider !== "sabpaisa") {
-      throw new ApiError(400, "Re-verify only applies to SabPaisa payments");
+    if (payment.provider !== "razorpay") {
+      throw new ApiError(400, "Re-verify only applies to Razorpay payments");
     }
-    if (!payment.client_txn_id) {
-      throw new ApiError(400, "Payment has no client_txn_id (never submitted to SabPaisa?)");
+    if (!payment.razorpay_order_id) {
+      throw new ApiError(400, "Payment has no razorpay_order_id (never reached Razorpay?)");
     }
     if (payment.status === "success" || payment.status === "refunded" || payment.status === "partially_refunded") {
       return res.json({ ok: true, note: "Payment already in terminal success state", payment });
     }
 
-    let outcome, response;
+    let outcome, rpPayment;
     try {
-      ({ outcome, response } = await verifyPayment(payment.client_txn_id));
+      ({ outcome, payment: rpPayment } = await verifyOrderOutcome(payment.razorpay_order_id));
     } catch (e) {
-      // Surface the SabPaisa error verbatim so the admin UI shows a
-      // useful message (not a generic 500). Common causes: verify URL
-      // wrong, auth credentials rejected, response shape unexpected.
+      // Surface the Razorpay error verbatim so the admin UI shows a
+      // useful message (not a generic 500). Common causes: wrong keys,
+      // deleted order on their side, rate-limited.
       const msg = e instanceof Error ? e.message : String(e);
       // eslint-disable-next-line no-console
-      console.error("[sabpaisa] reverify fetch failed:", msg);
-      throw new ApiError(502, `SabPaisa verify API call failed: ${msg}`);
+      console.error("[razorpay] reverify fetch failed:", msg);
+      throw new ApiError(502, `Razorpay API call failed: ${msg}`);
     }
 
-    const sabpaisaTxnId = response.sabpaisaTxnId ?? null;
-    await db.update(payments).set({
-      sabpaisa_txn_id:       sabpaisaTxnId ?? payment.sabpaisa_txn_id,
-      sabpaisa_status_code:  response.statusCode ?? payment.sabpaisa_status_code,
-      sabpaisa_payment_mode: response.paymentMode ?? payment.sabpaisa_payment_mode,
-      sabpaisa_bank_name:    response.bankName ?? payment.sabpaisa_bank_name,
-      sabpaisa_bank_txn_id:  response.bankTxnId ?? payment.sabpaisa_bank_txn_id,
-      sabpaisa_response:     { ...(payment.sabpaisa_response as object || {}), reverify: response } as any,
-      last_verified_at:      new Date(),
-      updated_at:            new Date(),
-    }).where(eq(payments.id, payment.id));
+    // Record whatever we learned so the row has the captured payment id
+    // even if confirm is skipped (terminal state already set elsewhere).
+    if (rpPayment?.id && rpPayment.id !== payment.razorpay_payment_id) {
+      await db.update(payments).set({
+        razorpay_payment_id: rpPayment.id,
+        updated_at: new Date(),
+      }).where(eq(payments.id, payment.id));
+    }
 
     if (outcome === "success") {
       await confirmPaymentAndFulfil(payment.id);
-      return res.json({ ok: true, outcome: "success", sabpaisaTxnId });
+      return res.json({ ok: true, outcome: "success", razorpay_payment_id: rpPayment?.id ?? null });
     }
     if (outcome === "failed" || outcome === "aborted") {
-      const reason = response.bankErrorMessage ?? `SabPaisa reverify reported ${outcome}`;
+      const reason = rpPayment?.error_description
+        ?? rpPayment?.error_reason
+        ?? `Razorpay reverify reported ${outcome}`;
       await markPaymentFailed(payment.id, reason);
       return res.json({ ok: true, outcome, reason });
     }
-    // Still pending at SabPaisa.
-    return res.json({ ok: true, outcome: "pending", note: "SabPaisa has not resolved this txn yet. Try again in a minute." });
+    // Still pending at Razorpay (no payment attempts yet, or only authorized/created states).
+    return res.json({ ok: true, outcome: "pending", note: "Razorpay has not resolved this order yet. Try again in a minute." });
   } catch (err) { handleApiError(err, res, next); }
 });

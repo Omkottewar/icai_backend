@@ -1,29 +1,29 @@
-// SabPaisa payment orchestration.
+// Razorpay payment orchestration.
 //
 // Four endpoints:
 //
 //   POST /api/payments/initiate
-//     Authed. Takes a purpose + ref_id, creates a payment row, builds the
-//     SabPaisa init payload, returns { action, clientCode, encData } so the
-//     browser can auto-POST to SabPaisa's hosted checkout. This is the
-//     only payment-creation path for new rows — the old /register endpoint
-//     used to inline it for events, but that logic now delegates here.
+//     Authed. Takes a payment_id (row already created by the originating
+//     route — /events/:slug/register or /employer/postings). Creates a
+//     Razorpay Order via the Razorpay REST API, stores the order id on the
+//     row, and returns { key_id, order_id, amount_paise, currency, prefill }
+//     so the browser can open Razorpay Checkout with the correct order.
 //
-//   POST /api/payments/return    (public — SabPaisa posts here)
-//     SabPaisa's user-return callback. The user's browser is here, holding
-//     an encrypted response field. We decrypt, correlate by clientTxnId,
-//     run the double-verify server-to-server call (so a spoofed callback
-//     can't short-circuit confirmation), then confirm or fail the payment
-//     and redirect the browser to a success/failure/pending SPA page.
+//   POST /api/payments/verify   (authed — browser handler after modal resolves)
+//     Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature }
+//     Verifies the HMAC signature against our key_secret. If it matches,
+//     persists the payment id + signature, calls confirmPaymentAndFulfil,
+//     and returns the normalised payment row. Idempotent against the
+//     webhook path — whichever lands first flips to success.
 //
-//   POST /api/payments/webhook   (public — SabPaisa posts here)
-//     SabPaisa Push API — server-to-server notification that fires
-//     independently of the user's browser. Same decrypt + verify + confirm
-//     flow, no redirect. Idempotent against /return.
+//   POST /api/payments/webhook  (public — Razorpay posts here)
+//     Server-to-server push from Razorpay. Validated via X-Razorpay-Signature
+//     (HMAC-SHA256 of the raw body with the webhook secret). Handles the
+//     payment.captured / payment.failed events. Idempotent against /verify.
 //
 //   GET /api/payments/:id/status (authed)
-//     Lightweight polling endpoint the SPA uses after /return redirects
-//     back to the SPA, so the success page can confirm the row flipped to
+//     Lightweight polling endpoint the SPA uses on /payments/result after
+//     the modal closes, so the result page can confirm the row flipped to
 //     'success' before showing the confirmation banner.
 
 import { Router } from "express";
@@ -33,22 +33,24 @@ import { payments, events, jobPostings } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
-import { buildInitRedirect, parseCallbackEncData, verifyPayment, paiseToRupees } from "../lib/sabpaisa/client.js";
-import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/sabpaisa/confirm.js";
-import { mapSabPaisaStatus } from "../lib/sabpaisa/types.js";
+import {
+  createOrder,
+  verifyCheckoutSignature,
+  verifyWebhookSignature,
+  mapRazorpayStatus,
+} from "../lib/razorpay/client.js";
+import { razorpayConfig } from "../lib/razorpay/config.js";
+import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/razorpay/confirm.js";
 
 export const paymentsRouter = Router();
 
 // ─── POST /api/payments/initiate ──────────────────────────────────────────
 // Body: { payment_id }
 //   The caller has already created the payment row (via /events/:slug/register
-//   or any other paid-purpose entry point). This endpoint builds the SabPaisa
-//   init form from that row and returns it. Keeping create-the-row logic in
-//   the originating router means each purpose can set its own metadata +
-//   validation + capacity rules; this endpoint is purely a "wrap the row
-//   in a SabPaisa payload" step.
+//   or any other paid-purpose entry point). This endpoint creates a Razorpay
+//   Order and returns the payload the frontend hands to Checkout.js.
 //
-// Returns: { action, clientCode, encData, client_txn_id }
+// Returns: { key_id, order_id, amount_paise, currency, prefill }
 paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const payment_id = need(trim(req.body?.payment_id), "Payment ID");
@@ -60,271 +62,228 @@ paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: A
       throw new ApiError(400, `Payment is already in status '${payment.status}' — cannot re-initiate.`);
     }
 
-    // Generate a fresh clientTxnId if the row doesn't have one yet. UUID
-    // segments are too long for some SabPaisa dashboards — use a 24-char
-    // slug that's still globally unique within the branch's txn history.
-    const clientTxnId = payment.client_txn_id ?? `NBWRI-${payment.id.replace(/-/g, "").slice(0, 18)}`;
-
     const metadata = (payment.metadata ?? {}) as Record<string, unknown>;
     const payerName  = String(metadata.payer_name  ?? req.user!.name  ?? "");
     const payerEmail = String(metadata.payer_email ?? req.user!.email ?? "");
-    const payerMobile = String(metadata.payer_phone ?? "");
+    const payerPhone = String(metadata.payer_phone ?? "");
 
-    const redirect = buildInitRedirect({
-      clientTxnId,
-      amountRupees: paiseToRupees(payment.amount_paise),
-      payerName,
-      payerEmail,
-      payerMobile,
-      // udf1 carries the purpose so the return handler can route the SPA
-      // back to the right landing page without a DB lookup. udf2 is the
-      // ref_id (event id, job id, ...). udf3 is reserved.
-      udf1: payment.purpose,
-      udf2: payment.ref_id ?? "",
-    });
+    let order;
+    try {
+      order = await createOrder({
+        amountPaise: payment.amount_paise,
+        receipt:     payment.id,     // row UUID as receipt — Razorpay accepts up to 40 chars
+        notes: {
+          payment_id: payment.id,
+          purpose:    payment.purpose,
+          ref_id:     payment.ref_id ?? "",
+        },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
+    }
 
-    // Persist the clientTxnId and flip to pending — SabPaisa now owns the
-    // payment until a callback or webhook arrives.
     await db.update(payments).set({
-      client_txn_id: clientTxnId,
+      razorpay_order_id: order.id,
       status: "pending",
-      provider: "sabpaisa",
+      provider: "razorpay",
       updated_at: new Date(),
     }).where(eq(payments.id, payment.id));
 
     return res.json({
-      action:        redirect.action,
-      clientCode:    redirect.clientCode,
-      clientTxnId:   redirect.clientTxnId,
-      encData:       redirect.encData,
-      client_txn_id: clientTxnId,
+      key_id:       razorpayConfig().keyId,
+      order_id:     order.id,
+      amount_paise: payment.amount_paise,
+      currency:     order.currency,
+      prefill: {
+        name:    payerName,
+        email:   payerEmail,
+        contact: payerPhone,
+      },
     });
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// ─── /api/payments/return ─────────────────────────────────────────────────
-// SabPaisa redirects the user here after they finish paying (success /
-// fail / cancel — all paths come through here). The user's browser is on
-// this endpoint; we decrypt, double-verify, update the row, and 302 to
-// the SPA.
+// ─── POST /api/payments/verify ────────────────────────────────────────────
+// Browser handler fires this from inside the Razorpay Checkout success
+// callback with the three fields Razorpay hands it. Verifies the HMAC
+// signature server-side — if it doesn't match, the payload was tampered
+// with and must be rejected. If it matches, we trust that Razorpay really
+// did capture the payment and call confirmPaymentAndFulfil.
 //
-// This endpoint is PUBLIC — SabPaisa calls it over HTTPS without our auth
-// cookies. Treat every input as untrusted: never trust the status field
-// in the callback, always double-verify server-to-server before confirming.
-//
-// Both POST (newer SabPaisa) and GET (older variant that encodes
-// `encResponse` as a query param) share one handler.
-async function handleReturn(req: import("express").Request, res: import("express").Response, next: import("express").NextFunction) {
+// Authed because only the payer should be able to trigger confirmation from
+// the client. The webhook path (next endpoint) handles the unauth'd side.
+paymentsRouter.post("/verify", requireUser, async (req: AuthedRequest, res, next) => {
   try {
-    const appUrl = (process.env.APP_URL ?? "").replace(/\/$/, "");
+    const razorpay_order_id   = need(trim(req.body?.razorpay_order_id), "razorpay_order_id");
+    const razorpay_payment_id = need(trim(req.body?.razorpay_payment_id), "razorpay_payment_id");
+    const razorpay_signature  = need(trim(req.body?.razorpay_signature), "razorpay_signature");
 
-    const input = req.method === "GET" ? req.query : req.body;
-    // SabPaisa's field name has varied across versions; accept the three
-    // common ones. Anything else → log and redirect to a generic failure.
-    const encResponse = String(
-      (input as any)?.encResponse ?? (input as any)?.encData ?? (input as any)?.enc ?? (input as any)?.response ?? ""
-    ).trim();
-
-    if (!encResponse) {
-      // eslint-disable-next-line no-console
-      console.warn("[sabpaisa] /return called without encResponse field; keys:", Object.keys(req.body ?? {}));
-      return res.redirect(302, `${appUrl}/payments/result?status=unknown`);
+    const [payment] = await db.select().from(payments)
+      .where(eq(payments.razorpay_order_id, razorpay_order_id))
+      .limit(1);
+    if (!payment) throw new ApiError(404, "Payment not found");
+    if (payment.payer_user_id !== req.user!.id) {
+      // Don't let a logged-in user confirm somebody else's order even if
+      // they somehow learn the order id. Returning 404 instead of 403
+      // avoids confirming the id exists for a non-owner.
+      throw new ApiError(404, "Payment not found");
     }
 
-    const payload = parseCallbackEncData(encResponse);
-    const clientTxnId = payload.clientTxnId ?? payload.udf0 ?? "";
-
-    if (!clientTxnId) {
-      return res.redirect(302, `${appUrl}/payments/result?status=unknown`);
+    const valid = verifyCheckoutSignature(razorpay_order_id, razorpay_payment_id, razorpay_signature);
+    if (!valid) {
+      // Record the attempt so audit can see a failed signature verify.
+      await db.update(payments).set({
+        rejected_reason: "Invalid Razorpay signature on /verify",
+        updated_at: new Date(),
+      }).where(eq(payments.id, payment.id));
+      throw new ApiError(400, "Invalid payment signature — not from Razorpay.");
     }
 
-    const [payment] = await db.select().from(payments).where(eq(payments.client_txn_id, clientTxnId)).limit(1);
-    if (!payment) {
-      return res.redirect(302, `${appUrl}/payments/result?status=unknown&ref=${encodeURIComponent(clientTxnId)}`);
-    }
-
-    // Stash the raw callback for audit before any status change — if
-    // confirmation fails later we still have the payload.
+    // Persist the verified payment id + signature before confirmation. If
+    // confirm throws we still have the Razorpay fields on the row for the
+    // reconciliation cron or the admin reverify.
     await db.update(payments).set({
-      sabpaisa_response: payload as any,
-      return_received_at: new Date(),
+      razorpay_payment_id: razorpay_payment_id,
+      razorpay_signature:  razorpay_signature,
       updated_at: new Date(),
     }).where(eq(payments.id, payment.id));
 
-    // The callback payload is itself AES-decrypted with the merchant's
-    // secret key, so a spoofed callback would need our key. Treat the
-    // callback's status as the primary signal; call double-verify as a
-    // defence-in-depth check but DON'T let a verify-API failure override
-    // a legit callback. (Earlier logic hard-defaulted to 'pending' on
-    // verify failure which left visibly-successful payments stuck.)
-    const callbackOutcome = mapSabPaisaStatus(payload.status);
+    // Idempotent short-circuit — if webhook arrived first and flipped the
+    // row to success, don't do the work twice.
+    if (payment.status === "success") {
+      return res.json({ ok: true, alreadyConfirmed: true, payment_id: payment.id, status: "success" });
+    }
 
-    const verifyResult = await verifyPayment(clientTxnId).catch((e) => {
+    try {
+      await confirmPaymentAndFulfil(payment.id);
+    } catch (confirmErr) {
+      // Money landed but we failed to create the registration/activate the
+      // posting. Return pending so the SPA shows the pending screen and the
+      // reconciliation cron (every 30 min) can retry. The webhook may also
+      // arrive and retry via its own path.
       // eslint-disable-next-line no-console
-      console.error("[sabpaisa] verify failed on /return — falling back to callback status:", e);
-      return null;
-    });
-
-    const verifiedOutcome = verifyResult?.outcome ?? callbackOutcome;
-    const verified = verifyResult?.response ?? payload;
-
-    const sabpaisaTxnId = verified.sabpaisaTxnId ?? payload.sabpaisaTxnId ?? null;
-
-    await db.update(payments).set({
-      sabpaisa_txn_id:       sabpaisaTxnId,
-      sabpaisa_status_code:  verified.statusCode ?? payload.statusCode ?? null,
-      sabpaisa_payment_mode: verified.paymentMode ?? payload.paymentMode ?? null,
-      sabpaisa_bank_name:    verified.bankName ?? payload.bankName ?? null,
-      sabpaisa_bank_txn_id:  verified.bankTxnId ?? payload.bankTxnId ?? null,
-      last_verified_at:      new Date(),
-      updated_at:            new Date(),
-    }).where(eq(payments.id, payment.id));
-
-    if (verifiedOutcome === "success") {
+      console.error("[razorpay] confirm failed on /verify:", confirmErr);
       try {
-        await confirmPaymentAndFulfil(payment.id);
-        return res.redirect(302, buildResultRedirect(appUrl, "success", payment, payload));
-      } catch (confirmErr) {
-        // Confirmation shouldn't fail. If it does, SabPaisa took the money
-        // but we failed to create the registration — redirect to the
-        // "pending" result page (not success) so the user doesn't walk
-        // away thinking they're registered. The reconciliation cron
-        // (every 30 min) will retry; the webhook may also arrive and
-        // retry via its own path.
-        // eslint-disable-next-line no-console
-        console.error("[sabpaisa] confirm failed on /return — redirecting to pending:", confirmErr);
-        // Surface to Sentry (SENTRY_DSN wired in index.ts). Dynamic import
-        // avoids bundling Sentry into this file's import graph when it's
-        // not configured.
-        try {
-          const Sentry = await import("@sentry/node").catch(() => null);
-          Sentry?.captureException?.(confirmErr, {
-            tags: { source: "sabpaisa_return_confirm" },
-            extra: { payment_id: payment.id, client_txn_id: clientTxnId },
-          });
-        } catch { /* Sentry optional */ }
-        return res.redirect(302, buildResultRedirect(appUrl, "pending", payment, payload));
-      }
+        const Sentry = await import("@sentry/node").catch(() => null);
+        Sentry?.captureException?.(confirmErr, {
+          tags: { source: "razorpay_verify_confirm" },
+          extra: { payment_id: payment.id, order_id: razorpay_order_id },
+        });
+      } catch { /* Sentry optional */ }
+      return res.json({ ok: true, alreadyConfirmed: false, payment_id: payment.id, status: "pending" });
     }
 
-    if (verifiedOutcome === "failed" || verifiedOutcome === "aborted") {
-      const reason = verified.bankErrorMessage ?? payload.bankErrorMessage ?? `SabPaisa reported ${verifiedOutcome}`;
-      await markPaymentFailed(payment.id, reason);
-      return res.redirect(302, buildResultRedirect(appUrl, verifiedOutcome, payment, payload));
-    }
-
-    // Pending — SabPaisa hasn't resolved yet. Show the pending screen; the
-    // webhook will fire within minutes and the SPA's /status polling will
-    // flip to success/fail when it does.
-    return res.redirect(302, buildResultRedirect(appUrl, "pending", payment, payload));
+    return res.json({ ok: true, alreadyConfirmed: false, payment_id: payment.id, status: "success" });
   } catch (err) { handleApiError(err, res, next); }
-}
-
-paymentsRouter.post("/return", handleReturn);
-paymentsRouter.get("/return",  handleReturn);
+});
 
 // ─── POST /api/payments/webhook ───────────────────────────────────────────
-// SabPaisa Push API — server-to-server. Fires asynchronously of the
-// user's browser callback. Must respond fast (SabPaisa retries on
-// timeout) and MUST be idempotent — the same push can be delivered twice.
+// Razorpay's server-to-server push. Fires asynchronously of the browser
+// handler. Must respond fast (Razorpay retries on timeout) and MUST be
+// idempotent — the same push can be delivered twice.
 //
-// Public endpoint. Authentication is the AES key — only SabPaisa holds
-// the matching key, so decrypting a well-formed payload proves origin.
-paymentsRouter.post("/webhook", async (req, res, next) => {
+// Authentication is the X-Razorpay-Signature header verified against the
+// webhook secret (distinct from the API key secret — configured separately
+// in the Razorpay dashboard).
+//
+// IMPORTANT: Razorpay signs the RAW request body. The urlencoded parser
+// mounted on this router in index.ts doesn't give us the raw bytes, so
+// this endpoint uses a JSON body parser with a `verify` callback that
+// stashes the raw buffer on req.rawBody. The signature check runs
+// against that buffer, not the parsed object.
+paymentsRouter.post("/webhook", async (req: any, res, next) => {
   try {
-    const encResponse = String(
-      req.body?.encResponse ?? req.body?.encData ?? req.body?.enc ?? ""
-    ).trim();
+    const signature = String(req.headers["x-razorpay-signature"] ?? "").trim();
+    const rawBody = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body ?? {});
 
-    if (!encResponse) {
-      return res.status(400).json({ error: "missing encResponse" });
+    if (!signature || !verifyWebhookSignature(rawBody, signature)) {
+      // Don't 5xx — Razorpay would retry. 400 tells it "this payload won't
+      // ever succeed", so stop trying. Mismatched signatures are either a
+      // spoof or a webhook-secret-mismatch on our side.
+      return res.status(400).json({ error: "invalid signature" });
     }
 
-    let payload;
-    try {
-      payload = parseCallbackEncData(encResponse);
-    } catch {
-      return res.status(400).json({ error: "decryption failed" });
+    const payload = req.body ?? {};
+    const eventType = String(payload?.event ?? "");
+    const rpPayment = payload?.payload?.payment?.entity ?? null;
+    const rpOrderId = rpPayment?.order_id ?? payload?.payload?.order?.entity?.id ?? null;
+
+    if (!rpOrderId) {
+      // Unhandled event shape — ack-and-ignore. Razorpay fires events we
+      // don't care about (order.paid, refund.*, etc.); no retry storm.
+      return res.json({ ok: true, note: `ignored event ${eventType}` });
     }
 
-    const clientTxnId = payload.clientTxnId ?? "";
-    if (!clientTxnId) return res.status(400).json({ error: "missing clientTxnId" });
-
-    const [payment] = await db.select().from(payments).where(eq(payments.client_txn_id, clientTxnId)).limit(1);
+    const [payment] = await db.select().from(payments)
+      .where(eq(payments.razorpay_order_id, rpOrderId))
+      .limit(1);
     if (!payment) {
-      // Push for an unknown payment — SabPaisa will retry if we 5xx, so
+      // Push for an unknown order — Razorpay will retry if we 5xx, so
       // 200 to acknowledge-and-ignore (prevents retry storms on legit
-      // orphans like a cancelled init).
-      return res.json({ ok: true, note: "unknown clientTxnId" });
+      // orphans like a test fired against the wrong environment).
+      return res.json({ ok: true, note: "unknown order" });
     }
 
+    // Persist the latest payment id + metadata before any status change.
+    const rpPaymentId = rpPayment?.id ?? payment.razorpay_payment_id ?? null;
     await db.update(payments).set({
-      sabpaisa_response: { ...(payment.sabpaisa_response as object || {}), webhook: payload } as any,
-      webhook_received_at: new Date(),
+      razorpay_payment_id: rpPaymentId,
       updated_at: new Date(),
     }).where(eq(payments.id, payment.id));
 
-    // Same verify-before-confirm discipline as /return.
-    const { outcome, response: verified } = await verifyPayment(clientTxnId).catch(() => {
-      // On verify failure, trust the webhook outcome (webhook is itself
-      // server-to-server and signed with our AES key — a spoof here is
-      // impractical). SabPaisa's docs say this fallback is acceptable.
-      return { outcome: mapSabPaisaStatus(payload.status), response: payload };
-    });
-
-    const sabpaisaTxnId = verified.sabpaisaTxnId ?? payload.sabpaisaTxnId ?? null;
-
-    await db.update(payments).set({
-      sabpaisa_txn_id:       sabpaisaTxnId,
-      sabpaisa_status_code:  verified.statusCode ?? payload.statusCode ?? null,
-      sabpaisa_payment_mode: verified.paymentMode ?? payload.paymentMode ?? null,
-      sabpaisa_bank_name:    verified.bankName ?? payload.bankName ?? null,
-      sabpaisa_bank_txn_id:  verified.bankTxnId ?? payload.bankTxnId ?? null,
-      last_verified_at:      new Date(),
-      updated_at:            new Date(),
-    }).where(eq(payments.id, payment.id));
-
-    if (outcome === "success") {
-      await confirmPaymentAndFulfil(payment.id);
-    } else if (outcome === "failed" || outcome === "aborted") {
-      const reason = verified.bankErrorMessage ?? payload.bankErrorMessage ?? `SabPaisa webhook reported ${outcome}`;
-      await markPaymentFailed(payment.id, reason);
+    if (eventType === "payment.captured" || eventType === "order.paid") {
+      if (payment.status !== "success") {
+        try {
+          await confirmPaymentAndFulfil(payment.id);
+        } catch (confirmErr) {
+          // eslint-disable-next-line no-console
+          console.error("[razorpay] confirm failed in webhook:", confirmErr);
+        }
+      }
+      return res.json({ ok: true });
     }
-    // Pending → do nothing, next webhook / verify will resolve it.
 
-    return res.json({ ok: true });
+    if (eventType === "payment.failed") {
+      const reason = rpPayment?.error_description
+        ?? rpPayment?.error_reason
+        ?? `Razorpay webhook: payment.failed (${rpPayment?.error_code ?? "unknown"})`;
+      await markPaymentFailed(payment.id, reason);
+      return res.json({ ok: true });
+    }
+
+    // Other events (refund.*, order.*, etc.) — ack without action.
+    return res.json({ ok: true, note: `no-op for ${eventType}` });
   } catch (err) {
-    // Log but still return 200 — SabPaisa retries on 5xx. If we have a
+    // Log but still return 200 — Razorpay retries on 5xx. If we have a
     // true bug we'd rather fix forward than DoS our own endpoint via
-    // SabPaisa's retry backoff.
+    // Razorpay's retry backoff.
     // eslint-disable-next-line no-console
-    console.error("[sabpaisa] webhook handler error:", err);
+    console.error("[razorpay] webhook handler error:", err);
     return res.json({ ok: true, note: "handler error — logged" });
   }
 });
 
 // ─── GET /api/payments/:id/status ─────────────────────────────────────────
-// Lightweight status poller. SPA uses this after SabPaisa redirects back
-// so the success page can confirm the row flipped before showing the
-// confirmation banner.
+// Lightweight status poller. SPA uses this on /payments/result so the
+// success page can confirm the row flipped before showing the confirmation
+// banner.
 paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const id = need(trim(req.params.id), "Payment ID");
-    // Scope the lookup to the current user — otherwise any logged-in caller
-    // who learns a payment ID (easy: it's in the /payments/result URL after
-    // the SabPaisa redirect) can poll /status and read someone else's
-    // transaction, including whether it succeeded. Mirrors the ownership
-    // check in /initiate above. Returning 404 (not 403) avoids confirming
-    // the id exists for a non-owner.
+    // Scope to current user — otherwise any logged-in caller who learns a
+    // payment id (easy: it's in the /payments/result URL after modal close)
+    // could read someone else's transaction, including whether it
+    // succeeded. Mirrors the ownership check in /initiate above. Returning
+    // 404 (not 403) avoids confirming the id exists for a non-owner.
     const [p] = await db.select({
       id: payments.id,
       status: payments.status,
       amount_paise: payments.amount_paise,
       purpose: payments.purpose,
       ref_id: payments.ref_id,
-      sabpaisa_txn_id: payments.sabpaisa_txn_id,
-      sabpaisa_payment_mode: payments.sabpaisa_payment_mode,
-      sabpaisa_bank_name: payments.sabpaisa_bank_name,
+      razorpay_order_id:   payments.razorpay_order_id,
+      razorpay_payment_id: payments.razorpay_payment_id,
       rejected_reason: payments.rejected_reason,
       metadata: payments.metadata,
       updated_at: payments.updated_at,
@@ -357,25 +316,28 @@ paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, n
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// ─── Helper ───────────────────────────────────────────────────────────────
+// ─── POST /api/payments/cancelled ─────────────────────────────────────────
+// Browser calls this when the user closes Razorpay's modal without paying
+// (Checkout.js fires the `payment.failed` handler with reason `cancelled`,
+// but there's no server-side signal). Flips the row to `failed` with a
+// cancellation reason so the user can see it in /my-pending-payments and
+// retry. Non-authoritative: if a real payment later arrives for the same
+// order via webhook, markPaymentFailed's guard rejects the failure on an
+// already-successful row.
+paymentsRouter.post("/cancelled", requireUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const payment_id = need(trim(req.body?.payment_id), "Payment ID");
+    const [payment] = await db.select({ id: payments.id, payer_user_id: payments.payer_user_id, status: payments.status })
+      .from(payments).where(eq(payments.id, payment_id)).limit(1);
+    if (!payment) throw new ApiError(404, "Payment not found");
+    if (payment.payer_user_id !== req.user!.id) throw new ApiError(404, "Payment not found");
 
-function buildResultRedirect(
-  appUrl: string,
-  status: "success" | "failed" | "aborted" | "pending",
-  payment: { id: string; purpose: string; ref_id: string | null; metadata: unknown },
-  _payload: Record<string, unknown>,
-): string {
-  const md = (payment.metadata as { event_slug?: string }) ?? {};
-  const params = new URLSearchParams({
-    status,
-    payment_id: payment.id,
-    purpose:    payment.purpose,
-  });
-  if (md.event_slug) params.set("event_slug", md.event_slug);
-  // For job_posting payments we carry the posting_id (= ref_id) so the
-  // result page can show a "Back to my postings → <title>" CTA.
-  if (payment.purpose === "job_posting" && payment.ref_id) {
-    params.set("posting_id", payment.ref_id);
-  }
-  return `${appUrl}/payments/result?${params.toString()}`;
-}
+    // Only cancel rows the user could plausibly cancel. Terminal states
+    // are left alone — a stale cancel after a successful payment must not
+    // downgrade the row.
+    if (payment.status === "created" || payment.status === "pending") {
+      await markPaymentFailed(payment.id, "User cancelled the payment modal");
+    }
+    return res.json({ ok: true });
+  } catch (err) { handleApiError(err, res, next); }
+});

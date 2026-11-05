@@ -32,7 +32,7 @@ function publicBaseUrl(): string {
   return (
     process.env.PUBLIC_APP_URL ||
     process.env.VITE_PUBLIC_APP_URL ||
-    "https://icainagpur.in"
+    "https://nagpur.icai.org"
   ).replace(/\/+$/, "");
 }
 

@@ -1,15 +1,19 @@
 // Shared "payment confirmed → fulfil the thing it paid for" logic.
 //
-// Called from TWO places:
-//   • /api/payments/return  — user's browser landed back here after paying
-//   • /api/payments/webhook — SabPaisa's server-to-server push
+// Called from THREE places:
+//   • /api/payments/verify  — browser handler fires after Razorpay Checkout
+//                             modal resolves. Verified signature → confirm.
+//   • /api/payments/webhook — Razorpay's server-to-server push. Verified
+//                             X-Razorpay-Signature → confirm.
+//   • paymentReconciliationCron — picks pending rows > 1 hr old, polls
+//                                 Razorpay for the order's payment status,
+//                                 then confirms or fails via this fn.
 //
-// Both can arrive first; whichever does gets the work done, the other
-// is idempotent via the `payment.status = 'success'` short-circuit.
+// Any path can arrive first; whichever does gets the work done, the others
+// are idempotent via the `payment.status = 'success'` short-circuit.
 //
-// This function covers only the event_registration purpose today. Add new
-// `case` branches as other paid surfaces come online (job_posting is on
-// the roadmap — see FEATURES_DELIVERED FUTURE log).
+// Today this function covers event_registration and job_posting purposes.
+// Add new `case` branches as other paid surfaces come online.
 
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
@@ -55,7 +59,7 @@ async function fireSoldOutNotifications(opts: {
   payer_name: string;
   payer_email: string;
   amount_paise: number;
-  sabpaisa_txn_id: string | null;
+  gateway_txn_id: string | null;
   event_title: string;
   event_date: string;
   branch_id: string | null;
@@ -79,7 +83,7 @@ async function fireSoldOutNotifications(opts: {
         payer_email:      opts.payer_email,
         amount_rupees,
         payment_id:       opts.payment_id,
-        sabpaisa_txn_id:  opts.sabpaisa_txn_id ?? "—",
+        gateway_txn_id:   opts.gateway_txn_id ?? "—",
         event_title:      opts.event_title,
         event_date:       opts.event_date,
         refund_queue_link: refundQueueLink,
@@ -108,19 +112,19 @@ export interface ConfirmResult {
   waitlistedCount: number;
   // For job_posting purpose: the posting_id that was published, if any.
   // Lets the return handler surface it in the result page redirect so
-  // the employer lands back on their posting after SabPaisa's bounce.
+  // the employer lands back on their posting after Razorpay's handler.
   activatedPostingId?: string | null;
 }
 
-// Caller already decided the SabPaisa outcome is "success" — this fn
-// trusts that decision and only fulfils the purpose. Verification against
-// SabPaisa must happen *before* calling this.
+// Caller already decided the Razorpay outcome is "success" — this fn
+// trusts that decision and only fulfils the purpose. Signature / webhook
+// verification against Razorpay must happen *before* calling this.
 export async function confirmPaymentAndFulfil(paymentId: string): Promise<ConfirmResult> {
   const result = await db.transaction(async (tx) => {
     const [payment] = await tx.select().from(payments).where(eq(payments.id, paymentId)).limit(1);
     if (!payment) throw new Error(`Payment ${paymentId} not found`);
 
-    // Idempotent short-circuit — webhook/return race safety.
+    // Idempotent short-circuit — webhook/verify race safety.
     if (payment.status === "success") {
       return { alreadyConfirmed: true, event: null, createdRows: [] as Array<{ id: string; user_id: string; status: string }>, waitlistedCount: 0, payerSummary: null };
     }
@@ -200,7 +204,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
     ];
 
     // Skip seat holders who already have an active registration — handles
-    // webhook-after-return race and the (rare) manual self-register
+    // webhook-after-verify race and the (rare) manual self-register
     // between pay-click and payment confirmation.
     const existingRows = await tx
       .select({ user_id: eventRegistrations.user_id })
@@ -263,7 +267,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
       payer_name:      metadataForPayer.payer_name ?? "",
       payer_email:     metadataForPayer.payer_email ?? "",
       amount_paise:    payment.amount_paise,
-      sabpaisa_txn_id: payment.sabpaisa_txn_id ?? null,
+      gateway_txn_id:  payment.razorpay_payment_id ?? null,
     } : null;
 
     return {
@@ -325,7 +329,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
       payer_name:      result.payerSummary.payer_name,
       payer_email:     result.payerSummary.payer_email,
       amount_paise:    result.payerSummary.amount_paise,
-      sabpaisa_txn_id: result.payerSummary.sabpaisa_txn_id,
+      gateway_txn_id:  result.payerSummary.gateway_txn_id,
       event_title:     result.event.title,
       event_date:      startsAt.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium" }),
       branch_id:       result.event.branch_id ?? null,
@@ -346,8 +350,8 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
   };
 }
 
-// Flip a payment to failed when SabPaisa confirms the outcome is terminal.
-// Called from both /return and /webhook when the outcome is "failed" or
+// Flip a payment to failed when Razorpay confirms the outcome is terminal.
+// Called from both /verify and /webhook when the outcome is "failed" or
 // "aborted". Idempotent — if the row is already in a terminal state, no-op.
 export async function markPaymentFailed(paymentId: string, reason: string): Promise<void> {
   await db.transaction(async (tx) => {
@@ -355,7 +359,7 @@ export async function markPaymentFailed(paymentId: string, reason: string): Prom
     if (!p) return;
     if (p.status === "success" || p.status === "refunded" || p.status === "partially_refunded") {
       // Don't downgrade a successful payment just because a stale webhook
-      // arrived last. Rare but SabPaisa's docs flag it as possible.
+      // arrived last. Rare but possible under network reordering.
       return;
     }
     await tx.update(payments).set({

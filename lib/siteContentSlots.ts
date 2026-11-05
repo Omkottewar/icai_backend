@@ -731,19 +731,19 @@ export const SITE_SLOTS = {
     fields: [{ key: "body", label: "Q&A body", kind: "markdown", hint: "One H3 per question; plain markdown answers below" }],
   },
   // ─── Payment result screens ─────────────────────────────────────────────
-  // Copy shown on /payments/result after SabPaisa redirects the user back
-  // from its hosted checkout. Four possible outcomes — admin can tune the
-  // tone/instructions for each without a redeploy.
+  // Copy shown on /payments/result after Razorpay Checkout closes. Four
+  // possible outcomes — admin can tune the tone/instructions for each
+  // without a redeploy.
   payment_result_screens: {
     label: "Payment result page copy (success / failed / cancelled / pending)",
     page:  "Payments",
     fields: [
       { key: "success_heading", label: "Success heading", kind: "text" },
-      { key: "success_body",    label: "Success body",    kind: "markdown", hint: "Shown when SabPaisa confirms payment succeeded." },
+      { key: "success_body",    label: "Success body",    kind: "markdown", hint: "Shown when Razorpay confirms payment succeeded." },
       { key: "failed_heading",  label: "Failed heading",  kind: "text" },
       { key: "failed_body",     label: "Failed body",     kind: "markdown", hint: "Shown when the bank/card declines the payment." },
       { key: "aborted_heading", label: "Cancelled heading", kind: "text" },
-      { key: "aborted_body",    label: "Cancelled body",    kind: "markdown", hint: "Shown when the user backs out of SabPaisa before paying." },
+      { key: "aborted_body",    label: "Cancelled body",    kind: "markdown", hint: "Shown when the user closes the Razorpay modal before paying." },
       { key: "pending_heading", label: "Pending heading", kind: "text" },
       { key: "pending_body",    label: "Pending body",    kind: "markdown", hint: "Shown while awaiting final bank confirmation (page polls every 3s)." },
     ],

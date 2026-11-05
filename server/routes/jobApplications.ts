@@ -105,7 +105,7 @@ jobApplicationsRouter.post("/", requireUser, sameOrigin, async (req: AuthedReque
     if (posting.poster_user_id) notifyTargets.add(posting.poster_user_id);
 
     const org_name = orgLabel(posting);
-    const applicantsUrlBase = process.env.PUBLIC_APP_URL || "https://icainagpur.in";
+    const applicantsUrlBase = process.env.PUBLIC_APP_URL || "https://nagpur.icai.org";
     const applicants_url = `${applicantsUrlBase.replace(/\/+$/, "")}/employer/postings#${posting.id}`;
     const applicant_phone_line = me.phone ? `\n  Phone: ${me.phone}` : "";
 

@@ -91,6 +91,15 @@ app.use("/api/admin",              express.json({ limit: "150mb" }));
 app.use("/api/resources",          express.json({ limit: "25mb" }));
 app.use("/api/scholarships",       express.json({ limit: "25mb" }));
 app.use("/api/articleship-matches", express.json({ limit: "25mb" }));
+// Razorpay webhook signs the raw JSON body (X-Razorpay-Signature =
+// HMAC-SHA256(rawBody, webhook_secret)). We stash the raw buffer on
+// req.rawBody via the `verify` hook so the webhook handler can re-sign
+// and compare. Mounted BEFORE the global json parser so this specific
+// one wins for /api/payments and the signature-material isn't lost.
+app.use("/api/payments", express.json({
+  limit: "100kb",
+  verify: (req: any, _res, buf) => { req.rawBody = Buffer.from(buf); },
+}));
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
@@ -183,10 +192,10 @@ app.use("/api/mentorship", mentorshipRouter);
 app.use("/api/articleship-matches", articleshipMatchesRouter);
 app.use("/api/scholarships", publicCache(300), scholarshipsRouter);
 app.use("/api/my-speaker-events", speakerEventsRouter);
-// SabPaisa posts callback/webhook data as application/x-www-form-urlencoded,
-// so the payments router gets its own urlencoded parser in addition to the
-// JSON parser already mounted above (JSON path handles /initiate + /status).
-app.use("/api/payments", express.urlencoded({ extended: true, limit: "100kb" }), paymentsRouter);
+// Razorpay checkout is modal-based (no form POST back to our server), so
+// the payments router only needs JSON — already parsed above with raw-body
+// capture for the webhook signature verifier.
+app.use("/api/payments", paymentsRouter);
 app.use("/api/admin", adminRouter);
 
 app.get("/api/health", (_req, res) => {
@@ -299,10 +308,11 @@ startPragyaanIngestCron();
 // fire inline from routes/employer.ts + routes/admin/jobs.ts.
 startJobAlertsCron();
 
-// Payment reconciliation — 30-minute tick that picks SabPaisa payments
-// stuck in `pending` for over an hour, re-verifies them, and routes the
-// outcome through confirmPaymentAndFulfil / markPaymentFailed. Prevents
-// silent money loss when both /return and /webhook fail to resolve a row.
+// Payment reconciliation — 30-minute tick that picks Razorpay payments
+// stuck in `pending` for over an hour, re-verifies them via the Orders API,
+// and routes the outcome through confirmPaymentAndFulfil / markPaymentFailed.
+// Prevents silent money loss when both /verify and /webhook fail to resolve
+// a row.
 startPaymentReconciliationCron();
 
 // Boot-time notification system sanity check — confirms every template

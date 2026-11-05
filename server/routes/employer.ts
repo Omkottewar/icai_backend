@@ -11,7 +11,8 @@ import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { notify } from "../lib/notify.js";
 import { storage } from "../lib/storage.js";
 import { JOB_POSTING_FEE_PAISE } from "../lib/jobPostingFees.js";
-import { buildInitRedirect, paiseToRupees } from "../lib/sabpaisa/client.js";
+import { createOrder } from "../lib/razorpay/client.js";
+import { razorpayConfig } from "../lib/razorpay/config.js";
 
 export const employerRouter = Router();
 
@@ -213,9 +214,9 @@ employerRouter.get("/postings/:id", async (req: EmployerRequest, res, next) => {
 });
 
 // ─── POST /api/employer/postings ──────────────────────────────────────────
-// Creates a posting in `pending_payment` state + initiates a SabPaisa
-// payment for the per-type fee. The posting goes LIVE only after the
-// payment confirms via SabPaisa's callback/webhook — see
+// Creates a posting in `pending_payment` state + opens a Razorpay Order
+// for the per-type fee. The posting goes LIVE only after the payment
+// confirms via Razorpay's signature-verify/webhook — see
 // confirmPaymentAndFulfil's `job_posting` branch which flips status to
 // 'active' and fires job alerts.
 //
@@ -224,12 +225,12 @@ employerRouter.get("/postings/:id", async (req: EmployerRequest, res, next) => {
 //     item: <posting row>,
 //     payment: {
 //       payment_id, amount_paise,
-//       sabpaisa: { action, clientCode, clientTxnId, encData }
+//       razorpay: { key_id, order_id, amount_paise, currency, prefill }
 //     }
 //   }
 //
-// The browser auto-POSTs the sabpaisa block to SabPaisa's hosted checkout
-// (same pattern as event-registration flow).
+// The browser loads Razorpay Checkout.js and opens the modal using the
+// razorpay block (same pattern as event-registration flow).
 employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, next) => {
   try {
     const parsed = parsePostingBody(req.body);
@@ -251,7 +252,7 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
         amount_paise:  feePaise,
         currency:      "INR",
         status:        "pending",
-        provider:      "sabpaisa",
+        provider:      "razorpay",
         purpose:       "job_posting",
         ref_type:      "job_posting",
         ref_id:        posting.id,
@@ -274,18 +275,17 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
       return { posting, payment };
     });
 
-    const clientTxnId = `NBWRI-${payment.id.replace(/-/g, "").slice(0, 18)}`;
-
-    let redirect;
+    let order;
     try {
-      redirect = buildInitRedirect({
-        clientTxnId,
-        amountRupees: paiseToRupees(feePaise),
-        payerName:  req.user!.name,
-        payerEmail: req.user!.email,
-        payerMobile: req.user!.phone ?? "",
-        udf1: "job_posting",
-        udf2: posting.id,
+      order = await createOrder({
+        amountPaise: feePaise,
+        receipt:     payment.id,
+        notes: {
+          payment_id:   payment.id,
+          purpose:      "job_posting",
+          ref_id:       posting.id,
+          posting_type: posting.type,
+        },
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -293,7 +293,7 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
     }
 
     await db.update(payments).set({
-      client_txn_id: clientTxnId,
+      razorpay_order_id: order.id,
       updated_at: new Date(),
     }).where(eq(payments.id, payment.id));
 
@@ -302,11 +302,16 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
       payment: {
         payment_id:   payment.id,
         amount_paise: feePaise,
-        sabpaisa: {
-          action:      redirect.action,
-          clientCode:  redirect.clientCode,
-          clientTxnId: redirect.clientTxnId,
-          encData:     redirect.encData,
+        razorpay: {
+          key_id:       razorpayConfig().keyId,
+          order_id:     order.id,
+          amount_paise: feePaise,
+          currency:     order.currency,
+          prefill: {
+            name:    req.user!.name,
+            email:   req.user!.email,
+            contact: req.user!.phone ?? "",
+          },
         },
       },
     });
@@ -314,14 +319,15 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
 });
 
 // ─── POST /api/employer/postings/:id/pay ─────────────────────────────────
-// Re-initiate SabPaisa for a posting that's still in `pending_payment`
-// — happens when the employer closed the SabPaisa tab, their card was
+// Re-open Razorpay for a posting that's still in `pending_payment` —
+// happens when the employer closed the Razorpay modal, their card was
 // declined, or the first payment attempt timed out. We create a FRESH
-// payment row (don't try to retry the old one — SabPaisa doesn't allow
-// reusing a clientTxnId after failure) and link the posting to it.
+// payment row + fresh Razorpay Order (don't try to retry the old order —
+// Razorpay won't accept new payments against an order that already has a
+// failed attempt in some flows) and link the posting to it.
 //
 // Returns the same `payment` shape as POST /postings so the frontend's
-// SabPaisa redirect form can be reused as-is.
+// Razorpay checkout launcher can be reused as-is.
 employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest, res, next) => {
   try {
     const postingId = String(req.params.id);
@@ -342,7 +348,7 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
       amount_paise:  feePaise,
       currency:      "INR",
       status:        "pending",
-      provider:      "sabpaisa",
+      provider:      "razorpay",
       purpose:       "job_posting",
       ref_type:      "job_posting",
       ref_id:        posting.id,
@@ -357,18 +363,17 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
       },
     }).returning();
 
-    const clientTxnId = `NBWRI-${payment.id.replace(/-/g, "").slice(0, 18)}`;
-
-    let redirect;
+    let order;
     try {
-      redirect = buildInitRedirect({
-        clientTxnId,
-        amountRupees: paiseToRupees(feePaise),
-        payerName:  req.user!.name,
-        payerEmail: req.user!.email,
-        payerMobile: req.user!.phone ?? "",
-        udf1: "job_posting",
-        udf2: posting.id,
+      order = await createOrder({
+        amountPaise: feePaise,
+        receipt:     payment.id,
+        notes: {
+          payment_id:   payment.id,
+          purpose:      "job_posting",
+          ref_id:       posting.id,
+          posting_type: posting.type,
+        },
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -376,7 +381,7 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
     }
 
     await db.update(payments).set({
-      client_txn_id: clientTxnId,
+      razorpay_order_id: order.id,
       updated_at: new Date(),
     }).where(eq(payments.id, payment.id));
 
@@ -390,11 +395,16 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
     res.json({
       payment_id:   payment.id,
       amount_paise: feePaise,
-      sabpaisa: {
-        action:      redirect.action,
-        clientCode:  redirect.clientCode,
-        clientTxnId: redirect.clientTxnId,
-        encData:     redirect.encData,
+      razorpay: {
+        key_id:       razorpayConfig().keyId,
+        order_id:     order.id,
+        amount_paise: feePaise,
+        currency:     order.currency,
+        prefill: {
+          name:    req.user!.name,
+          email:   req.user!.email,
+          contact: req.user!.phone ?? "",
+        },
       },
     });
   } catch (err) { handleApiError(err, res, next); }
@@ -577,7 +587,7 @@ employerRouter.patch("/applications/:appId", sameOrigin, async (req: EmployerReq
     // Fire notification if status actually changed (idempotent PATCHes
     // shouldn't blast the applicant with duplicate emails).
     if (existing.prev_status !== status) {
-      const applicationsUrl = (process.env.PUBLIC_APP_URL || "https://icainagpur.in").replace(/\/+$/, "")
+      const applicationsUrl = (process.env.PUBLIC_APP_URL || "https://nagpur.icai.org").replace(/\/+$/, "")
         + "/dashboard#my-applications";
       const org_name = existing.firm_name || existing.employer_name || "ICAI Nagpur";
       const status_note_block = status_note ? `Note from the employer:\n  ${status_note}\n\n` : "";
