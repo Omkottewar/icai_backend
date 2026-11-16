@@ -1,80 +1,96 @@
-// SabPaisa encryption helpers — AES-128-CBC with PKCS7 padding, byte-for-
-// byte compatible with SabPaisa's PHP7+ reference integration.
+// SabPaisa encryption helpers — AES-128-CBC with PKCS7 padding, matching
+// SabPaisa's current PHP7+ scheme.
 //
-// SabPaisa's reference code (shared alongside UAT credentials) encrypts
-// request payloads with:
+// Transport format (confirmed by SabPaisa's own error message
+// "PHP7 ciphertext must be of form <base64ct>:<base64iv>"):
 //
-//   openssl_encrypt($plaintext, 'AES-128-CBC', $authKey, OPENSSL_RAW_DATA, $authIv)
+//     encData = base64(ciphertext) + ":" + base64(iv)
 //
-// and then base64-encodes the ciphertext for transport. Our side must
-// produce identical output to that call (and inverse-decrypt the response
-// SabPaisa sends back).
+// The IV is RANDOM per encryption (16 bytes from crypto.randomBytes). It
+// travels embedded in the payload so SabPaisa's server can extract it on
+// decrypt. Only the AES key is shared out-of-band; the IV is per-call.
+//
+// SabPaisa's own responses (callback body, webhook body, /status/verify
+// response) come back in the same `base64ct:base64iv` form, so decrypt
+// does the inverse: split on ":", base64-decode both halves, use the
+// extracted IV with the shared key.
 //
 // Details that matter:
-//   • Cipher:  AES-128-CBC. The key + IV are both 16 ASCII bytes
-//              (enforced in config.ts). SabPaisa ships keys as ASCII
-//              strings, not hex — do NOT hex-decode before use.
+//   • Cipher:  AES-128-CBC. The key is 16 ASCII bytes (enforced in
+//              config.ts). SabPaisa ships the key as an ASCII string,
+//              not hex — do NOT hex-decode before use.
 //   • Padding: PKCS7 (what OPENSSL_RAW_DATA emits for block ciphers by
 //              default). Node's createCipheriv does this automatically
 //              when autoPadding is left on.
-//   • Transport: base64. SabPaisa sends/receives the base64 string as a
-//                form field named `encData` (plus a plaintext `clientCode`
-//                so their LB can route without decrypting).
+//   • IV:      16 bytes, randomly generated per encrypt call. NOT taken
+//              from env — the SABPAISA_AUTH_IV env var is a leftover
+//              from F30 (PHP5 static-IV scheme) and no longer used.
+//   • Transport: base64(ct) + ":" + base64(iv). The colon is literal —
+//              base64's alphabet never produces one, so split-on-colon
+//              is unambiguous.
 //
 // This module is pure (no DB, no I/O). The self-test at the bottom can be
 // invoked via `npx tsx backend/server/lib/sabpaisa/crypto.ts` to verify
-// the encrypt/decrypt round-trip and a known-vector against UAT output.
+// the encrypt/decrypt round-trip.
 
-import { createCipheriv, createDecipheriv } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 // Encrypts a plaintext string with SabPaisa's AES-128-CBC + PKCS7 scheme
-// and returns a base64 string ready to drop into SabPaisa's `encData`
-// form field.
+// and returns the PHP7+ transport form `base64(ct):base64(iv)` ready to
+// drop into SabPaisa's `encData` form field.
 //
-// Throws on key/iv length mismatch (upstream config.ts also checks, but
-// defence-in-depth — any caller that imports this directly gets a clear
-// error rather than a mysterious crypto failure deep in Node.)
-export function sabpaisaEncrypt(plaintext: string, authKey: string, authIv: string): string {
-  assertKeyAndIv(authKey, authIv);
-  const cipher = createCipheriv("aes-128-cbc", Buffer.from(authKey, "utf8"), Buffer.from(authIv, "utf8"));
+// `authIv` is accepted (ignored) so existing call sites compile unchanged
+// — they still pass the env-configured IV from F30, but we no longer use
+// it. A random IV is generated per call.
+export function sabpaisaEncrypt(plaintext: string, authKey: string, _authIv?: string): string {
+  assertKey(authKey);
+  const iv = randomBytes(16);
+  const cipher = createCipheriv("aes-128-cbc", Buffer.from(authKey, "utf8"), iv);
   // autoPadding defaults to true — Node applies PKCS7 which matches
   // OPENSSL_RAW_DATA's default padding. Explicitly set anyway so a future
   // Node release that changes defaults can't silently break us.
   cipher.setAutoPadding(true);
-  const encryptedBuf = Buffer.concat([
+  const ciphertext = Buffer.concat([
     cipher.update(Buffer.from(plaintext, "utf8")),
     cipher.final(),
   ]);
-  return encryptedBuf.toString("base64");
+  return `${ciphertext.toString("base64")}:${iv.toString("base64")}`;
 }
 
-// Inverse of sabpaisaEncrypt — takes the base64 string SabPaisa hands us
-// in the response/webhook body and returns the plaintext string. Throws
-// on a tampered / corrupted payload (bad PKCS7 padding or truncated
-// ciphertext).
+// Inverse of sabpaisaEncrypt — takes the PHP7+ `base64(ct):base64(iv)`
+// string SabPaisa sends in callbacks / webhook bodies / verify responses
+// and returns the plaintext. Throws on a malformed / tampered payload
+// (missing colon, bad base64, truncated ciphertext, bad PKCS7 padding).
 //
-// SabPaisa occasionally URL-encodes the base64 string in return-redirect
-// query params; normalise + before b64-decoding. Spaces in a b64 string
-// almost always mean a `+` got lost in a URL round-trip.
-export function sabpaisaDecrypt(b64Ciphertext: string, authKey: string, authIv: string): string {
-  assertKeyAndIv(authKey, authIv);
-  const normalised = b64Ciphertext.replace(/ /g, "+").trim();
-  const ciphertext = Buffer.from(normalised, "base64");
-  const decipher = createDecipheriv("aes-128-cbc", Buffer.from(authKey, "utf8"), Buffer.from(authIv, "utf8"));
+// SabPaisa occasionally URL-encodes the payload in return-redirect query
+// params; we normalise ` ` → `+` before b64-decoding. Spaces in a b64
+// string almost always mean a `+` got lost in a URL round-trip.
+export function sabpaisaDecrypt(encData: string, authKey: string, _authIv?: string): string {
+  assertKey(authKey);
+  const normalised = encData.replace(/ /g, "+").trim();
+  const colon = normalised.indexOf(":");
+  if (colon < 0) {
+    throw new Error("SabPaisa decrypt: payload missing ':' separator — expected 'base64(ct):base64(iv)'");
+  }
+  const b64Ct = normalised.slice(0, colon);
+  const b64Iv = normalised.slice(colon + 1);
+  const ciphertext = Buffer.from(b64Ct, "base64");
+  const iv = Buffer.from(b64Iv, "base64");
+  if (iv.length !== 16) {
+    throw new Error(`SabPaisa decrypt: IV must be 16 bytes after base64 decode (got ${iv.length})`);
+  }
+  const decipher = createDecipheriv("aes-128-cbc", Buffer.from(authKey, "utf8"), iv);
   decipher.setAutoPadding(true);
-  const plaintextBuf = Buffer.concat([
+  const plaintext = Buffer.concat([
     decipher.update(ciphertext),
     decipher.final(),
   ]);
-  return plaintextBuf.toString("utf8");
+  return plaintext.toString("utf8");
 }
 
-function assertKeyAndIv(authKey: string, authIv: string): void {
+function assertKey(authKey: string): void {
   if (Buffer.byteLength(authKey, "utf8") !== 16) {
     throw new Error(`SabPaisa auth key must be 16 bytes (AES-128); got ${Buffer.byteLength(authKey, "utf8")}`);
-  }
-  if (Buffer.byteLength(authIv, "utf8") !== 16) {
-    throw new Error(`SabPaisa auth IV must be 16 bytes (AES-128); got ${Buffer.byteLength(authIv, "utf8")}`);
   }
 }
 
@@ -90,24 +106,36 @@ function assertKeyAndIv(authKey: string, authIv: string): void {
 // invocation, never when another module imports this file.
 async function _selfTest(): Promise<void> {
   const demoKey = "1234567890123456";  // 16 bytes
-  const demoIv  = "6543210987654321";  // 16 bytes
   const plaintext = "clientCode=NITE5&amount=100.00&clientTxnId=DEMO123";
 
-  const encrypted = sabpaisaEncrypt(plaintext, demoKey, demoIv);
-  const decrypted = sabpaisaDecrypt(encrypted, demoKey, demoIv);
+  const encrypted = sabpaisaEncrypt(plaintext, demoKey);
+  const decrypted = sabpaisaDecrypt(encrypted, demoKey);
 
   // eslint-disable-next-line no-console
   console.log("plaintext:   ", plaintext);
   // eslint-disable-next-line no-console
-  console.log("encrypted b64:", encrypted);
+  console.log("encrypted:   ", encrypted);  // should contain exactly one ':'
   // eslint-disable-next-line no-console
   console.log("decrypted:   ", decrypted);
 
   if (decrypted !== plaintext) {
     throw new Error("Round-trip mismatch — crypto.ts is broken");
   }
+  if (!encrypted.includes(":")) {
+    throw new Error("Encrypted output missing ':' separator — PHP7+ format broken");
+  }
   // eslint-disable-next-line no-console
-  console.log("✓ round-trip OK");
+  console.log("✓ round-trip OK (PHP7+ base64ct:base64iv format)");
+
+  // Sanity check — two consecutive encryptions of the same plaintext
+  // should produce DIFFERENT ciphertexts (random IV per call). If they
+  // match, randomBytes isn't firing and SabPaisa would eventually reject.
+  const encrypted2 = sabpaisaEncrypt(plaintext, demoKey);
+  if (encrypted === encrypted2) {
+    throw new Error("Two encrypts produced identical output — IV is not random");
+  }
+  // eslint-disable-next-line no-console
+  console.log("✓ random IV per call confirmed");
 
   // If SabPaisa ever publishes a test vector (plaintext + known expected
   // ciphertext), uncomment below and compare. The KNOWN_VECTOR block is
