@@ -1,7 +1,7 @@
 // SabPaisa configuration, per https://developer.sabpaisa.in/docs/urls/
 //
 // Env vars (see .env.example):
-//   SABPAISA_ENV           "staging" (default) | "production" — picks the
+//   SABPAISA_ENV           "production" (default) | "staging" — picks the
 //                          SabPaisa URLs below. Nothing else switches hosts.
 //   SABPAISA_CLIENT_CODE   merchant client code issued by SabPaisa
 //   SABPAISA_USERNAME      transUserName issued by SabPaisa
@@ -52,8 +52,8 @@ let cached: SabPaisaConfig | null = null;
 
 function readEnv(): SabPaisaEnv {
   const raw = (process.env.SABPAISA_ENV ?? "").trim().toLowerCase();
-  if (!raw || raw === "staging" || raw === "stage" || raw === "uat") return "staging";
-  if (raw === "production" || raw === "prod" || raw === "live") return "production";
+  if (!raw || raw === "production" || raw === "prod" || raw === "live") return "production";
+  if (raw === "staging" || raw === "stage" || raw === "uat") return "staging";
   throw new Error(`SABPAISA_ENV='${raw}' is not valid — use 'staging' or 'production'`);
 }
 
