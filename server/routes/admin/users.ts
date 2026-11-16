@@ -141,6 +141,10 @@ usersAdminRouter.get("/", async (req, res, next) => {
 
 // â”€â”€â”€ GET /api/admin/users/:id â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 usersAdminRouter.get("/:id", async (req, res, next) => {
+  // Static sub-paths registered later in this file (e.g. "/cancellation-requests",
+  // "/export.csv") would otherwise be swallowed by this "/:id" route and
+  // crash with "invalid input syntax for type uuid". Skip to them.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.id))) return next("route");
   try {
     const [row] = await db
       .select({

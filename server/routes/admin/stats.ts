@@ -37,7 +37,7 @@ statsAdminRouter.get("/", async (_req, res, next) => {
       db.select({
         totalEvents:    sql<number>`count(*)::int`.as("totalEvents"),
         upcomingEvents: sql<number>`count(*) filter (
-          where ${events.status} = 'published' and ${events.starts_at} > ${now}
+          where ${events.status} = 'published' and ${events.starts_at} > ${now.toISOString()}::timestamptz
         )::int`.as("upcomingEvents"),
       })
         .from(events)

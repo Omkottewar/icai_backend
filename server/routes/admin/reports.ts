@@ -13,7 +13,7 @@
 // requireUser + requireAdmin from parent middleware.
 
 import { Router } from "express";
-import { and, asc, desc, eq, gte, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "../../../db/client.js";
 import {
@@ -21,7 +21,7 @@ import {
   committees, budgets, bills, expenseCategories, branches,
 } from "../../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
-import { sendReport } from "../../lib/reportsXlsx.js";
+import { addReportSheet, newReportWorkbook, sendReport, sendWorkbook } from "../../lib/reportsXlsx.js";
 
 export const reportsAdminRouter = Router();
 
@@ -138,8 +138,7 @@ reportsAdminRouter.get("/payments-ledger.xlsx", async (req, res, next) => {
         amount_paise: payments.amount_paise,
         base_paise:   sql<number>`coalesce((${payments.metadata}->>'base_paise')::int, 0)`,
         gst_paise:    sql<number>`coalesce((${payments.metadata}->>'gst_paise')::int, 0)`,
-        upi_utr:      payments.upi_utr,
-        razorpay_id:  payments.razorpay_payment_id,
+        upi_utr:      sql<string>`coalesce(${payments.razorpay_payment_id}, ${payments.upi_utr})`,
         verified_at:  payments.verified_at,
         event_title:  sql<string>`coalesce((${payments.metadata}->>'event_title'), '')`,
       })
@@ -179,6 +178,318 @@ reportsAdminRouter.get("/payments-ledger.xlsx", async (req, res, next) => {
     });
   } catch (err) { handleApiError(err, res, next); }
 });
+
+// ─── GET /api/admin/reports/payments-full.xlsx ────────────────────────────
+// "Everything about payments" in one workbook, for the treasurer/accountant:
+//   1. Summary        collected / GST / refunds / net, by status, purpose, month
+//   2. Payments       every payment row with GST split, gateway ids, refunds
+//   3. Seat holders   each event seat bought with a payment (incl. group bookings)
+//   4. Refunds        every refund request and where it stands
+//   5. Refunds owed   payments flagged for refund with no processed refund yet
+// Optional ?from=YYYY-MM-DD&to=YYYY-MM-DD filters on the payment date (IST
+// calendar days are close enough to UTC dates for an audit export; the
+// window is inclusive of `to`).
+const PURPOSE_LABEL: Record<string, string> = {
+  event_registration: "Event registration",
+  cop_renewal: "COP renewal",
+  firm_registration: "Firm registration",
+  job_posting: "Job posting",
+  assignment_posting: "Assignment posting",
+  cabf_donation: "CABF donation",
+  consultation: "Consultation",
+  room_booking: "Room booking",
+  other: "Other",
+};
+const IST_MONTH = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", month: "short", year: "numeric" });
+const IST_MONTH_KEY = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit" });
+
+reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
+  try {
+    const from = trim(req.query.from);
+    const to   = trim(req.query.to);
+    const isDay = (v: string) => /^\d{4}-\d{2}-\d{2}$/.test(v);
+    if (from && !isDay(from)) throw new ApiError(400, "from must be YYYY-MM-DD");
+    if (to && !isDay(to))     throw new ApiError(400, "to must be YYYY-MM-DD");
+    const fromSql = from ? sql`AND p.created_at >= ${from}::date` : sql``;
+    const toSql   = to   ? sql`AND p.created_at < (${to}::date + INTERVAL '1 day')` : sql``;
+
+    const paymentRows = (await db.execute(sql`
+      SELECT
+        p.id                                   AS payment_id,
+        p.created_at,
+        u.name                                 AS payer,
+        mp.mrn,
+        u.email                                AS payer_email,
+        u.phone                                AS payer_phone,
+        p.purpose,
+        COALESCE(e.title, p.metadata->>'event_title', jp.title, '') AS item,
+        e.starts_at                            AS event_date,
+        emp.company_name                       AS employer,
+        COALESCE((p.metadata->>'seat_count')::int,
+                 CASE WHEN p.purpose = 'event_registration' THEN 1 END) AS seats,
+        p.status,
+        p.provider,
+        COALESCE((p.metadata->>'base_paise')::int,
+                 p.amount_paise - COALESCE((p.metadata->>'gst_paise')::int, 0)) AS base_paise,
+        COALESCE((p.metadata->>'gst_percent')::numeric, 0) / 100.0 AS gst_rate,
+        COALESCE((p.metadata->>'gst_paise')::int, 0) AS gst_paise,
+        p.amount_paise                         AS total_paise,
+        COALESCE((SELECT SUM(r.amount_paise) FROM payment_refunds r
+                   WHERE r.payment_id = p.id AND r.status = 'processed'), 0)::int AS refunded_paise,
+        p.metadata->>'needs_refund'            AS refund_flag,
+        p.razorpay_order_id,
+        p.razorpay_payment_id,
+        p.upi_utr,
+        p.verified_at,
+        vu.name                                AS verified_by,
+        p.rejected_reason,
+        p.updated_at
+      FROM payments p
+      LEFT JOIN users u            ON u.id = p.payer_user_id
+      LEFT JOIN member_profiles mp ON mp.user_id = u.id
+      LEFT JOIN events e           ON p.purpose = 'event_registration' AND e.id = p.ref_id
+      LEFT JOIN job_postings jp    ON p.purpose = 'job_posting' AND jp.id = p.ref_id
+      LEFT JOIN employers emp      ON emp.id = jp.employer_id
+      LEFT JOIN users vu           ON vu.id = p.verified_by
+      WHERE p.deleted_at IS NULL ${fromSql} ${toSql}
+      ORDER BY p.created_at DESC
+    `)) as unknown as Array<Record<string, any>>;
+
+    for (const r of paymentRows) {
+      r.purpose_label = PURPOSE_LABEL[r.purpose] ?? r.purpose;
+      r.gst_rate = r.gst_rate == null ? null : Number(r.gst_rate);
+      r.net_paise = r.status === "success" ? Number(r.total_paise) - Number(r.refunded_paise) : 0;
+      r.gateway_ref = r.razorpay_payment_id || r.upi_utr || null;
+    }
+
+    const seatRows = (await db.execute(sql`
+      SELECT
+        e.title                     AS event,
+        e.starts_at                 AS event_date,
+        a.name                      AS attendee,
+        mp.mrn,
+        a.email                     AS attendee_email,
+        b.name                      AS booked_by,
+        CASE WHEN er.deleted_at IS NOT NULL THEN 'cancelled' ELSE er.status::text END AS seat_status,
+        er.registered_at,
+        er.attended_at,
+        p.id                        AS payment_id,
+        p.status                    AS payment_status,
+        p.razorpay_payment_id,
+        (p.amount_paise / GREATEST(COALESCE((p.metadata->>'seat_count')::int, 1), 1))::int AS paid_per_seat_paise
+      FROM event_registrations er
+      JOIN payments p              ON p.id = er.payment_id
+      JOIN events e                ON e.id = er.event_id
+      JOIN users a                 ON a.id = er.user_id
+      LEFT JOIN users b            ON b.id = COALESCE(er.booked_by_user_id, p.payer_user_id)
+      LEFT JOIN member_profiles mp ON mp.user_id = a.id
+      WHERE p.deleted_at IS NULL ${fromSql} ${toSql}
+      ORDER BY e.starts_at DESC, e.title, a.name
+    `)) as unknown as Array<Record<string, any>>;
+
+    const refundRows = (await db.execute(sql`
+      SELECT
+        r.requested_at,
+        r.status,
+        r.amount_paise,
+        r.reason,
+        p.id                        AS payment_id,
+        u.name                      AS payer,
+        COALESCE(e.title, p.metadata->>'event_title', jp.title, '') AS item,
+        p.amount_paise              AS payment_total_paise,
+        p.razorpay_payment_id,
+        rq.name                     AS requested_by,
+        ap.name                     AS approved_by,
+        r.approved_at,
+        r.processed_at,
+        r.razorpay_refund_id,
+        r.notes
+      FROM payment_refunds r
+      JOIN payments p          ON p.id = r.payment_id
+      LEFT JOIN users u        ON u.id = p.payer_user_id
+      LEFT JOIN events e       ON p.purpose = 'event_registration' AND e.id = p.ref_id
+      LEFT JOIN job_postings jp ON p.purpose = 'job_posting' AND jp.id = p.ref_id
+      LEFT JOIN users rq       ON rq.id = r.requested_by
+      LEFT JOIN users ap       ON ap.id = r.approved_by
+      WHERE p.deleted_at IS NULL ${fromSql} ${toSql}
+      ORDER BY r.requested_at DESC
+    `)) as unknown as Array<Record<string, any>>;
+
+    const owedRows = paymentRows
+      .filter((r) => r.refund_flag && Number(r.refunded_paise) < Number(r.total_paise))
+      .map((r) => ({
+        created_at: r.created_at,
+        payer: r.payer,
+        payer_email: r.payer_email,
+        payer_phone: r.payer_phone,
+        item: r.item,
+        reason: String(r.refund_flag).replace(/_/g, " "),
+        total_paise: r.total_paise,
+        refunded_paise: r.refunded_paise,
+        owed_paise: Number(r.total_paise) - Number(r.refunded_paise),
+        razorpay_payment_id: r.razorpay_payment_id,
+        payment_id: r.payment_id,
+      }));
+
+    // ── Summary ──────────────────────────────────────────────────────────
+    type Bucket = { section: string; item: string; count: number; base_paise: number; gst_paise: number; total_paise: number };
+    const bucket = (map: Map<string, Bucket>, section: string, item: string, r: Record<string, any>) => {
+      const k = `${section}|${item}`;
+      const b = map.get(k) ?? { section, item, count: 0, base_paise: 0, gst_paise: 0, total_paise: 0 };
+      b.count += 1;
+      b.base_paise += Number(r.base_paise) || 0;
+      b.gst_paise += Number(r.gst_paise) || 0;
+      b.total_paise += Number(r.total_paise) || 0;
+      map.set(k, b);
+    };
+    const success = paymentRows.filter((r) => r.status === "success");
+    const totals = new Map<string, Bucket>();
+    for (const r of success) bucket(totals, "Overall", "Collected (successful payments)", r);
+    const refundedTotal = paymentRows.reduce((s, r) => s + (Number(r.refunded_paise) || 0), 0);
+    const owedTotal = owedRows.reduce((s, r) => s + r.owed_paise, 0);
+    const collected = totals.get("Overall|Collected (successful payments)")?.total_paise ?? 0;
+
+    const byStatus = new Map<string, Bucket>();
+    for (const r of paymentRows) bucket(byStatus, "By status (all payments)", String(r.status), r);
+    const byPurpose = new Map<string, Bucket>();
+    for (const r of success) bucket(byPurpose, "By purpose (successful)", r.purpose_label, r);
+    const byMonth = new Map<string, Bucket>();
+    const monthOrder = new Map<string, string>();
+    for (const r of success) {
+      const d = new Date(r.created_at);
+      const label = IST_MONTH.format(d);
+      monthOrder.set(label, IST_MONTH_KEY.format(d));
+      bucket(byMonth, "By month (successful)", label, r);
+    }
+    const blank = { count: null, base_paise: null, gst_paise: null };
+    const summaryRows: Array<Record<string, unknown>> = [
+      ...totals.values(),
+      { section: "Overall", item: "Refunded (processed)", ...blank, total_paise: -refundedTotal },
+      { section: "Overall", item: "Net collected (after refunds)", ...blank, total_paise: collected - refundedTotal },
+      { section: "Overall", item: "Refunds owed (flagged, not yet processed)", count: owedRows.length, base_paise: null, gst_paise: null, total_paise: owedTotal },
+      ...[...byStatus.values()].sort((a, b) => b.count - a.count),
+      ...[...byPurpose.values()].sort((a, b) => b.total_paise - a.total_paise),
+      ...[...byMonth.values()].sort((a, b) => (monthOrder.get(b.item) ?? "").localeCompare(monthOrder.get(a.item) ?? "")),
+    ];
+
+    const window = from || to ? `${from || "start"} → ${to || "today"}` : "all time";
+    const wb = newReportWorkbook();
+
+    addReportSheet(wb, {
+      filename: "", title: "Payments — summary", subtitle: `Payment date: ${window} · amounts in ₹`,
+      sheetName: "Summary",
+      columns: [
+        { header: "Section",   key: "section",     kind: "text", width: 26 },
+        { header: "Item",      key: "item",        kind: "text", width: 40 },
+        { header: "Payments",  key: "count",       kind: "number" },
+        { header: "Base",      key: "base_paise",  kind: "currency" },
+        { header: "GST",       key: "gst_paise",   kind: "currency" },
+        { header: "Total",     key: "total_paise", kind: "currency" },
+      ],
+      rows: summaryRows,
+    });
+
+    addReportSheet(wb, {
+      filename: "", title: "Payments", subtitle: `Every payment · ${window}`,
+      sheetName: "Payments", showTotals: true,
+      columns: [
+        { header: "Date",              key: "created_at",          kind: "datetime" },
+        { header: "Payer",             key: "payer",               kind: "text", width: 24 },
+        { header: "MRN",               key: "mrn",                 kind: "text", width: 12 },
+        { header: "Email",             key: "payer_email",         kind: "text", width: 28 },
+        { header: "Phone",             key: "payer_phone",         kind: "text", width: 15 },
+        { header: "Purpose",           key: "purpose_label",       kind: "text", width: 18 },
+        { header: "For (event / job)", key: "item",                kind: "text", width: 32 },
+        { header: "Event date",        key: "event_date",          kind: "date" },
+        { header: "Employer",          key: "employer",            kind: "text", width: 22 },
+        { header: "Seats",             key: "seats",               kind: "number", skipTotal: true },
+        { header: "Status",            key: "status",              kind: "text", width: 14 },
+        { header: "Base",              key: "base_paise",          kind: "currency" },
+        { header: "GST %",             key: "gst_rate",            kind: "percent", skipTotal: true },
+        { header: "GST",               key: "gst_paise",           kind: "currency" },
+        { header: "Total",             key: "total_paise",         kind: "currency" },
+        { header: "Refunded",          key: "refunded_paise",      kind: "currency" },
+        { header: "Net (success − refunds)", key: "net_paise",     kind: "currency" },
+        { header: "Refund flag",       key: "refund_flag",         kind: "text", width: 22 },
+        { header: "Razorpay payment / UTR", key: "gateway_ref",    kind: "text", width: 24 },
+        { header: "Razorpay order",    key: "razorpay_order_id",   kind: "text", width: 24 },
+        { header: "Gateway",           key: "provider",            kind: "text", width: 12 },
+        { header: "Verified at",       key: "verified_at",         kind: "datetime" },
+        { header: "Verified by",       key: "verified_by",         kind: "text", width: 20 },
+        { header: "Rejection reason",  key: "rejected_reason",     kind: "text", width: 28 },
+        { header: "Last updated",      key: "updated_at",          kind: "datetime" },
+        { header: "Payment ID",        key: "payment_id",          kind: "text", width: 38 },
+      ],
+      rows: paymentRows,
+    });
+
+    addReportSheet(wb, {
+      filename: "", title: "Event seats bought online", subtitle: `One row per seat · payment date: ${window}`,
+      sheetName: "Seat holders", showTotals: true,
+      columns: [
+        { header: "Event",          key: "event",               kind: "text", width: 32 },
+        { header: "Event date",     key: "event_date",          kind: "date" },
+        { header: "Attendee",       key: "attendee",            kind: "text", width: 24 },
+        { header: "MRN",            key: "mrn",                 kind: "text", width: 12 },
+        { header: "Email",          key: "attendee_email",      kind: "text", width: 28 },
+        { header: "Booked / paid by", key: "booked_by",         kind: "text", width: 24 },
+        { header: "Seat status",    key: "seat_status",         kind: "text", width: 14 },
+        { header: "Registered at",  key: "registered_at",       kind: "datetime" },
+        { header: "Attended at",    key: "attended_at",         kind: "datetime" },
+        { header: "Paid per seat",  key: "paid_per_seat_paise", kind: "currency" },
+        { header: "Payment status", key: "payment_status",      kind: "text", width: 14 },
+        { header: "Razorpay payment", key: "razorpay_payment_id", kind: "text", width: 24 },
+        { header: "Payment ID",     key: "payment_id",          kind: "text", width: 38 },
+      ],
+      rows: seatRows,
+    });
+
+    addReportSheet(wb, {
+      filename: "", title: "Refunds", subtitle: `Every refund request · payment date: ${window}`,
+      sheetName: "Refunds", showTotals: true,
+      columns: [
+        { header: "Requested at",   key: "requested_at",        kind: "datetime" },
+        { header: "Status",         key: "status",              kind: "text", width: 12 },
+        { header: "Refund amount",  key: "amount_paise",        kind: "currency" },
+        { header: "Reason",         key: "reason",              kind: "text", width: 30 },
+        { header: "Payer",          key: "payer",               kind: "text", width: 24 },
+        { header: "For (event / job)", key: "item",             kind: "text", width: 30 },
+        { header: "Original payment", key: "payment_total_paise", kind: "currency", skipTotal: true },
+        { header: "Requested by",   key: "requested_by",        kind: "text", width: 20 },
+        { header: "Approved by",    key: "approved_by",         kind: "text", width: 20 },
+        { header: "Approved at",    key: "approved_at",         kind: "datetime" },
+        { header: "Processed at",   key: "processed_at",        kind: "datetime" },
+        { header: "Razorpay refund", key: "razorpay_refund_id", kind: "text", width: 24 },
+        { header: "Razorpay payment", key: "razorpay_payment_id", kind: "text", width: 24 },
+        { header: "Notes",          key: "notes",               kind: "text", width: 30 },
+        { header: "Payment ID",     key: "payment_id",          kind: "text", width: 38 },
+      ],
+      rows: refundRows,
+    });
+
+    addReportSheet(wb, {
+      filename: "", title: "Refunds owed", subtitle: "Payments flagged for refund (sold out, cancellation approved, posting deleted…) with no processed refund yet",
+      sheetName: "Refunds owed", showTotals: true,
+      columns: [
+        { header: "Paid at",        key: "created_at",          kind: "datetime" },
+        { header: "Payer",          key: "payer",               kind: "text", width: 24 },
+        { header: "Email",          key: "payer_email",         kind: "text", width: 28 },
+        { header: "Phone",          key: "payer_phone",         kind: "text", width: 15 },
+        { header: "For (event / job)", key: "item",             kind: "text", width: 30 },
+        { header: "Why",            key: "reason",              kind: "text", width: 26 },
+        { header: "Paid",           key: "total_paise",         kind: "currency" },
+        { header: "Already refunded", key: "refunded_paise",    kind: "currency" },
+        { header: "Still owed",     key: "owed_paise",          kind: "currency" },
+        { header: "Razorpay payment", key: "razorpay_payment_id", kind: "text", width: 24 },
+        { header: "Payment ID",     key: "payment_id",          kind: "text", width: 38 },
+      ],
+      rows: owedRows,
+    });
+
+    await sendWorkbook(res, wb, `payments-all-${from || "start"}-to-${to || "today"}`);
+  } catch (err) { handleApiError(err, res, next); }
+});
+
 
 // ─── 3. Budget vs actual (by committee × category) ───────────────────────
 // /api/admin/reports/budget-vs-actual.xlsx?fy=<start_year>
@@ -241,10 +552,10 @@ reportsAdminRouter.get("/budget-vs-actual.xlsx", async (req, res, next) => {
     const orphanCategoryIds  = Array.from(new Set(orphanIds.map((r) => r.category_id ).filter(Boolean))) as string[];
     const [orphanCommittees, orphanCategories] = await Promise.all([
       orphanCommitteeIds.length
-        ? db.select({ id: committees.id, name: committees.name }).from(committees).where(sql`${committees.id} = ANY(${orphanCommitteeIds})`)
+        ? db.select({ id: committees.id, name: committees.name }).from(committees).where(inArray(committees.id, orphanCommitteeIds))
         : Promise.resolve([]),
       orphanCategoryIds.length
-        ? db.select({ id: expenseCategories.id, label: expenseCategories.label }).from(expenseCategories).where(sql`${expenseCategories.id} = ANY(${orphanCategoryIds})`)
+        ? db.select({ id: expenseCategories.id, label: expenseCategories.label }).from(expenseCategories).where(inArray(expenseCategories.id, orphanCategoryIds))
         : Promise.resolve([]),
     ]);
     const committeeName = new Map(orphanCommittees.map((c) => [c.id, c.name]));

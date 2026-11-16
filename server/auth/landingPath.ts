@@ -44,6 +44,9 @@ export async function getPostLoginPath(userId: string, isNew: boolean): Promise<
       .where(eq(users.id, userId))
       .limit(1);
     if (row?.primary_role === "guest") return "/my-speaker-events";
+    // Employers have their own console — the member dashboard shows them
+    // student quick actions and an empty "SRO No." line.
+    if (row?.primary_role === "employer" && !isNew) return "/employer";
 
     if (isNew) return "/onboarding";
 

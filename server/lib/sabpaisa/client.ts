@@ -1,313 +1,188 @@
-// SabPaisa client — thin wrapper over the SabPaisa Payment Gateway API.
+// SabPaisa client, built from https://developer.sabpaisa.in
 //
-// Everything here is pure (crypto + fetch + env-driven config). No DB
-// access and no Express request/response types — the route layer owns
-// those. Keeps the module easy to unit-test and reuse across paid
-// surfaces (event registration, job posting, admin test).
+//   1. Payment request — buildInitRedirect() makes encData from the
+//      '&'-joined request string; the browser POSTs encData + clientCode
+//      to the init URL.
+//   2. Callback — SabPaisa POSTs `encResponse` to callbackUrl;
+//      parseEncResponse() decrypts it.
+//   3. Transaction Enquiry — enquireTransaction() (JSON API) for 0999 /
+//      missing callbacks. Calls must not be made concurrently.
+//   4. Refund — refundTransaction() (JSON API).
 //
-// SabPaisa hosted-checkout flow summary:
-//   1. Backend builds the init payload (payer details, amount, client txn
-//      id, return URL) and AES-128-CBC-encrypts it. Returns
-//      { action, clientCode, encData } to the browser.
-//   2. Browser auto-POSTs a form with { clientCode, encData } to SabPaisa's
-//      hosted checkout URL. User picks a method (card / UPI / netbanking
-//      / wallet) and completes payment on SabPaisa's domain.
-//   3. SabPaisa POSTs an encrypted response back to our /return endpoint
-//      (same shape — form-encoded body with `encData`). We decrypt,
-//      update the row, redirect user to /payments/result.
-//   4. Separately, SabPaisa fires a Push API webhook to our /webhook
-//      endpoint. Same decrypt + confirm. Idempotent against the /return
-//      path — whichever lands first wins.
-//   5. For paranoia, the reconciliation cron (and admin re-verify)
-//      calls /status/verify server-to-server as a double-check.
+// Pure module: no DB, no Express.
 
+import { randomBytes } from "node:crypto";
 import { sabpaisaConfig } from "./config.js";
 import { sabpaisaEncrypt, sabpaisaDecrypt } from "./crypto.js";
-import type {
-  SabPaisaInitFields,
-  SabPaisaInitRedirect,
-  SabPaisaCallbackPayload,
-  SabPaisaVerifyResponse,
-  SabPaisaOutcome,
-} from "./types.js";
-import { mapSabPaisaStatus } from "./types.js";
+import { mapSabPaisaStatus, type SabPaisaInitRedirect, type SabPaisaOutcome, type SabPaisaResponse } from "./types.js";
 
-// ─── Init redirect construction ───────────────────────────────────────────
-//
-// Builds the { action, clientCode, encData } blob the frontend hands to
-// SabPaisa's hosted page. The payload is URL-encoded ampersand-separated
-// (SabPaisa's PHP reference uses http_build_query — NOT JSON).
-//
-// IMPORTANT: field order in the plaintext matters to some SabPaisa setups
-// — their parser is permissive but their logs are easier to read when
-// fields are in the canonical order from their reference. We follow that
-// order here.
+// ─── 1. Payment request ───────────────────────────────────────────────────
 export interface BuildInitInput {
-  payment_id:   string;     // our payments.id — becomes the clientTxnId base
-  amountRupees: string;     // e.g. "100.00" — rupees with 2 decimals
+  payment_id:   string;                   // our payments.id → udf1
+  amountRupees: string;                   // "100.00"
   payerName:    string;
   payerEmail:   string;
   payerPhone:   string;
-  notes?:       Record<string, string>;  // echoed in udf12..udf15
+  notes?:       Record<string, string>;   // purpose → udf2, ref_id → udf3, event_slug → udf4
 }
 
-export function buildInitRedirect(input: BuildInitInput): {
-  redirect: SabPaisaInitRedirect;
-  clientTxnId: string;   // the id we should persist on the payment row
-} {
+export function buildInitRedirect(input: BuildInitInput): { redirect: SabPaisaInitRedirect; clientTxnId: string } {
   const cfg = sabpaisaConfig();
+  const clientTxnId = newClientTxnId();
 
-  // clientTxnId must be unique per attempt. Our payments.id is a UUID —
-  // SabPaisa accepts up to 40 chars so we can pass it straight through.
-  // Suffix with a short timestamp so a re-initiate on the same payment
-  // row (user closed modal, retry) produces a fresh id and SabPaisa
-  // doesn't 409 on "duplicate txn". The original payment row id lives in
-  // udf12 for correlation.
-  const clientTxnId = `${input.payment_id.slice(0, 32)}-${Date.now().toString(36).slice(-6)}`.slice(0, 40);
+  // Field names, lengths and mandatory fields per the docs' request table.
+  const fields: Array<[string, string]> = [
+    ["payerName",         clean(input.payerName, 100) || "Member"],
+    ["payerEmail",        clean(input.payerEmail, 100)],
+    ["payerMobile",       mobile(input.payerPhone)],
+    ["clientTxnId",       clientTxnId],
+    ["amount",            input.amountRupees],
+    ["clientCode",        cfg.clientCode],
+    ["transUserName",     cfg.username],
+    ["transUserPassword", cfg.password],
+    ["callbackUrl",       cfg.callbackUrl],
+    ["channelId",         "W"],
+    ["mcc",               cfg.mcc],
+    ["transDate",         istTimestamp(new Date())],
+    ["amountType",        "INR"],
+    ["udf1",              clean(input.payment_id, 100)],
+    ["udf2",              clean(input.notes?.purpose ?? "", 100)],
+    ["udf3",              clean(input.notes?.ref_id ?? "", 100)],
+    ["udf4",              clean(input.notes?.event_slug ?? input.notes?.posting_type ?? "", 100)],
+  ];
 
-  const fields: SabPaisaInitFields = {
-    payerName:         truncate(input.payerName,  100),
-    payerEmail:        truncate(input.payerEmail, 100),
-    payerMobile:       truncate(input.payerPhone, 15),
-    payerAddress:      "",
-    clientTxnId,
-    amount:            input.amountRupees,
-    clientCode:        cfg.clientCode,
-    transUserName:     cfg.username,
-    transUserPassword: cfg.password,
-    callbackUrl:       cfg.returnUrl,
-    amountType:        "INR",
-    channelId:         "W",     // Web
-    programId:         "",
-    mcc:               "",
-    udf12:             input.payment_id,                   // original payments.id (even if clientTxnId has a suffix)
-    udf13:             input.notes?.purpose ?? "",
-    udf14:             input.notes?.ref_id ?? "",
-    udf15:             input.notes?.event_slug ?? "",
-  };
-
-  const plaintext = serializeFields(fields);
-  const encData = sabpaisaEncrypt(plaintext, cfg.authKey, cfg.authIv);
-
+  const plaintext = fields.map(([k, v]) => `${k}=${v}`).join("&");
   return {
     redirect: {
       action:     cfg.initUrl,
       clientCode: cfg.clientCode,
-      encData,
+      encData:    sabpaisaEncrypt(plaintext, cfg.authKey, cfg.authIv),
     },
     clientTxnId,
   };
 }
 
-// ─── Callback parsing ─────────────────────────────────────────────────────
-//
-// SabPaisa posts back a body containing an `encData` field (plus plain
-// `clientCode` for their own LB routing). We decrypt and parse into a
-// typed callback payload. Pure function — the caller feeds the raw
-// form-encoded body (as req.body after express.urlencoded has parsed it)
-// and we return either the parsed callback or null (meaning decrypt
-// failed → treat as a spoof / tamper).
-export function parseCallbackEncData(encData: string): SabPaisaCallbackPayload | null {
+// ─── 2. Callback ──────────────────────────────────────────────────────────
+// Returns null when the payload fails the HMAC / decrypt (spoofed or keys
+// mismatch) — callers must treat that as untrusted.
+export function parseEncResponse(encResponse: string): SabPaisaResponse | null {
   try {
     const cfg = sabpaisaConfig();
-    const plaintext = sabpaisaDecrypt(encData, cfg.authKey, cfg.authIv);
-    return deserializeFields(plaintext);
+    // Query-string delivery can turn '+' into ' '; harmless for hex.
+    return parseFields(sabpaisaDecrypt(encResponse.replace(/\s/g, ""), cfg.authKey, cfg.authIv));
   } catch {
-    // Tampered / truncated / wrong-key payload. Caller should reject.
     return null;
   }
 }
 
-// ─── Server-to-server verify ──────────────────────────────────────────────
-//
-// SabPaisa's /status/verify endpoint returns the current state of a given
-// (clientCode, clientTxnId) pair. Used as a safety net — the reconciliation
-// cron calls this when a payment is stuck pending past the staleness
-// threshold, and the admin "re-verify" button calls it on demand.
-//
-// Returns the parsed response + the normalised outcome.
-export async function verifyPayment(clientTxnId: string): Promise<{
-  outcome: SabPaisaOutcome;
-  response: SabPaisaVerifyResponse | null;
-}> {
+// ─── 3. Transaction Enquiry ───────────────────────────────────────────────
+export async function enquireTransaction(clientTxnId: string): Promise<{ outcome: SabPaisaOutcome; response: SabPaisaResponse | null }> {
   const cfg = sabpaisaConfig();
+  const statusTransEncData = sabpaisaEncrypt(
+    `clientCode=${cfg.clientCode}&clientTxnId=${clientTxnId}`,
+    cfg.authKey, cfg.authIv,
+  );
 
-  // Verify request is JSON for SabPaisa's /status/verify endpoint. The
-  // `clientCode` is plaintext; `encData` carries the encrypted body.
-  const bodyFields = `clientCode=${cfg.clientCode}&clientTxnId=${clientTxnId}`;
-  const encData = sabpaisaEncrypt(bodyFields, cfg.authKey, cfg.authIv);
-
-  const res = await fetch(cfg.verifyUrl, {
+  const res = await fetch(cfg.enquiryUrl, {
     method:  "POST",
-    headers: sabpaisaRequestHeaders(),
-    body:    `clientCode=${encodeURIComponent(cfg.clientCode)}&encData=${encodeURIComponent(encData)}`,
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body:    JSON.stringify({ clientCode: cfg.clientCode, statusTransEncData }),
   });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`SabPaisa enquiry HTTP ${res.status}: ${text.slice(0, 300)}`);
 
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`SabPaisa verify HTTP ${res.status}: ${txt.slice(0, 500)}`);
-  }
+  let json: { statusResponseData?: string } = {};
+  try { json = JSON.parse(text); } catch { throw new Error(`SabPaisa enquiry: non-JSON response: ${text.slice(0, 300)}`); }
+  if (!json.statusResponseData) return { outcome: "unknown", response: null };
 
-  // SabPaisa returns an encrypted response — same AES-128-CBC scheme,
-  // base64 in an `encData` field. The response Content-Type is sometimes
-  // JSON (`{ "encData": "..." }`) and sometimes form-encoded. Handle both.
-  const ct = (res.headers.get("content-type") ?? "").toLowerCase();
-  let encResponse: string | null = null;
-  if (ct.includes("application/json")) {
-    const json = await res.json() as { encData?: string };
-    encResponse = json?.encData ?? null;
-  } else {
-    const txt = await res.text();
-    // Try to parse as form-encoded; fall back to raw-string treat-as-b64.
-    const params = new URLSearchParams(txt);
-    encResponse = params.get("encData") ?? txt.trim();
-  }
-
-  if (!encResponse) {
-    return { outcome: "pending", response: null };
-  }
-
-  let plaintext: string;
-  try {
-    plaintext = sabpaisaDecrypt(encResponse, cfg.authKey, cfg.authIv);
-  } catch {
-    throw new Error(`SabPaisa verify: could not decrypt response body`);
-  }
-  const parsed = deserializeFields(plaintext) as SabPaisaVerifyResponse;
-  const outcome = mapSabPaisaStatus(parsed.statusCode);
-  return { outcome, response: parsed };
+  const response = parseFields(sabpaisaDecrypt(json.statusResponseData, cfg.authKey, cfg.authIv));
+  return { outcome: mapSabPaisaStatus(response.statusCode), response };
 }
 
-// ─── Refund ───────────────────────────────────────────────────────────────
-//
-// Server-to-server refund. amountRupees optional — omitting it issues a
-// full refund. Caller must have already flipped the payment_refunds row
-// to 'approved' (treasurer-approved) before calling; this fn only
-// executes the external side-effect.
+// ─── 4. Refund ────────────────────────────────────────────────────────────
 export interface SabPaisaRefundInput {
-  clientTxnId:   string;      // the clientTxnId we originally sent
-  refundTxnId:   string;      // a NEW unique id we generate for the refund
-  amountRupees?: string;      // omit for full refund
-  reason?:       string;
+  spTxnId:      string;   // SabPaisa's transaction id (payments.sabpaisa_txn_id)
+  clientTxnId:  string;   // our clientTxnId
+  amountRupees: string;   // amount to refund, "100.00"
+  message:      string;   // refund reason
 }
 
-export interface SabPaisaRefundResponse {
-  statusCode?:  string;
-  statusDesc?:  string;
-  refundTxnId?: string;
-  [k: string]:  string | undefined;
+export interface SabPaisaRefundResult {
+  apiStatusCode?:        string;
+  apiStatusDescription?: string;
+  refund:                SabPaisaResponse | null;   // decrypted refundResponse (statusCode 0600 = REFUND_INITIATED, …)
 }
 
-export async function refundPayment(input: SabPaisaRefundInput): Promise<SabPaisaRefundResponse> {
+export async function refundTransaction(input: SabPaisaRefundInput): Promise<SabPaisaRefundResult> {
   const cfg = sabpaisaConfig();
-
-  const fields: Record<string, string> = {
-    clientCode:    cfg.clientCode,
-    clientTxnId:   input.clientTxnId,
-    refundTxnId:   input.refundTxnId,
-    reason:        input.reason ?? "Admin-approved refund",
-  };
-  if (input.amountRupees) fields.refundAmount = input.amountRupees;
-
-  const plaintext = serializeFields(fields);
-  const encData = sabpaisaEncrypt(plaintext, cfg.authKey, cfg.authIv);
+  const plain = [
+    `clientCode=${cfg.clientCode}`,
+    `amount=${input.amountRupees}`,
+    `spTxnId=${input.spTxnId}`,
+    `clientTxnId=${input.clientTxnId}`,
+    `message=${clean(input.message, 200)}`,
+  ].join("&");
 
   const res = await fetch(cfg.refundUrl, {
     method:  "POST",
-    headers: sabpaisaRequestHeaders(),
-    body:    `clientCode=${encodeURIComponent(cfg.clientCode)}&encData=${encodeURIComponent(encData)}`,
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body:    JSON.stringify({ clientCode: cfg.clientCode, refundQuery: sabpaisaEncrypt(plain, cfg.authKey, cfg.authIv) }),
   });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`SabPaisa refund HTTP ${res.status}: ${text.slice(0, 300)}`);
 
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`SabPaisa refund HTTP ${res.status}: ${txt.slice(0, 500)}`);
-  }
-
-  const ct = (res.headers.get("content-type") ?? "").toLowerCase();
-  let encResponse: string | null = null;
-  if (ct.includes("application/json")) {
-    const json = await res.json() as { encData?: string };
-    encResponse = json?.encData ?? null;
-  } else {
-    const txt = await res.text();
-    const params = new URLSearchParams(txt);
-    encResponse = params.get("encData") ?? txt.trim();
-  }
-  if (!encResponse) {
-    throw new Error("SabPaisa refund: empty response body");
-  }
-
-  const plaintextResp = sabpaisaDecrypt(encResponse, cfg.authKey, cfg.authIv);
-  return deserializeFields(plaintextResp) as SabPaisaRefundResponse;
+  let json: { apiStatusCode?: string; apiStatusDescription?: string; refundResponse?: string } = {};
+  try { json = JSON.parse(text); } catch { throw new Error(`SabPaisa refund: non-JSON response: ${text.slice(0, 300)}`); }
+  return {
+    apiStatusCode:        json.apiStatusCode,
+    apiStatusDescription: json.apiStatusDescription,
+    refund: json.refundResponse ? parseFields(sabpaisaDecrypt(json.refundResponse, cfg.authKey, cfg.authIv)) : null,
+  };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-// Request headers for server-to-server SabPaisa calls. SabPaisa's enquiry
-// and refund endpoints sit behind Cloudflare WAF, which scores each
-// request on its full fingerprint — User-Agent, Accept-Language,
-// Sec-* client hints, etc. A thin "Mozilla/5.0" alone is not enough.
-// Fully mimicking a recent Chrome request from a Windows client gets
-// consistently through CF managed challenge rulesets without needing
-// SabPaisa to whitelist our Fly outbound IP.
-//
-// If this STILL 403s, the next step is TLS fingerprint spoofing (which
-// can't be done from vanilla undici) or getting SabPaisa to whitelist
-// our IP range. The IP route is cleaner long-term.
-function sabpaisaRequestHeaders(): Record<string, string> {
-  return {
-    "Content-Type":              "application/x-www-form-urlencoded",
-    "Accept":                    "application/json, text/plain, */*",
-    "Accept-Language":           "en-US,en;q=0.9",
-    "Accept-Encoding":           "gzip, deflate, br",
-    "User-Agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Origin":                    "https://nagpur.icai.org",
-    "Referer":                   "https://nagpur.icai.org/",
-    "Sec-Ch-Ua":                 "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"",
-    "Sec-Ch-Ua-Mobile":          "?0",
-    "Sec-Ch-Ua-Platform":        "\"Windows\"",
-    "Sec-Fetch-Dest":            "empty",
-    "Sec-Fetch-Mode":            "cors",
-    "Sec-Fetch-Site":            "cross-site",
-  };
+// True when SabPaisa's `amount` equals what we charged (in paise).
+export function amountMatches(r: SabPaisaResponse, expectedPaise: number): boolean {
+  const n = Number(r.amount ?? r.paidAmount);
+  return Number.isFinite(n) && Math.round(n * 100) === expectedPaise;
 }
 
-// Serialize to the URL-encoded ampersand-separated form SabPaisa expects.
-// Keys with undefined / empty-string values are still included (SabPaisa's
-// parser requires every field to appear, even if blank — their validator
-// 400s on a missing key rather than treating it as empty).
-function serializeFields(fields: Record<string, string | undefined>): string {
-  return Object.entries(fields)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v ?? "")}`)
-    .join("&");
-}
-
-// Inverse — URL-decode an ampersand-separated string back into an object.
-// Duplicate keys take the last value seen (SabPaisa doesn't send dups).
-function deserializeFields(plaintext: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const part of plaintext.split("&")) {
-    if (!part) continue;
-    const idx = part.indexOf("=");
-    const k = idx >= 0 ? part.slice(0, idx) : part;
-    const v = idx >= 0 ? part.slice(idx + 1) : "";
-    try {
-      out[decodeURIComponent(k)] = decodeURIComponent(v);
-    } catch {
-      // Malformed URL-encoding in a response — keep the raw value rather
-      // than crashing the whole payload.
-      out[k] = v;
-    }
-  }
-  return out;
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n) : s;
-}
-
-// Converts paise (our stored unit) to the rupees-with-two-decimals string
-// SabPaisa expects on initiate. 10000 → "100.00".
 export function paiseToRupees(paise: number): string {
   return (paise / 100).toFixed(2);
+}
+
+// AlphaNumeric, unique per attempt (docs: clientTxnId, max 100).
+function newClientTxnId(): string {
+  return `NGP${Date.now().toString(36)}${randomBytes(5).toString("hex")}`.toUpperCase();
+}
+
+// "YYYY-MM-DD HH:mm:ss" in IST, as in the docs' example.
+function istTimestamp(d: Date): string {
+  const ist = new Date(d.getTime() + 330 * 60 * 1000);
+  return ist.toISOString().slice(0, 19).replace("T", " ");
+}
+
+// The request is a raw '&'-joined string, so '&' and '=' can't appear in values.
+function clean(s: string, max: number): string {
+  return String(s ?? "").replace(/[&=\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function mobile(s: string): string {
+  const digits = String(s ?? "").replace(/\D/g, "");
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
+function parseFields(plaintext: string): SabPaisaResponse {
+  const out: SabPaisaResponse = {};
+  for (const part of plaintext.split("&")) {
+    if (!part) continue;
+    const i = part.indexOf("=");
+    const k = i >= 0 ? part.slice(0, i) : part;
+    let v = i >= 0 ? part.slice(i + 1) : "";
+    try { v = decodeURIComponent(v.replace(/\+/g, " ")); } catch { /* keep raw */ }
+    out[k] = v === "null" ? null : v;
+  }
+  if (!out.sabpaisaTxnId && out.sabpaisaTxnld) out.sabpaisaTxnId = out.sabpaisaTxnld;
+  return out;
 }

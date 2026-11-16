@@ -72,16 +72,41 @@ export async function sendReport<Row extends Record<string, unknown>>(
   res: Response,
   spec: ReportSpec<Row>,
 ): Promise<void> {
+  const wb = newReportWorkbook();
+  addReportSheet(wb, spec);
+  await sendWorkbook(res, wb, spec.filename);
+}
+
+/** A blank workbook with the portal's author metadata. */
+export function newReportWorkbook(): ExcelJS.Workbook {
   const wb = new ExcelJS.Workbook();
   wb.creator = "ICAI Nagpur Branch Portal";
   wb.created = new Date();
+  return wb;
+}
 
+/** Stream a finished workbook to `res` as `<filename>.xlsx`. */
+export async function sendWorkbook(res: Response, wb: ExcelJS.Workbook, filename: string): Promise<void> {
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
+}
+
+/**
+ * Add one formatted sheet (title band, header, rows, optional totals,
+ * auto-filter) to a workbook. Several calls build a multi-sheet report.
+ */
+export function addReportSheet<Row extends Record<string, unknown>>(
+  wb: ExcelJS.Workbook,
+  spec: ReportSpec<Row>,
+): void {
   const ws = wb.addWorksheet((spec.sheetName ?? "Report").slice(0, 31), {
     views: [{ state: "frozen", ySplit: spec.subtitle ? 4 : 3 }],
   });
 
   const colCount = spec.columns.length;
-  const lastCol = String.fromCharCode(64 + colCount);  // A-Z is enough for our report widths
+  const lastCol = columnLetter(colCount);
 
   // ── Title row ──────────────────────────────────────────────────────────
   ws.mergeCells(`A1:${lastCol}1`);
@@ -198,10 +223,13 @@ export async function sendReport<Row extends Record<string, unknown>>(
     to:   { row: headerRowIndex + spec.rows.length, column: colCount },
   };
 
-  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename="${spec.filename}.xlsx"`);
-  await wb.xlsx.write(res);
-  res.end();
+}
+
+/** 1 → A, 26 → Z, 27 → AA. */
+function columnLetter(n: number): string {
+  let s = "";
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
 }
 
 function defaultWidth(kind: ReportColumnKind): number {

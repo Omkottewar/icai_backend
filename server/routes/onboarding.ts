@@ -148,7 +148,7 @@ onboardingRouter.post("/", sameOrigin, requireUser, async (req: AuthedRequest, r
       }
     });
 
-    res.json({ ok: true, redirect: "/dashboard" });
+    res.json({ ok: true, redirect: user.primary_role === "employer" ? "/employer" : "/dashboard" });
   } catch (err) {
     if (err instanceof ApiError) return res.status(err.status).json({ error: err.message });
     next(err);

@@ -59,7 +59,7 @@ approvalsAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
       if (perms.committeeChairmanOf.length === 0) {
         return res.json({ rows: [], total: 0 });
       }
-      conds.push(sql`${events.committee_id} = ANY(${perms.committeeChairmanOf})`);
+      conds.push(inArray(events.committee_id, perms.committeeChairmanOf));
     }
 
     const deciderU = aliasedTable(users, "decider_u");

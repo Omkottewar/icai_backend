@@ -107,8 +107,10 @@ homeAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
     if (isWicasa)                                       variant = "wicasa";
     else if (isAccountant && !isTreasurer)              variant = "accountant";
     else if (isTreasurer)                               variant = "treasurer";
-    else if (committeeChairOf.length > 0)               variant = "committee_chairman";
+    // Branch leadership outranks a committee chair: a Branch Chairman who
+    // also chairs a committee should still get the chairman home.
     else if (isChairman || isVice || isSecretary)       variant = "chairman";
+    else if (committeeChairOf.length > 0)               variant = "committee_chairman";
     else                                                variant = "sysadmin";
 
     // ─── Common: events pending approval (chairman / sysadmin) ──────────

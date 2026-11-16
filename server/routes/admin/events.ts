@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, asc, desc, eq, ilike, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, isNull, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "../../../db/client.js";
 import { events, eventRegistrations, committees, branches, files, checklistInstances, checklistInstanceApprovals, eventOverrideLog, users, payments } from "../../../schema/index.js";
@@ -142,7 +142,7 @@ eventsAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
 
     // Committee chairman without branch-level role → restrict to their committees.
     if (!isBranchLevel && perms.committeeChairmanOf.length > 0) {
-      conds.push(sql`${events.committee_id} = ANY(${perms.committeeChairmanOf})`);
+      conds.push(inArray(events.committee_id, perms.committeeChairmanOf));
     } else if (!isBranchLevel && perms.committeeChairmanOf.length === 0) {
       // No branch-level role AND no committees chaired → see nothing.
       return res.json({ rows: [], total: 0, page, pageSize });
@@ -215,6 +215,10 @@ eventsAdminRouter.get("/", async (req: AuthedRequest, res, next) => {
 
 // â”€â”€â”€ GET /api/admin/events/:id â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 eventsAdminRouter.get("/:id", async (req, res, next) => {
+  // Static sub-paths registered later in this file (e.g. "/cancellation-requests",
+  // "/export.csv") would otherwise be swallowed by this "/:id" route and
+  // crash with "invalid input syntax for type uuid". Skip to them.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.id))) return next("route");
   try {
     const [row] = await db
       .select({
@@ -754,7 +758,7 @@ eventsAdminRouter.get("/cancellation-requests", async (req: AuthedRequest, res, 
       if (perms.committeeChairmanOf.length === 0) {
         return res.json({ rows: [] });
       }
-      conds.push(sql`${events.committee_id} = ANY(${perms.committeeChairmanOf})`);
+      conds.push(inArray(events.committee_id, perms.committeeChairmanOf));
     }
 
     const rows = await db
@@ -789,7 +793,33 @@ eventsAdminRouter.get("/cancellation-requests", async (req: AuthedRequest, res, 
 // performRegistrationCancellation helper (flips status, decrements counter,
 // promotes waitlist). For paid registrations, flags the payment with
 // needs_refund so the treasurer picks it up from the refund queue.
-eventsAdminRouter.post("/registrations/:id/approve-cancellation", canManageEvents, async (req: AuthedRequest, res, next) => {
+// Who may approve / reject a member's cancellation request: branch
+// leadership for any event, or a committee chairman for events of the
+// committee they chair. Mirrors the scoping of GET /cancellation-requests,
+// so everyone who can SEE a request in the queue can also act on it.
+async function canDecideCancellation(req: AuthedRequest, res: any, next: any) {
+  try {
+    const perms = await (await import("../../auth/permissions.js")).loadUserPermissions(req.user!.id);
+    const isBranchLevel = perms.isAdmin
+      || perms.codes.has("branch_chairman")
+      || perms.codes.has("branch_vice_chairman")
+      || perms.codes.has("branch_secretary")
+      || perms.codes.has("branch_manager");
+    if (isBranchLevel) return next();
+    if (perms.committeeChairmanOf.length > 0) {
+      const [row] = await db
+        .select({ committee_id: events.committee_id })
+        .from(eventRegistrations)
+        .innerJoin(events, eq(events.id, eventRegistrations.event_id))
+        .where(eq(eventRegistrations.id, String(req.params.id)))
+        .limit(1);
+      if (row?.committee_id && perms.committeeChairmanOf.includes(row.committee_id)) return next();
+    }
+    return res.status(403).json({ error: "forbidden", message: "Only branch leadership or this event's committee chairman can decide cancellation requests" });
+  } catch (err) { next(err); }
+}
+
+eventsAdminRouter.post("/registrations/:id/approve-cancellation", canDecideCancellation, async (req: AuthedRequest, res, next) => {
   try {
     const registrationId = need(trim(req.params.id), "Registration ID");
 
@@ -855,7 +885,7 @@ eventsAdminRouter.post("/registrations/:id/approve-cancellation", canManageEvent
 // Admin declines the user's cancellation request. Clears the pending state
 // so the user could file a fresh request later with a better reason. The
 // admin's rejection reason is stored + emailed to the user.
-eventsAdminRouter.post("/registrations/:id/reject-cancellation", canManageEvents, async (req: AuthedRequest, res, next) => {
+eventsAdminRouter.post("/registrations/:id/reject-cancellation", canDecideCancellation, async (req: AuthedRequest, res, next) => {
   try {
     const registrationId = need(trim(req.params.id), "Registration ID");
     const rejectReason = need(trim(req.body?.reject_reason), "Rejection reason").slice(0, 1000);

@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { requireUser } from "../../middleware/requireUser.js";
 import { requireAdmin } from "../../middleware/requireAdmin.js";
+import { requireRole } from "../../middleware/requireRole.js";
+import type { Request, Response, NextFunction } from "express";
 import { eventsAdminRouter } from "./events.js";
 import { eventSpeakersAdminRouter } from "./eventSpeakers.js";
 import { registrationsAdminRouter } from "./registrations.js";
@@ -70,6 +72,58 @@ adminRouter.use((_req, res, next) => {
 
 // Every admin endpoint requires (a) a valid session and (b) the admin role.
 adminRouter.use(requireUser, requireAdmin);
+
+// ─── Per-area role gates ─────────────────────────────────────────────────
+// requireAdmin above only proves the caller holds SOME office-bearer role.
+// Without these narrower gates any office bearer (committee chairman,
+// accountant, …) could call admin-only endpoints directly by URL — e.g.
+// grant themselves the `admin` role via POST /users/:id/roles. The sidebar
+// hiding a link is not access control. Each gate mirrors the roles the
+// AdminShell nav shows that section to. `requireRole` always lets `admin`
+// through.
+const BRANCH_LEADERS = ["branch_chairman", "branch_vice_chairman", "branch_secretary", "branch_manager"];
+const TREASURER      = ["branch_treasurer"];
+const ACCOUNTANT     = ["accountant"];
+
+const adminOnly        = requireRole([]);
+const treasurerOnly    = requireRole(TREASURER);
+const financeDesk      = requireRole([...TREASURER, ...ACCOUNTANT]);
+const financeOrLeaders = requireRole([...TREASURER, ...ACCOUNTANT, ...BRANCH_LEADERS]);
+const treasurerOrLeaders = requireRole([...TREASURER, ...BRANCH_LEADERS]);
+const leadersOnly      = requireRole(BRANCH_LEADERS);
+
+type Mw = (req: Request, res: Response, next: NextFunction) => unknown;
+/** Reads go through `readGate`, writes through `writeGate`. */
+function split(readGate: Mw | null, writeGate: Mw): Mw {
+  return (req, res, next) => {
+    const isRead = req.method === "GET" || req.method === "HEAD";
+    if (isRead) return readGate ? readGate(req, res, next) : next();
+    return writeGate(req, res, next);
+  };
+}
+
+// Users: the plain list (GET /users) feeds the speaker / filler pickers on
+// the Events and Checklist pages, so every office bearer may read it.
+// Everything else — details, CSV export, edits, role grants — is admin-only.
+adminRouter.use("/users", (req, res, next) => {
+  if (req.method === "GET" && (req.path === "/" || req.path === "")) return next();
+  return adminOnly(req as any, res, next);
+});
+adminRouter.use(["/icai-directory", "/grievance-routes", "/jobs", "/job-categories",
+                 "/job-subscribers", "/notification-templates", "/audit-log", "/stats"], adminOnly as Mw);
+// Site: content blocks are edited by branch leadership; settings are admin-only.
+adminRouter.use("/site", (req, res, next) => {
+  if (req.method === "GET") return next();
+  if (req.path.startsWith("/settings")) return adminOnly(req as any, res, next);
+  return leadersOnly(req as any, res, next);
+});
+// Finance.
+adminRouter.use(["/refunds", "/iut-transfers", "/cabf"], treasurerOnly as Mw);
+adminRouter.use(["/bills", "/payments"], financeDesk as Mw);
+adminRouter.use(["/vendors", "/expense-categories"], split(financeOrLeaders as Mw, financeDesk as Mw));
+adminRouter.use("/budgets", treasurerOrLeaders as Mw);
+adminRouter.use(["/reports", "/exports"], financeOrLeaders as Mw);
+adminRouter.use("/treasurer-analytics", treasurerOrLeaders as Mw);
 
 adminRouter.use("/events", eventsAdminRouter);
 // Nested speakers CRUD — mounted separately (not inside eventsAdminRouter)

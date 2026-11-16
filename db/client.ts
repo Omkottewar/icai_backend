@@ -31,7 +31,7 @@ const queryClient = postgres(url, {
   idle_timeout: 20,
   connect_timeout: 10,
   connection: {
-    statement_timeout: "15000",
+    statement_timeout: 15000,
   },
 });
 

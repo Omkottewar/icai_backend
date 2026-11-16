@@ -1,87 +1,104 @@
-// SabPaisa environment configuration.
-//
-// SabPaisa credentials live in env vars only — never in site_settings,
-// never in the DB, never in the frontend bundle. The runtime fails fast
-// if a required var is missing so an incomplete deploy can't silently
-// fall back to UAT credentials or no-op the integration.
+// SabPaisa configuration, per https://developer.sabpaisa.in/docs/urls/
 //
 // Env vars (see .env.example):
-//   SABPAISA_CLIENT_CODE — the branch's merchant client code. 'NBW' = live
-//                          (Nagpur Branch of WIRC, provisioned by SabPaisa
-//                          account manager Sushanta Bhattacharyya, Oct
-//                          2026). 'NITE5' = generic PHP7+ UAT sandbox
-//                          credentials shared for pre-live testing.
-//   SABPAISA_USERNAME    — SabPaisa-issued API username for the client.
-//   SABPAISA_PASSWORD    — SabPaisa-issued API password for the client.
-//   SABPAISA_AUTH_KEY    — AES-128 key (16 bytes) for request/response
-//                          encryption. Shared out-of-band with the branch.
-//   SABPAISA_AUTH_IV     — AES-128 IV (16 bytes). Shared with the key.
-//                          SabPaisa's PHP7+ reference uses a static IV,
-//                          same for every payload — we replicate that.
-//   SABPAISA_INIT_URL    — SabPaisa's hosted checkout entry URL. The
-//                          browser auto-POSTs to this.
-//   SABPAISA_VERIFY_URL  — SabPaisa's server-to-server /status/verify
-//                          endpoint. Used by the reconciliation cron
-//                          and the admin re-verify button.
-//   SABPAISA_REFUND_URL  — SabPaisa's refund API endpoint.
-//   SABPAISA_RETURN_URL  — The URL on OUR site that SabPaisa redirects
-//                          the browser to after payment. Must be exactly
-//                          what's whitelisted on the SabPaisa dashboard.
+//   SABPAISA_ENV           "staging" (default) | "production" — picks the
+//                          SabPaisa URLs below. Nothing else switches hosts.
+//   SABPAISA_CLIENT_CODE   merchant client code issued by SabPaisa
+//   SABPAISA_USERNAME      transUserName issued by SabPaisa
+//   SABPAISA_PASSWORD      transUserPassword issued by SabPaisa
+//   SABPAISA_AUTH_KEY      base64 authKey (decodes to 32 bytes, AES-256-GCM)
+//   SABPAISA_AUTH_IV       base64 authIV (HMAC-SHA384 key)
+//   SABPAISA_MCC           merchant category code (mandatory in the docs)
+//   SABPAISA_CALLBACK_URL  where SabPaisa POSTs encResponse after payment.
+//                          Falls back to SABPAISA_RETURN_URL, then to
+//                          ${APP_URL}/api/payments/sabpaisa/return.
+
+import { decodeKey } from "./crypto.js";
+
+export type SabPaisaEnv = "staging" | "production";
+
+// Official endpoints from the SabPaisa docs.
+const URLS: Record<SabPaisaEnv, { initUrl: string; enquiryUrl: string; refundUrl: string }> = {
+  staging: {
+    initUrl:    "https://stage-securepay.sabpaisa.in/SabPaisa/sabPaisaInit?v=1",
+    enquiryUrl: "https://stage-txnenquiry.sabpaisa.in/SPTxtnEnquiry/getTxnStatusByClientxnId",
+    refundUrl:  "https://stage-gateway.sabpaisa.in/sabpaisa/refund",
+  },
+  production: {
+    initUrl:    "https://securepay.sabpaisa.in/SabPaisa/sabPaisaInit?v=1",
+    enquiryUrl: "https://txnenquiry.sabpaisa.in/SPTxtnEnquiry/getTxnStatusByClientxnId",
+    refundUrl:  "https://gateway.sabpaisa.in/sabpaisa/refund",
+  },
+};
 
 export interface SabPaisaConfig {
+  env:         SabPaisaEnv;
   clientCode:  string;
   username:    string;
   password:    string;
-  authKey:     string;   // 16 bytes
-  authIv:      string;   // 16 bytes
-  initUrl:     string;   // hosted checkout URL (browser auto-POST target)
-  verifyUrl:   string;   // server-to-server /status/verify
-  refundUrl:   string;   // server-to-server /refund
-  returnUrl:   string;   // our return endpoint (echoed back in init payload)
+  authKey:     string;
+  authIv:      string;
+  mcc:         string;
+  callbackUrl: string;
+  initUrl:     string;
+  enquiryUrl:  string;
+  refundUrl:   string;
 }
 
 let cached: SabPaisaConfig | null = null;
+
+function readEnv(): SabPaisaEnv {
+  const raw = (process.env.SABPAISA_ENV ?? "").trim().toLowerCase();
+  if (!raw || raw === "staging" || raw === "stage" || raw === "uat") return "staging";
+  if (raw === "production" || raw === "prod" || raw === "live") return "production";
+  throw new Error(`SABPAISA_ENV='${raw}' is not valid — use 'staging' or 'production'`);
+}
 
 export function sabpaisaConfig(): SabPaisaConfig {
   if (cached) return cached;
 
   const need = (key: string): string => {
     const v = (process.env[key] ?? "").trim();
-    if (!v) throw new Error(`Missing env var ${key} — required for SabPaisa integration`);
+    if (!v) throw new Error(`Missing env var ${key} — required for SabPaisa`);
     return v;
   };
 
+  const env = readEnv();
   const authKey = need("SABPAISA_AUTH_KEY");
   const authIv  = need("SABPAISA_AUTH_IV");
-  // AES-128 requires exactly 16-byte key + IV. Fail fast with a clear
-  // message if they were pasted in truncated — SabPaisa's error for a
-  // malformed payload is a cryptic "invalid encdata" that loses hours
-  // to diagnose in UAT.
-  if (Buffer.byteLength(authKey, "utf8") !== 16) {
-    throw new Error(`SABPAISA_AUTH_KEY must be exactly 16 bytes (got ${Buffer.byteLength(authKey, "utf8")}) — SabPaisa uses AES-128-CBC`);
+  const keyBytes = decodeKey(authKey, "SABPAISA_AUTH_KEY").length;
+  if (keyBytes !== 32) {
+    throw new Error(`SABPAISA_AUTH_KEY must be SabPaisa's base64 AES-256 key (32 bytes once decoded, got ${keyBytes})`);
   }
-  if (Buffer.byteLength(authIv, "utf8") !== 16) {
-    throw new Error(`SABPAISA_AUTH_IV must be exactly 16 bytes (got ${Buffer.byteLength(authIv, "utf8")}) — SabPaisa uses AES-128-CBC`);
+  if (decodeKey(authIv, "SABPAISA_AUTH_IV").length === 0) {
+    throw new Error("SABPAISA_AUTH_IV is empty");
   }
 
-  const cfg: SabPaisaConfig = {
-    clientCode:  need("SABPAISA_CLIENT_CODE"),
-    username:    need("SABPAISA_USERNAME"),
-    password:    need("SABPAISA_PASSWORD"),
+  const mcc = need("SABPAISA_MCC");
+  if (!/^\d+$/.test(mcc)) throw new Error("SABPAISA_MCC must be numeric");
+
+  const appUrl = (process.env.APP_URL ?? "").trim().replace(/\/$/, "");
+  const callbackUrl =
+    (process.env.SABPAISA_CALLBACK_URL ?? "").trim() ||
+    (process.env.SABPAISA_RETURN_URL ?? "").trim() ||
+    (appUrl ? `${appUrl}/api/payments/sabpaisa/return` : "");
+  if (!callbackUrl) throw new Error("Missing env var SABPAISA_CALLBACK_URL (or APP_URL)");
+  if (callbackUrl.length > 255) throw new Error("SABPAISA_CALLBACK_URL is longer than 255 characters");
+
+  cached = {
+    env,
+    clientCode: need("SABPAISA_CLIENT_CODE"),
+    username:   need("SABPAISA_USERNAME"),
+    password:   need("SABPAISA_PASSWORD"),
     authKey,
     authIv,
-    initUrl:     need("SABPAISA_INIT_URL"),
-    verifyUrl:   need("SABPAISA_VERIFY_URL"),
-    refundUrl:   need("SABPAISA_REFUND_URL"),
-    returnUrl:   need("SABPAISA_RETURN_URL"),
+    mcc,
+    callbackUrl,
+    ...URLS[env],
   };
-
-  cached = cfg;
-  return cfg;
+  return cached;
 }
 
-// Test hook — lets a future unit test blow away the cache if it mutates
-// process.env between cases. Not called from runtime code.
 export function _resetSabPaisaConfigCache() {
   cached = null;
 }
