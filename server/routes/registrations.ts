@@ -8,10 +8,7 @@ import { bookingWriteLimiter } from "../middleware/rateLimit.js";
 import { notifyAsync } from "../lib/notify.js";
 import { streamCertificate } from "../lib/certificates.js";
 import { buildCalendar } from "../lib/ical.js";
-import { createOrder } from "../lib/razorpay/client.js";
-import { razorpayConfig } from "../lib/razorpay/config.js";
 import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
-import { activePaymentProvider } from "../lib/paymentProvider.js";
 import { createHmac } from "node:crypto";
 import { memberProfiles } from "../../schema/index.js";
 
@@ -67,12 +64,11 @@ registrationsRouter.get("/my-registrations", requireUser, async (req: AuthedRequ
 // â”€â”€â”€ POST /api/events/:slug/register â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Self-service registration. Two paths depending on the event fee:
 //   fee_paise = 0 → create the registration immediately, return paid=false.
-//   fee_paise > 0 → create a `payments` row in status "pending", open a
-//                   Razorpay Order, return { key_id, order_id, amount_paise,
-//                   prefill } so the browser can launch Razorpay Checkout
-//                   (modal). The event_registrations row is created later
-//                   by razorpay/confirm.ts once the gateway confirms via
-//                   signature verify / webhook.
+//   fee_paise > 0 → create a `payments` row in status "pending" and return
+//                   a `sabpaisa` block { action, clientCode, encData } the
+//                   browser POSTs to SabPaisa. The event_registrations row
+//                   is created later by payments/confirm.ts once SabPaisa
+//                   confirms via the callback / Transaction Enquiry.
 registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const user = req.user!;
@@ -234,11 +230,9 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
 
     // ── Paid event: hand off to the active payment gateway ────────────
     // We DON'T create the registration row yet — that happens in
-    // confirm.ts once the gateway (Razorpay OR SabPaisa, per
-    // PAYMENT_PROVIDER env var) confirms payment via the verify/return
-    // path or the webhook. The payment row is the durable handle:
-    // frontend inspects the response for `razorpay`/`sabpaisa` keys and
-    // opens the matching flow (Checkout.js modal vs hosted-page auto-POST).
+    // confirm.ts once SabPaisa confirms payment via the callback or
+    // Transaction Enquiry. The payment row is the durable handle; the
+    // frontend POSTs the `sabpaisa` block to SabPaisa's checkout.
     //
     // GST (H.20): when gst_applicable is true, the fee shown to the user
     // is base + GST. We store both numbers in payment.metadata so the
@@ -251,7 +245,7 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
     const perSeatTotal = perSeatBase + perSeatGst;
     const totalPaise = perSeatTotal * totalSeats;
 
-    const provider = activePaymentProvider();
+    const provider = "sabpaisa" as const;
 
     const [payment] = await db.insert(payments).values({
       payer_user_id: user.id,
@@ -281,8 +275,7 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
       },
     }).returning();
 
-    // Common fields for both provider response shapes. The frontend
-    // discriminates on the presence of `razorpay` vs `sabpaisa` keys.
+    // Fields returned alongside the `sabpaisa` checkout block.
     const commonResponse = {
       paid: true,
       payment_id: payment.id,
@@ -299,7 +292,7 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
       event: { title: event.title, slug: event.slug },
     };
 
-    if (provider === "sabpaisa") {
+    {
       let built;
       try {
         built = buildSabpaisaInit({
@@ -338,56 +331,12 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
       });
     }
 
-    // Default branch: Razorpay Checkout modal.
-    let order;
-    try {
-      order = await createOrder({
-        amountPaise: totalPaise,
-        receipt:     payment.id,
-        notes: {
-          payment_id: payment.id,
-          purpose:    "event_registration",
-          ref_id:     event.id,
-          event_slug: event.slug,
-        },
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
-    }
-
-    await db.update(payments).set({
-      razorpay_order_id: order.id,
-      updated_at: new Date(),
-    }).where(eq(payments.id, payment.id));
-
-    return res.status(200).json({
-      ...commonResponse,
-      // Razorpay Checkout payload — frontend loads checkout.razorpay.com's
-      // script and opens the modal with these fields.
-      razorpay: {
-        key_id:       razorpayConfig().keyId,
-        order_id:     order.id,
-        amount_paise: totalPaise,
-        currency:     order.currency,
-        prefill: {
-          name:    user.name,
-          email:   user.email,
-          contact: phone || user.phone || "",
-        },
-      },
-    });
   } catch (err) { handleApiError(err, res, next); }
 });
 
-// The POST /api/events/:slug/submit-utr endpoint was removed with the
-// Razorpay rewrite. In the UPI-manual era, users paid off-platform via a
-// QR, then submitted the UTR here so admin could verify it against the
-// bank statement. The Razorpay flow eliminates both — payment is handled
-// inline via Checkout.js and confirmation is driven by signature verify +
-// server-to-server webhook, no UTR to submit. Historical
-// pending_verification rows are still visible in the admin queue for
-// backfill approval.
+// The POST /api/events/:slug/submit-utr endpoint was removed: payment is
+// handled online by the gateway, so there is no UTR to submit. Historical
+// pending_verification rows are still visible in the admin queue.
 
 // ─── GET /api/events/my-pending-payments ─────────────────────────────────
 // Returns the caller's payments currently awaiting admin verification, plus
@@ -397,9 +346,9 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
 // only, to keep the UI copy simple).
 //
 // Stale-pending suppression: a `pending` row is created the moment the user
-// clicks Register (before Razorpay), so closing the modal without paying
+// clicks Register (before the gateway), so closing the modal without paying
 // leaves an orphan. We hide `pending` rows older than 15 minutes —
-// Razorpay confirms successful payments within seconds, so anything older
+// the gateway usually confirms within minutes, so anything older
 // is almost certainly abandoned. We intentionally do NOT expose a manual
 // cancel button here beyond the modal's close-cancellation call: a user
 // who clicks Cancel seconds after a real success would create a
@@ -407,7 +356,7 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
 // time-based filter avoids that reconciliation nightmare.
 //
 // Status is never changed by this filter — the row stays `pending` in the
-// DB. If Razorpay's webhook arrives late with a successful payment, the
+// DB. If the gateway's callback arrives late with a successful payment, the
 // normal confirm flow still runs and creates the registration.
 // `pending_verification` rows (legacy UPI-manual) are always shown — those
 // need admin action and have no auto-timeout.

@@ -13,7 +13,7 @@ import { payments } from "./payments";
 //   requested → approved → processed   (happy path)
 //   requested → rejected               (treasurer denies)
 //
-// Razorpay's refund id is stored once we actually call the gateway; until
+// The gateway's refund id is stored once the refund is processed; until
 // then we keep the row in `approved` so the treasurer dashboard can show
 // "approved but not yet wired through gateway" as a queue.
 

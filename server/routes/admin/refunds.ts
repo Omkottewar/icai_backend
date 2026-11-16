@@ -36,7 +36,7 @@ refundsAdminRouter.get("/", async (req, res, next) => {
         approved_at:   paymentRefunds.approved_at,
         processed_at:  paymentRefunds.processed_at,
         notes:         paymentRefunds.notes,
-        razorpay_refund_id: paymentRefunds.razorpay_refund_id,
+        gateway_refund_id: paymentRefunds.razorpay_refund_id,
         payment_amount_paise: payments.amount_paise,
         payment_purpose:      payments.purpose,
         payer_name:           users.name,
@@ -75,7 +75,7 @@ refundsAdminRouter.get("/export.csv", async (req, res, next) => {
       reason:        paymentRefunds.reason,
       approved_at:   paymentRefunds.approved_at,
       processed_at:  paymentRefunds.processed_at,
-      razorpay_refund_id: paymentRefunds.razorpay_refund_id,
+      gateway_refund_id: paymentRefunds.razorpay_refund_id,
       notes:         paymentRefunds.notes,
       payment_purpose: payments.purpose,
       payment_amount_paise: payments.amount_paise,
@@ -89,13 +89,13 @@ refundsAdminRouter.get("/export.csv", async (req, res, next) => {
 
     const csv = buildCsv(
       ["Requested at", "Status", "Payer", "Payer email", "Amount (₹)", "Reason",
-       "Approved at", "Processed at", "Razorpay refund ID", "Notes",
+       "Approved at", "Processed at", "Gateway refund ID", "Notes",
        "Payment purpose", "Payment amount (₹)"],
       rows,
       (r) => [
         r.requested_at, r.status, r.payer_name, r.payer_email,
         r.amount_paise != null ? (Number(r.amount_paise) / 100).toFixed(2) : "",
-        r.reason, r.approved_at, r.processed_at, r.razorpay_refund_id, r.notes,
+        r.reason, r.approved_at, r.processed_at, r.gateway_refund_id, r.notes,
         r.payment_purpose,
         r.payment_amount_paise != null ? (Number(r.payment_amount_paise) / 100).toFixed(2) : "",
       ],
@@ -178,17 +178,17 @@ refundsAdminRouter.post("/:id/reject", async (req: AuthedRequest, res, next) => 
 });
 
 // ─── POST /api/admin/refunds/:id/processed ────────────────────────────────
-// Marks the refund as successfully processed at the gateway. Once Razorpay
-// integration is wired, this will fire automatically from the webhook.
+// Marks the refund as processed at the gateway (SabPaisa refund id / bank
+// UTR recorded by the treasurer).
 refundsAdminRouter.post("/:id/processed", async (req, res, next) => {
   try {
     const id = need(trim(req.params.id), "Refund ID");
-    const razorpay_refund_id = trim(req.body?.razorpay_refund_id) || null;
+    const gateway_refund_id = trim(req.body?.gateway_refund_id) || null;
 
     const [row] = await db.update(paymentRefunds)
       .set({
         status: "processed",
-        razorpay_refund_id,
+        razorpay_refund_id: gateway_refund_id,
         processed_at: new Date(),
         updated_at: new Date(),
       })

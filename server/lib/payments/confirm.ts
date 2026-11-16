@@ -1,13 +1,10 @@
 // Shared "payment confirmed → fulfil the thing it paid for" logic.
 //
-// Called from THREE places:
-//   • /api/payments/verify  — browser handler fires after Razorpay Checkout
-//                             modal resolves. Verified signature → confirm.
-//   • /api/payments/webhook — Razorpay's server-to-server push. Verified
-//                             X-Razorpay-Signature → confirm.
-//   • paymentReconciliationCron — picks pending rows > 1 hr old, polls
-//                                 Razorpay for the order's payment status,
-//                                 then confirms or fails via this fn.
+// Called from:
+//   • /api/payments/sabpaisa/return  — SabPaisa callback (encResponse)
+//   • /api/payments/sabpaisa/webhook — optional server-to-server push
+//   • paymentReconciliationCron      — Transaction Enquiry on stuck rows
+//   • admin re-verify
 //
 // Any path can arrive first; whichever does gets the work done, the others
 // are idempotent via the `payment.status = 'success'` short-circuit.
@@ -112,13 +109,13 @@ export interface ConfirmResult {
   waitlistedCount: number;
   // For job_posting purpose: the posting_id that was published, if any.
   // Lets the return handler surface it in the result page redirect so
-  // the employer lands back on their posting after Razorpay's handler.
+  // the employer lands back on their posting after the gateway callback.
   activatedPostingId?: string | null;
 }
 
-// Caller already decided the Razorpay outcome is "success" — this fn
-// trusts that decision and only fulfils the purpose. Signature / webhook
-// verification against Razorpay must happen *before* calling this.
+// Caller already decided the gateway outcome is "success" — this fn
+// trusts that decision and only fulfils the purpose. Verification with
+// the gateway must happen *before* calling this.
 export async function confirmPaymentAndFulfil(paymentId: string): Promise<ConfirmResult> {
   const result = await db.transaction(async (tx) => {
     const [payment] = await tx.select().from(payments).where(eq(payments.id, paymentId)).limit(1);
@@ -265,10 +262,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
     // whichever provider's id the row carries. The template uses the
     // provider-neutral `{{gateway_txn_id}}` var (see migration 0103 step 5)
     // so adding a new gateway later just means another branch here.
-    const gatewayTxnId =
-      payment.provider === "sabpaisa"
-        ? (payment.sabpaisa_txn_id ?? payment.client_txn_id ?? null)
-        : (payment.razorpay_payment_id ?? null);
+    const gatewayTxnId = payment.sabpaisa_txn_id ?? payment.client_txn_id ?? null;
     const payerSummary = willBeFull ? {
       payment_id:      payment.id,
       payer_user_id:   bookerId,
@@ -358,7 +352,7 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
   };
 }
 
-// Flip a payment to failed when Razorpay confirms the outcome is terminal.
+// Flip a payment to failed when the gateway confirms the outcome is terminal.
 // Called from both /verify and /webhook when the outcome is "failed" or
 // "aborted". Idempotent — if the row is already in a terminal state, no-op.
 export async function markPaymentFailed(paymentId: string, reason: string): Promise<void> {

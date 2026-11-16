@@ -1,30 +1,14 @@
-// Razorpay payment orchestration.
+// Payment endpoints shared by every paid surface (SabPaisa is the only gateway).
 //
-// Four endpoints:
+//   POST /api/payments/initiate   (authed)
+//     Re-opens SabPaisa checkout for an existing created/pending payment row
+//     with a fresh clientTxnId. Returns { provider, action, clientCode,
+//     encData } for the browser to POST to SabPaisa.
 //
-//   POST /api/payments/initiate
-//     Authed. Takes a payment_id (row already created by the originating
-//     route — /events/:slug/register or /employer/postings). Creates a
-//     Razorpay Order via the Razorpay REST API, stores the order id on the
-//     row, and returns { key_id, order_id, amount_paise, currency, prefill }
-//     so the browser can open Razorpay Checkout with the correct order.
+//   GET  /api/payments/:id/status (authed) — status poller for /payments/result
+//   POST /api/payments/cancelled  (authed) — user backed out before paying
 //
-//   POST /api/payments/verify   (authed — browser handler after modal resolves)
-//     Body: { razorpay_order_id, razorpay_payment_id, razorpay_signature }
-//     Verifies the HMAC signature against our key_secret. If it matches,
-//     persists the payment id + signature, calls confirmPaymentAndFulfil,
-//     and returns the normalised payment row. Idempotent against the
-//     webhook path — whichever lands first flips to success.
-//
-//   POST /api/payments/webhook  (public — Razorpay posts here)
-//     Server-to-server push from Razorpay. Validated via X-Razorpay-Signature
-//     (HMAC-SHA256 of the raw body with the webhook secret). Handles the
-//     payment.captured / payment.failed events. Idempotent against /verify.
-//
-//   GET /api/payments/:id/status (authed)
-//     Lightweight polling endpoint the SPA uses on /payments/result after
-//     the modal closes, so the result page can confirm the row flipped to
-//     'success' before showing the confirmation banner.
+// The SabPaisa callback lives in routes/payments-sabpaisa.ts.
 
 import { Router } from "express";
 import { and, eq, isNull } from "drizzle-orm";
@@ -33,25 +17,13 @@ import { payments, events, jobPostings } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
-import {
-  createOrder,
-  verifyCheckoutSignature,
-  verifyWebhookSignature,
-  mapRazorpayStatus,
-} from "../lib/razorpay/client.js";
-import { razorpayConfig } from "../lib/razorpay/config.js";
-import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/razorpay/confirm.js";
+import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/payments/confirm.js";
 import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
 
 export const paymentsRouter = Router();
 
 // ─── POST /api/payments/initiate ──────────────────────────────────────────
-// Body: { payment_id }
-//   The caller has already created the payment row (via /events/:slug/register
-//   or any other paid-purpose entry point). This endpoint creates a Razorpay
-//   Order and returns the payload the frontend hands to Checkout.js.
-//
-// Returns: { key_id, order_id, amount_paise, currency, prefill }
+// Body: { payment_id } — retry checkout for an existing row.
 paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const payment_id = need(trim(req.body?.payment_id), "Payment ID");
@@ -68,11 +40,7 @@ paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: A
     const payerEmail = String(metadata.payer_email ?? req.user!.email ?? "");
     const payerPhone = String(metadata.payer_phone ?? "");
 
-    // Row-provider-aware re-initiate. A SabPaisa row must retry via
-    // SabPaisa even if PAYMENT_PROVIDER has since flipped to razorpay —
-    // the original attempt's client_txn_id already exists on SabPaisa's
-    // side and the user expects to see the same gateway on retry.
-    if (payment.provider === "sabpaisa") {
+    {
       let built;
       try {
         built = buildSabpaisaInit({
@@ -94,215 +62,25 @@ paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: A
       await db.update(payments).set({
         client_txn_id: built.clientTxnId,
         status:        "pending",
+        provider:      "sabpaisa",
         updated_at:    new Date(),
       }).where(eq(payments.id, payment.id));
 
       return res.json({
-        provider:   "sabpaisa",
-        action:     built.redirect.action,
-        clientCode: built.redirect.clientCode,
-        encData:    built.redirect.encData,
+        payment_id:   payment.id,
+        provider:     "sabpaisa",
         amount_paise: payment.amount_paise,
-        currency:   "INR",
-      });
-    }
-
-    let order;
-    try {
-      order = await createOrder({
-        amountPaise: payment.amount_paise,
-        receipt:     payment.id,     // row UUID as receipt — Razorpay accepts up to 40 chars
-        notes: {
-          payment_id: payment.id,
-          purpose:    payment.purpose,
-          ref_id:     payment.ref_id ?? "",
+        sabpaisa: {
+          action:       built.redirect.action,
+          clientCode:   built.redirect.clientCode,
+          encData:      built.redirect.encData,
+          amount_paise: payment.amount_paise,
+          currency:     "INR",
         },
       });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
     }
 
-    await db.update(payments).set({
-      razorpay_order_id: order.id,
-      status: "pending",
-      provider: "razorpay",
-      updated_at: new Date(),
-    }).where(eq(payments.id, payment.id));
-
-    return res.json({
-      provider:     "razorpay",
-      key_id:       razorpayConfig().keyId,
-      order_id:     order.id,
-      amount_paise: payment.amount_paise,
-      currency:     order.currency,
-      prefill: {
-        name:    payerName,
-        email:   payerEmail,
-        contact: payerPhone,
-      },
-    });
   } catch (err) { handleApiError(err, res, next); }
-});
-
-// ─── POST /api/payments/verify ────────────────────────────────────────────
-// Browser handler fires this from inside the Razorpay Checkout success
-// callback with the three fields Razorpay hands it. Verifies the HMAC
-// signature server-side — if it doesn't match, the payload was tampered
-// with and must be rejected. If it matches, we trust that Razorpay really
-// did capture the payment and call confirmPaymentAndFulfil.
-//
-// Authed because only the payer should be able to trigger confirmation from
-// the client. The webhook path (next endpoint) handles the unauth'd side.
-paymentsRouter.post("/verify", requireUser, async (req: AuthedRequest, res, next) => {
-  try {
-    const razorpay_order_id   = need(trim(req.body?.razorpay_order_id), "razorpay_order_id");
-    const razorpay_payment_id = need(trim(req.body?.razorpay_payment_id), "razorpay_payment_id");
-    const razorpay_signature  = need(trim(req.body?.razorpay_signature), "razorpay_signature");
-
-    const [payment] = await db.select().from(payments)
-      .where(eq(payments.razorpay_order_id, razorpay_order_id))
-      .limit(1);
-    if (!payment) throw new ApiError(404, "Payment not found");
-    if (payment.payer_user_id !== req.user!.id) {
-      // Don't let a logged-in user confirm somebody else's order even if
-      // they somehow learn the order id. Returning 404 instead of 403
-      // avoids confirming the id exists for a non-owner.
-      throw new ApiError(404, "Payment not found");
-    }
-
-    const valid = verifyCheckoutSignature(razorpay_order_id, razorpay_payment_id, razorpay_signature);
-    if (!valid) {
-      // Record the attempt so audit can see a failed signature verify.
-      await db.update(payments).set({
-        rejected_reason: "Invalid Razorpay signature on /verify",
-        updated_at: new Date(),
-      }).where(eq(payments.id, payment.id));
-      throw new ApiError(400, "Invalid payment signature — not from Razorpay.");
-    }
-
-    // Persist the verified payment id + signature before confirmation. If
-    // confirm throws we still have the Razorpay fields on the row for the
-    // reconciliation cron or the admin reverify.
-    await db.update(payments).set({
-      razorpay_payment_id: razorpay_payment_id,
-      razorpay_signature:  razorpay_signature,
-      updated_at: new Date(),
-    }).where(eq(payments.id, payment.id));
-
-    // Idempotent short-circuit — if webhook arrived first and flipped the
-    // row to success, don't do the work twice.
-    if (payment.status === "success") {
-      return res.json({ ok: true, alreadyConfirmed: true, payment_id: payment.id, status: "success" });
-    }
-
-    try {
-      await confirmPaymentAndFulfil(payment.id);
-    } catch (confirmErr) {
-      // Money landed but we failed to create the registration/activate the
-      // posting. Return pending so the SPA shows the pending screen and the
-      // reconciliation cron (every 30 min) can retry. The webhook may also
-      // arrive and retry via its own path.
-      // eslint-disable-next-line no-console
-      console.error("[razorpay] confirm failed on /verify:", confirmErr);
-      try {
-        const Sentry = await import("@sentry/node").catch(() => null);
-        Sentry?.captureException?.(confirmErr, {
-          tags: { source: "razorpay_verify_confirm" },
-          extra: { payment_id: payment.id, order_id: razorpay_order_id },
-        });
-      } catch { /* Sentry optional */ }
-      return res.json({ ok: true, alreadyConfirmed: false, payment_id: payment.id, status: "pending" });
-    }
-
-    return res.json({ ok: true, alreadyConfirmed: false, payment_id: payment.id, status: "success" });
-  } catch (err) { handleApiError(err, res, next); }
-});
-
-// ─── POST /api/payments/webhook ───────────────────────────────────────────
-// Razorpay's server-to-server push. Fires asynchronously of the browser
-// handler. Must respond fast (Razorpay retries on timeout) and MUST be
-// idempotent — the same push can be delivered twice.
-//
-// Authentication is the X-Razorpay-Signature header verified against the
-// webhook secret (distinct from the API key secret — configured separately
-// in the Razorpay dashboard).
-//
-// IMPORTANT: Razorpay signs the RAW request body. The urlencoded parser
-// mounted on this router in index.ts doesn't give us the raw bytes, so
-// this endpoint uses a JSON body parser with a `verify` callback that
-// stashes the raw buffer on req.rawBody. The signature check runs
-// against that buffer, not the parsed object.
-paymentsRouter.post("/webhook", async (req: any, res, next) => {
-  try {
-    const signature = String(req.headers["x-razorpay-signature"] ?? "").trim();
-    const rawBody = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body ?? {});
-
-    if (!signature || !verifyWebhookSignature(rawBody, signature)) {
-      // Don't 5xx — Razorpay would retry. 400 tells it "this payload won't
-      // ever succeed", so stop trying. Mismatched signatures are either a
-      // spoof or a webhook-secret-mismatch on our side.
-      return res.status(400).json({ error: "invalid signature" });
-    }
-
-    const payload = req.body ?? {};
-    const eventType = String(payload?.event ?? "");
-    const rpPayment = payload?.payload?.payment?.entity ?? null;
-    const rpOrderId = rpPayment?.order_id ?? payload?.payload?.order?.entity?.id ?? null;
-
-    if (!rpOrderId) {
-      // Unhandled event shape — ack-and-ignore. Razorpay fires events we
-      // don't care about (order.paid, refund.*, etc.); no retry storm.
-      return res.json({ ok: true, note: `ignored event ${eventType}` });
-    }
-
-    const [payment] = await db.select().from(payments)
-      .where(eq(payments.razorpay_order_id, rpOrderId))
-      .limit(1);
-    if (!payment) {
-      // Push for an unknown order — Razorpay will retry if we 5xx, so
-      // 200 to acknowledge-and-ignore (prevents retry storms on legit
-      // orphans like a test fired against the wrong environment).
-      return res.json({ ok: true, note: "unknown order" });
-    }
-
-    // Persist the latest payment id + metadata before any status change.
-    const rpPaymentId = rpPayment?.id ?? payment.razorpay_payment_id ?? null;
-    await db.update(payments).set({
-      razorpay_payment_id: rpPaymentId,
-      updated_at: new Date(),
-    }).where(eq(payments.id, payment.id));
-
-    if (eventType === "payment.captured" || eventType === "order.paid") {
-      if (payment.status !== "success") {
-        try {
-          await confirmPaymentAndFulfil(payment.id);
-        } catch (confirmErr) {
-          // eslint-disable-next-line no-console
-          console.error("[razorpay] confirm failed in webhook:", confirmErr);
-        }
-      }
-      return res.json({ ok: true });
-    }
-
-    if (eventType === "payment.failed") {
-      const reason = rpPayment?.error_description
-        ?? rpPayment?.error_reason
-        ?? `Razorpay webhook: payment.failed (${rpPayment?.error_code ?? "unknown"})`;
-      await markPaymentFailed(payment.id, reason);
-      return res.json({ ok: true });
-    }
-
-    // Other events (refund.*, order.*, etc.) — ack without action.
-    return res.json({ ok: true, note: `no-op for ${eventType}` });
-  } catch (err) {
-    // Log but still return 200 — Razorpay retries on 5xx. If we have a
-    // true bug we'd rather fix forward than DoS our own endpoint via
-    // Razorpay's retry backoff.
-    // eslint-disable-next-line no-console
-    console.error("[razorpay] webhook handler error:", err);
-    return res.json({ ok: true, note: "handler error — logged" });
-  }
 });
 
 // ─── GET /api/payments/:id/status ─────────────────────────────────────────
@@ -324,8 +102,6 @@ paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, n
       purpose: payments.purpose,
       ref_id: payments.ref_id,
       provider: payments.provider,
-      razorpay_order_id:   payments.razorpay_order_id,
-      razorpay_payment_id: payments.razorpay_payment_id,
       client_txn_id:       payments.client_txn_id,
       sabpaisa_txn_id:     payments.sabpaisa_txn_id,
       sabpaisa_payment_mode: payments.sabpaisa_payment_mode,
@@ -362,13 +138,8 @@ paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, n
 });
 
 // ─── POST /api/payments/cancelled ─────────────────────────────────────────
-// Browser calls this when the user closes Razorpay's modal without paying
-// (Checkout.js fires the `payment.failed` handler with reason `cancelled`,
-// but there's no server-side signal). Flips the row to `failed` with a
-// cancellation reason so the user can see it in /my-pending-payments and
-// retry. Non-authoritative: if a real payment later arrives for the same
-// order via webhook, markPaymentFailed's guard rejects the failure on an
-// already-successful row.
+// The user backed out before paying. Flips a created/pending row to failed
+// so it can be retried; markPaymentFailed never downgrades a success.
 paymentsRouter.post("/cancelled", requireUser, async (req: AuthedRequest, res, next) => {
   try {
     const payment_id = need(trim(req.body?.payment_id), "Payment ID");
@@ -381,7 +152,7 @@ paymentsRouter.post("/cancelled", requireUser, async (req: AuthedRequest, res, n
     // are left alone — a stale cancel after a successful payment must not
     // downgrade the row.
     if (payment.status === "created" || payment.status === "pending") {
-      await markPaymentFailed(payment.id, "User cancelled the payment modal");
+      await markPaymentFailed(payment.id, "User cancelled the payment");
     }
     return res.json({ ok: true });
   } catch (err) { handleApiError(err, res, next); }

@@ -30,7 +30,7 @@ import {
 } from "../lib/sabpaisa/client.js";
 import { sabpaisaConfig } from "../lib/sabpaisa/config.js";
 import { mapSabPaisaStatus, describeSabPaisa, type SabPaisaResponse } from "../lib/sabpaisa/types.js";
-import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/razorpay/confirm.js";
+import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/payments/confirm.js";
 
 export const sabpaisaPaymentsRouter = Router();
 

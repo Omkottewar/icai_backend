@@ -10,7 +10,7 @@
 // Workflow per requirements (O.2):
 //   • FIFO approval (admin reviews requests, confirms or rejects).
 //   • ₹500 deposit logic is enforced client-side on the booking form
-//     (collected via Razorpay before status='requested' is even created);
+//     (collected online before status='requested' is even created);
 //     refund handling on cancel is manual today — admin clicks Cancel and
 //     marks the deposit refund externally.
 //

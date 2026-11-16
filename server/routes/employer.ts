@@ -11,10 +11,7 @@ import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { notify } from "../lib/notify.js";
 import { storage } from "../lib/storage.js";
 import { JOB_POSTING_FEE_PAISE } from "../lib/jobPostingFees.js";
-import { createOrder } from "../lib/razorpay/client.js";
-import { razorpayConfig } from "../lib/razorpay/config.js";
 import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
-import { activePaymentProvider } from "../lib/paymentProvider.js";
 
 export const employerRouter = Router();
 
@@ -216,29 +213,18 @@ employerRouter.get("/postings/:id", async (req: EmployerRequest, res, next) => {
 });
 
 // ─── POST /api/employer/postings ──────────────────────────────────────────
-// Creates a posting in `pending_payment` state + opens a Razorpay Order
-// for the per-type fee. The posting goes LIVE only after the payment
-// confirms via Razorpay's signature-verify/webhook — see
-// confirmPaymentAndFulfil's `job_posting` branch which flips status to
-// 'active' and fires job alerts.
+// Creates a posting in `pending_payment` state + a SabPaisa checkout for
+// the per-type fee. The posting goes LIVE only after SabPaisa confirms —
+// see confirmPaymentAndFulfil's `job_posting` branch.
 //
-// Returns:
-//   {
-//     item: <posting row>,
-//     payment: {
-//       payment_id, amount_paise,
-//       razorpay: { key_id, order_id, amount_paise, currency, prefill }
-//     }
-//   }
-//
-// The browser loads Razorpay Checkout.js and opens the modal using the
-// razorpay block (same pattern as event-registration flow).
+// Returns { item, payment: { payment_id, amount_paise, provider,
+//   sabpaisa: { action, clientCode, encData, amount_paise, currency } } }
 employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, next) => {
   try {
     const parsed = parsePostingBody(req.body);
     const feePaise = JOB_POSTING_FEE_PAISE[parsed.type];
 
-    const provider = activePaymentProvider();
+    const provider = "sabpaisa" as const;
 
     // Both inserts happen in one txn so a crash between them doesn't leave
     // an orphaned posting with no payment or vice versa.
@@ -279,7 +265,7 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
       return { posting, payment };
     });
 
-    if (provider === "sabpaisa") {
+    {
       let built;
       try {
         built = buildSabpaisaInit({
@@ -321,61 +307,13 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
       });
     }
 
-    // Default branch: Razorpay Checkout modal.
-    let order;
-    try {
-      order = await createOrder({
-        amountPaise: feePaise,
-        receipt:     payment.id,
-        notes: {
-          payment_id:   payment.id,
-          purpose:      "job_posting",
-          ref_id:       posting.id,
-          posting_type: posting.type,
-        },
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
-    }
-
-    await db.update(payments).set({
-      razorpay_order_id: order.id,
-      updated_at: new Date(),
-    }).where(eq(payments.id, payment.id));
-
-    res.json({
-      item: posting,
-      payment: {
-        payment_id:   payment.id,
-        amount_paise: feePaise,
-        provider,
-        razorpay: {
-          key_id:       razorpayConfig().keyId,
-          order_id:     order.id,
-          amount_paise: feePaise,
-          currency:     order.currency,
-          prefill: {
-            name:    req.user!.name,
-            email:   req.user!.email,
-            contact: req.user!.phone ?? "",
-          },
-        },
-      },
-    });
   } catch (err) { handleApiError(err, res, next); }
 });
 
 // ─── POST /api/employer/postings/:id/pay ─────────────────────────────────
-// Re-open Razorpay for a posting that's still in `pending_payment` —
-// happens when the employer closed the Razorpay modal, their card was
-// declined, or the first payment attempt timed out. We create a FRESH
-// payment row + fresh Razorpay Order (don't try to retry the old order —
-// Razorpay won't accept new payments against an order that already has a
-// failed attempt in some flows) and link the posting to it.
-//
-// Returns the same `payment` shape as POST /postings so the frontend's
-// Razorpay checkout launcher can be reused as-is.
+// Re-open checkout for a posting still in `pending_payment` (employer
+// backed out, card declined, timed out). Creates a FRESH payment row and
+// links the posting to it. Returns the same `payment` shape as POST /postings.
 employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest, res, next) => {
   try {
     const postingId = String(req.params.id);
@@ -391,7 +329,7 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
 
     const feePaise = posting.fee_paise > 0 ? posting.fee_paise : JOB_POSTING_FEE_PAISE[posting.type as "job" | "articleship" | "assignment"];
 
-    const provider = activePaymentProvider();
+    const provider = "sabpaisa" as const;
 
     const [payment] = await db.insert(payments).values({
       payer_user_id: req.user!.id,
@@ -413,7 +351,7 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
       },
     }).returning();
 
-    if (provider === "sabpaisa") {
+    {
       let built;
       try {
         built = buildSabpaisaInit({
@@ -459,49 +397,6 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
       });
     }
 
-    // Default branch: Razorpay Checkout modal.
-    let order;
-    try {
-      order = await createOrder({
-        amountPaise: feePaise,
-        receipt:     payment.id,
-        notes: {
-          payment_id:   payment.id,
-          purpose:      "job_posting",
-          ref_id:       posting.id,
-          posting_type: posting.type,
-        },
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new ApiError(503, `Online payments are not configured yet (${msg}).`);
-    }
-
-    await db.update(payments).set({
-      razorpay_order_id: order.id,
-      updated_at: new Date(),
-    }).where(eq(payments.id, payment.id));
-
-    await db.update(jobPostings)
-      .set({ payment_id: payment.id, updated_at: new Date() })
-      .where(eq(jobPostings.id, posting.id));
-
-    res.json({
-      payment_id:   payment.id,
-      amount_paise: feePaise,
-      provider,
-      razorpay: {
-        key_id:       razorpayConfig().keyId,
-        order_id:     order.id,
-        amount_paise: feePaise,
-        currency:     order.currency,
-        prefill: {
-          name:    req.user!.name,
-          email:   req.user!.email,
-          contact: req.user!.phone ?? "",
-        },
-      },
-    });
   } catch (err) { handleApiError(err, res, next); }
 });
 

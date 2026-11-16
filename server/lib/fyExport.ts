@@ -1,5 +1,5 @@
 import type { Response } from "express";
-import { and, eq, gte, lt, isNull } from "drizzle-orm";
+import { and, eq, gte, lt, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { payments, paymentRefunds, bills, iutTransfers, cabfAssistanceRequests, users, events } from "../../schema/index.js";
 
@@ -53,7 +53,7 @@ export async function streamFyCsv(
 
   // ─── 1. Payments ─────────────────────────────────────────────────────
   res.write("\n# section: payments\n");
-  res.write(csvRow(["payment_id", "date", "amount_rupees", "purpose", "ref_type", "payer_name", "razorpay_payment_id"]));
+  res.write(csvRow(["payment_id", "date", "amount_rupees", "purpose", "ref_type", "payer_name", "gateway_txn_id"]));
   const paymentRows = await db
     .select({
       id: payments.id,
@@ -62,7 +62,7 @@ export async function streamFyCsv(
       purpose: payments.purpose,
       ref_type: payments.ref_type,
       payer_name: users.name,
-      razorpay_payment_id: payments.razorpay_payment_id,
+      gateway_txn_id: sql<string | null>`coalesce(${payments.sabpaisa_txn_id}, ${payments.razorpay_payment_id})`,
     })
     .from(payments)
     .leftJoin(users, eq(users.id, payments.payer_user_id))
@@ -80,7 +80,7 @@ export async function streamFyCsv(
       r.purpose ?? "",
       r.ref_type ?? "",
       r.payer_name ?? "",
-      r.razorpay_payment_id ?? "",
+      r.gateway_txn_id ?? "",
     ]));
   }
 

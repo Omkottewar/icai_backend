@@ -9,7 +9,7 @@ import { vendors, expenseCategories } from "./vendorsAndCategories";
 //
 // Post-event bills + standalone branch operational bills. Replaces the
 // abandoned `invoices` table (dropped in migration 0015) with a workflow-
-// oriented design rather than a Razorpay-receipt mirror.
+// oriented design rather than a gateway-receipt mirror.
 //
 // Workflow:
 //   accountant records   → status='draft' or 'submitted'

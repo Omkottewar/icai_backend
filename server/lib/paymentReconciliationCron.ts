@@ -1,31 +1,18 @@
-// Reconciliation cron for stuck payment rows (Razorpay OR SabPaisa).
+// Reconciliation cron for stuck SabPaisa payment rows.
 //
-// Both the browser handler (Razorpay /verify, SabPaisa /return) and the
-// server-to-server webhook can resolve a payment. If both fail — user
-// closes tab before the verify call lands AND the gateway's webhook
-// retries get dropped (network partition, our server down past the
-// retry budget) — the row stays `pending` forever. User's money went
-// through on the gateway; our DB thinks it never resolved; no
-// registration created.
-//
-// This cron catches those rows: every 30 min it picks payments stuck in
-// `pending` for more than 1 hour, polls the ORIGINAL provider's enquiry
-// API (chosen per row via payments.provider — Razorpay for 'razorpay'
-// rows, SabPaisa for 'sabpaisa' rows), and routes the outcome through
-// the existing confirm / fail helpers. Both target functions are
-// idempotent, so a late webhook arriving after reconciliation already
-// fixed the row is harmless.
-//
-// Same tick-based pattern as jobAlertsCron.ts and escalations.ts so ops
-// don't juggle multiple cron systems.
+// If the SabPaisa callback never reaches us (user closed the tab, network
+// drop), a row can stay `pending` although the money went through. Every
+// 30 min this picks SabPaisa rows pending for over an hour, checks them
+// with SabPaisa's Transaction Enquiry API (one at a time, as the docs
+// require) and confirms or fails them. confirm/fail are idempotent, so a
+// late callback after reconciliation is harmless.
 
-import { and, eq, isNull, or, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { payments } from "../../schema/index.js";
-import { verifyOrderOutcome } from "./razorpay/client.js";
 import { enquireTransaction, amountMatches } from "./sabpaisa/client.js";
 import { describeSabPaisa } from "./sabpaisa/types.js";
-import { confirmPaymentAndFulfil, markPaymentFailed } from "./razorpay/confirm.js";
+import { confirmPaymentAndFulfil, markPaymentFailed } from "./payments/confirm.js";
 
 const TICK_MS = 30 * 60 * 1000;              // every 30 minutes
 const STALE_AFTER_MINUTES = 60;              // only touch rows older than 1 hour
@@ -41,7 +28,6 @@ export async function reconcileStuckPayments(): Promise<{ checked: number; confi
     .select({
       id: payments.id,
       provider: payments.provider,
-      razorpay_order_id: payments.razorpay_order_id,
       client_txn_id:     payments.client_txn_id,
       amount_paise:      payments.amount_paise,
       created_at:        payments.created_at,
@@ -51,13 +37,8 @@ export async function reconcileStuckPayments(): Promise<{ checked: number; confi
       eq(payments.status, "pending"),
       isNull(payments.deleted_at),
       sql`${payments.created_at} < now() - interval '${sql.raw(String(STALE_AFTER_MINUTES))} minutes'`,
-      // Only rows that actually reached a gateway — a row without a
-      // razorpay_order_id AND without a client_txn_id never made it past
-      // /initiate. Covers both providers in one predicate.
-      or(
-        sql`${payments.razorpay_order_id} IS NOT NULL`,
-        sql`${payments.client_txn_id} IS NOT NULL`,
-      )!,
+      eq(payments.provider, "sabpaisa"),
+      sql`${payments.client_txn_id} IS NOT NULL`,
     ))
     .limit(MAX_PER_TICK);
 
@@ -116,35 +97,6 @@ export async function reconcileStuckPayments(): Promise<{ checked: number; confi
         } else if (outcome === "not_found" && ageHours > 24) {
           // Never reached SabPaisa's checkout (404 from enquiry) for a day.
           await markPaymentFailed(row.id, "Reconciliation: transaction not found at SabPaisa");
-          failed++;
-        } else {
-          stillPending++;
-        }
-      } else {
-        // Default: Razorpay path (legacy + current-active rows).
-        if (!row.razorpay_order_id) {
-          stillPending++;
-          continue;
-        }
-        // verifyOrderOutcome throws on network failure — caught below as
-        // `errored` so the next tick retries. Don't flip to failed on an
-        // API hiccup.
-        const result = await verifyOrderOutcome(row.razorpay_order_id);
-
-        if (result.outcome === "success") {
-          if (result.payment?.id) {
-            await db.update(payments).set({
-              razorpay_payment_id: result.payment.id,
-              updated_at: new Date(),
-            }).where(eq(payments.id, row.id));
-          }
-          await confirmPaymentAndFulfil(row.id);
-          confirmed++;
-        } else if (result.outcome === "failed" || result.outcome === "aborted") {
-          const reason = result.payment?.error_description
-            ?? result.payment?.error_reason
-            ?? `Reconciliation: Razorpay reported ${result.outcome}`;
-          await markPaymentFailed(row.id, reason);
           failed++;
         } else {
           stillPending++;

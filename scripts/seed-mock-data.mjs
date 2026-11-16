@@ -1116,15 +1116,16 @@ async function seedPayments() {
     const [row] = await sql`
       INSERT INTO payments (
         payer_user_id, amount_paise, currency, status, purpose,
-        razorpay_order_id, razorpay_payment_id, metadata, created_at
+        provider, client_txn_id, sabpaisa_txn_id, metadata, created_at
       ) VALUES (
         ${payerId}, ${amount}, 'INR', ${status}, ${purpose},
-        ${`order_MOCK${randomUUID().replace(/-/g, "").slice(0, 14)}`},
-        ${status === "success" ? `pay_MOCK${randomUUID().replace(/-/g, "").slice(0, 14)}` : null},
+        'sabpaisa',
+        ${`MOCK${randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase()}`},
+        ${status === "success" ? `SPMOCK${randomUUID().replace(/-/g, "").slice(0, 14)}` : null},
         ${JSON.stringify({ mock_seed: true, note: `Seeded payment for ${purpose}` })},
         ${isoNDaysFromNow(-randInt(1, 400))}
       )
-      ON CONFLICT (razorpay_order_id) DO NOTHING
+      ON CONFLICT DO NOTHING
       RETURNING id
     `;
     if (row) { ctx.paymentIds.push(row.id); inserted++; }

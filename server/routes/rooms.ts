@@ -14,7 +14,7 @@
 //
 // Deposit (₹500 per O.2) is intentionally NOT collected here in v1 — the
 // branch policy collects it offline (cheque) and refunds the same way.
-// Wire Razorpay in a follow-up if/when the branch flips the policy.
+// Wire online payment in a follow-up if/when the branch flips the policy.
 //
 // Mounted at /api/rooms in server/index.ts.
 

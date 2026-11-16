@@ -47,7 +47,7 @@ treasurerAnalyticsAdminRouter.get("/", async (_req, res, next) => {
     //
     // Expected inflow    = registrations paid + registered on published
     //                       events starting in the next 30 days (approx —
-    //                       once Razorpay is wired to registrations this
+    //                       once payments are joined to registrations this
     //                       becomes exact via payments joined to events).
     const [outflowRow] = await db.select({
       committed_paise: sql<number>`COALESCE(SUM(${bills.amount_paise}), 0)::bigint`.as("committed_paise"),

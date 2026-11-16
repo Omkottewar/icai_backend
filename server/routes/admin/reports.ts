@@ -138,7 +138,7 @@ reportsAdminRouter.get("/payments-ledger.xlsx", async (req, res, next) => {
         amount_paise: payments.amount_paise,
         base_paise:   sql<number>`coalesce((${payments.metadata}->>'base_paise')::int, 0)`,
         gst_paise:    sql<number>`coalesce((${payments.metadata}->>'gst_paise')::int, 0)`,
-        upi_utr:      sql<string>`coalesce(${payments.razorpay_payment_id}, ${payments.upi_utr})`,
+        upi_utr:      sql<string>`coalesce(${payments.sabpaisa_txn_id}, ${payments.razorpay_payment_id}, ${payments.upi_utr})`,
         verified_at:  payments.verified_at,
         event_title:  sql<string>`coalesce((${payments.metadata}->>'event_title'), '')`,
       })
@@ -237,9 +237,9 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         COALESCE((SELECT SUM(r.amount_paise) FROM payment_refunds r
                    WHERE r.payment_id = p.id AND r.status = 'processed'), 0)::int AS refunded_paise,
         p.metadata->>'needs_refund'            AS refund_flag,
-        p.razorpay_order_id,
-        p.razorpay_payment_id,
-        p.upi_utr,
+        COALESCE(p.sabpaisa_txn_id, p.razorpay_payment_id, p.upi_utr) AS gateway_ref,
+        p.client_txn_id,
+        p.sabpaisa_payment_mode AS payment_mode,
         p.verified_at,
         vu.name                                AS verified_by,
         p.rejected_reason,
@@ -259,7 +259,6 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
       r.purpose_label = PURPOSE_LABEL[r.purpose] ?? r.purpose;
       r.gst_rate = r.gst_rate == null ? null : Number(r.gst_rate);
       r.net_paise = r.status === "success" ? Number(r.total_paise) - Number(r.refunded_paise) : 0;
-      r.gateway_ref = r.razorpay_payment_id || r.upi_utr || null;
     }
 
     const seatRows = (await db.execute(sql`
@@ -275,7 +274,7 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         er.attended_at,
         p.id                        AS payment_id,
         p.status                    AS payment_status,
-        p.razorpay_payment_id,
+        COALESCE(p.sabpaisa_txn_id, p.razorpay_payment_id, p.upi_utr) AS gateway_ref,
         (p.amount_paise / GREATEST(COALESCE((p.metadata->>'seat_count')::int, 1), 1))::int AS paid_per_seat_paise
       FROM event_registrations er
       JOIN payments p              ON p.id = er.payment_id
@@ -297,12 +296,12 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         u.name                      AS payer,
         COALESCE(e.title, p.metadata->>'event_title', jp.title, '') AS item,
         p.amount_paise              AS payment_total_paise,
-        p.razorpay_payment_id,
+        COALESCE(p.sabpaisa_txn_id, p.razorpay_payment_id, p.upi_utr) AS gateway_ref,
         rq.name                     AS requested_by,
         ap.name                     AS approved_by,
         r.approved_at,
         r.processed_at,
-        r.razorpay_refund_id,
+        r.razorpay_refund_id        AS gateway_refund_id,
         r.notes
       FROM payment_refunds r
       JOIN payments p          ON p.id = r.payment_id
@@ -327,7 +326,7 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         total_paise: r.total_paise,
         refunded_paise: r.refunded_paise,
         owed_paise: Number(r.total_paise) - Number(r.refunded_paise),
-        razorpay_payment_id: r.razorpay_payment_id,
+        gateway_ref: r.gateway_ref,
         payment_id: r.payment_id,
       }));
 
@@ -411,9 +410,9 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         { header: "Refunded",          key: "refunded_paise",      kind: "currency" },
         { header: "Net (success − refunds)", key: "net_paise",     kind: "currency" },
         { header: "Refund flag",       key: "refund_flag",         kind: "text", width: 22 },
-        { header: "Razorpay payment / UTR", key: "gateway_ref",    kind: "text", width: 24 },
-        { header: "Razorpay order",    key: "razorpay_order_id",   kind: "text", width: 24 },
-        { header: "Gateway",           key: "provider",            kind: "text", width: 12 },
+        { header: "Gateway txn / UTR", key: "gateway_ref",         kind: "text", width: 24 },
+        { header: "Our txn ID",        key: "client_txn_id",       kind: "text", width: 24 },
+        { header: "Payment mode",      key: "payment_mode",        kind: "text", width: 14 },
         { header: "Verified at",       key: "verified_at",         kind: "datetime" },
         { header: "Verified by",       key: "verified_by",         kind: "text", width: 20 },
         { header: "Rejection reason",  key: "rejected_reason",     kind: "text", width: 28 },
@@ -438,7 +437,7 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         { header: "Attended at",    key: "attended_at",         kind: "datetime" },
         { header: "Paid per seat",  key: "paid_per_seat_paise", kind: "currency" },
         { header: "Payment status", key: "payment_status",      kind: "text", width: 14 },
-        { header: "Razorpay payment", key: "razorpay_payment_id", kind: "text", width: 24 },
+        { header: "Gateway txn", key: "gateway_ref", kind: "text", width: 24 },
         { header: "Payment ID",     key: "payment_id",          kind: "text", width: 38 },
       ],
       rows: seatRows,
@@ -459,8 +458,8 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         { header: "Approved by",    key: "approved_by",         kind: "text", width: 20 },
         { header: "Approved at",    key: "approved_at",         kind: "datetime" },
         { header: "Processed at",   key: "processed_at",        kind: "datetime" },
-        { header: "Razorpay refund", key: "razorpay_refund_id", kind: "text", width: 24 },
-        { header: "Razorpay payment", key: "razorpay_payment_id", kind: "text", width: 24 },
+        { header: "Gateway refund", key: "gateway_refund_id", kind: "text", width: 24 },
+        { header: "Gateway txn", key: "gateway_ref", kind: "text", width: 24 },
         { header: "Notes",          key: "notes",               kind: "text", width: 30 },
         { header: "Payment ID",     key: "payment_id",          kind: "text", width: 38 },
       ],
@@ -480,7 +479,7 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         { header: "Paid",           key: "total_paise",         kind: "currency" },
         { header: "Already refunded", key: "refunded_paise",    kind: "currency" },
         { header: "Still owed",     key: "owed_paise",          kind: "currency" },
-        { header: "Razorpay payment", key: "razorpay_payment_id", kind: "text", width: 24 },
+        { header: "Gateway txn", key: "gateway_ref", kind: "text", width: 24 },
         { header: "Payment ID",     key: "payment_id",          kind: "text", width: 38 },
       ],
       rows: owedRows,

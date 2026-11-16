@@ -93,15 +93,7 @@ app.use("/api/admin",              express.json({ limit: "150mb" }));
 app.use("/api/resources",          express.json({ limit: "25mb" }));
 app.use("/api/scholarships",       express.json({ limit: "25mb" }));
 app.use("/api/articleship-matches", express.json({ limit: "25mb" }));
-// Razorpay webhook signs the raw JSON body (X-Razorpay-Signature =
-// HMAC-SHA256(rawBody, webhook_secret)). We stash the raw buffer on
-// req.rawBody via the `verify` hook so the webhook handler can re-sign
-// and compare. Mounted BEFORE the global json parser so this specific
-// one wins for /api/payments and the signature-material isn't lost.
-app.use("/api/payments", express.json({
-  limit: "100kb",
-  verify: (req: any, _res, buf) => { req.rawBody = Buffer.from(buf); },
-}));
+app.use("/api/payments", express.json({ limit: "100kb" }));
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
@@ -215,15 +207,8 @@ app.use("/api/mentorship", mentorshipRouter);
 app.use("/api/articleship-matches", articleshipMatchesRouter);
 app.use("/api/scholarships", publicCache(300), scholarshipsRouter);
 app.use("/api/my-speaker-events", speakerEventsRouter);
-// Razorpay checkout is modal-based (no form POST back to our server), so
-// the Razorpay router only needs JSON — already parsed above with raw-body
-// capture for the webhook signature verifier. SabPaisa's hosted-page flow
-// POSTs form-encoded callbacks back to us, so the SabPaisa router mounts
-// its own urlencoded parser on /return + /webhook (route-level) while
-// /initiate still reads JSON from our own frontend. Both routers live
-// side-by-side so switching the active provider via PAYMENT_PROVIDER is a
-// zero-code-change env flip; historical rows always route to their original
-// provider's handler regardless of the current flag.
+// SabPaisa POSTs form-encoded callbacks, so its router mounts its own
+// urlencoded parser on /return + /webhook; everything else reads JSON.
 app.use("/api/payments/sabpaisa", sabpaisaPaymentsRouter);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/admin", adminRouter);
@@ -338,11 +323,8 @@ startPragyaanIngestCron();
 // fire inline from routes/employer.ts + routes/admin/jobs.ts.
 startJobAlertsCron();
 
-// Payment reconciliation — 30-minute tick that picks Razorpay payments
-// stuck in `pending` for over an hour, re-verifies them via the Orders API,
-// and routes the outcome through confirmPaymentAndFulfil / markPaymentFailed.
-// Prevents silent money loss when both /verify and /webhook fail to resolve
-// a row.
+// Payment reconciliation — 30-minute tick that checks SabPaisa payments
+// stuck in `pending` for over an hour via Transaction Enquiry.
 startPaymentReconciliationCron();
 
 // Boot-time notification system sanity check — confirms every template

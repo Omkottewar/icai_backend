@@ -178,7 +178,7 @@ sections.push(new Paragraph({ children: [new PageBreak()] }));
 // ─── EXECUTIVE SUMMARY ────────────────────────────────────────────────────
 sections.push(H1("1. Executive Summary"));
 sections.push(P(
-  "The current ICAI Nagpur Branch website (nagpuricai.org) is a static PHP-based brochure site built around 2015-2018, with limited interactivity, no member authentication, no functional online payments, and no mobile responsiveness. The new branch portal (icainagpur.in) is a modern Progressive Web App with 74+ pages, 26+ admin modules, AI-grounded knowledge assistant, real-time event chat, role-based access for 15 distinct branch roles, integrated Razorpay payments with GST, push notifications, and a fully admin-editable content system.",
+  "The current ICAI Nagpur Branch website (nagpuricai.org) is a static PHP-based brochure site built around 2015-2018, with limited interactivity, no member authentication, no functional online payments, and no mobile responsiveness. The new branch portal (icainagpur.in) is a modern Progressive Web App with 74+ pages, 26+ admin modules, AI-grounded knowledge assistant, real-time event chat, role-based access for 15 distinct branch roles, integrated SabPaisa payments with GST, push notifications, and a fully admin-editable content system.",
 ));
 sections.push(P(
   "This document maps every feature on both platforms across 8 functional categories. It identifies (a) gaps in the current site that the new portal closes, (b) entirely new capabilities the new portal introduces, and (c) anything from the current site that must be preserved in the migration.",
@@ -195,7 +195,7 @@ sections.push(statsTable([
   ["Admin pages / modules", "0 (no admin panel)", "31 admin pages, 26 backend modules"],
   ["Database tables", "0 (PHP forms only)", "32 schema modules, 59+ migrations"],
   ["Member authentication", "None", "Auth0 + MRN-gated signup"],
-  ["Online payment gateway", "Form only — pay offline", "Razorpay with GST split"],
+  ["Online payment gateway", "Form only — pay offline", "SabPaisa with GST split"],
   ["Push notifications", "None", "PWA web push (iOS/Android/Desktop)"],
   ["AI chatbot", "None", "Pragyaan RAG with 317 KB sources"],
   ["Event registration", "Link only, unclear backend", "Full flow with waitlist + payment"],
@@ -221,7 +221,7 @@ sections.push(comparisonTable([
   ["Audience filtering (Members / Students / Public)", "✗", "✓ Filter pills with ?audience= seedable URL", "New"],
   ["Online registration", "~ 'Register' link present, backend unclear", "✓ Full flow with capacity check, waitlist, payment", "Upgraded"],
   ["Waitlist with auto-promotion", "✗", "✓ Cancel-and-auto-promote with notification", "New"],
-  ["Event fees with GST", "✗ (offline payment only)", "✓ Razorpay + GST split persisted in payments.metadata", "New"],
+  ["Event fees with GST", "✗ (offline payment only)", "✓ SabPaisa + GST split persisted in payments.metadata", "New"],
   ["Recurring events", "✗", "✓ Daily/Weekly/Monthly RRULE with edit-this-or-future scope", "New"],
   ["Add to Google Calendar", "✗", "✓ One-click Google Calendar deep-link", "New"],
   ["iCal subscription feed", "✗", "✓ /api/events/my-calendar.ics with token", "New"],
@@ -247,7 +247,7 @@ sections.push(comparisonTable([
   ["CPE compliance tracker", "✗ External link to cpe.icai.org", "✓ 3-year structured/unstructured view in-portal", "New"],
   ["CPE certificate download", "✗", "✓ Auto-generated PDF, deterministic numbering", "New"],
   ["Saved papers / My Library", "✗", "✓ Bookmark & recall from journal/paper reader", "New"],
-  ["Annual branch fee payment", "~ Form only — pay offline", "✓ Razorpay integrated, real receipts", "Upgraded"],
+  ["Annual branch fee payment", "~ Form only — pay offline", "✓ SabPaisa integrated, real receipts", "Upgraded"],
   ["Birthday wishes display", "✓ Homepage widget (text only)", "✓ (optional — admin-editable site content slot)", "Maintained"],
   ["Past Chairman list", "✓ Static page", "✓ Through branchContent schema, structured data", "Upgraded"],
   ["Council Member listings", "✓ Static page", "✓ Same with photos + bios + contact options", "Upgraded"],
@@ -315,14 +315,14 @@ sections.push(comparisonTable([
 // F. Payments
 sections.push(H2("F. Payments & Finance"));
 sections.push(comparisonTable([
-  ["Online payment gateway", "✗ Form only — pay offline", "✓ Razorpay live integration", "New"],
-  ["Branch membership fee payment", "~ Form collection, offline pay", "✓ Razorpay + auto-receipt", "Upgraded"],
-  ["Event registration fee", "✗", "✓ Razorpay with GST split + waitlist refund logic", "New"],
+  ["Online payment gateway", "✗ Form only — pay offline", "✓ SabPaisa live integration", "New"],
+  ["Branch membership fee payment", "~ Form collection, offline pay", "✓ SabPaisa + auto-receipt", "Upgraded"],
+  ["Event registration fee", "✗", "✓ SabPaisa with GST split + waitlist refund logic", "New"],
   ["GST calculation & display", "✗", "✓ Admin-configurable percent, persisted in metadata", "New"],
   ["Payment receipt generation", "✗", "✓ Auto-emailed after payment", "New"],
   ["Refund management", "✗", "✓ Admin reconciliation page with refund history", "New"],
-  ["Payment audit log", "✗", "✓ Per-transaction trail with Razorpay reference", "New"],
-  ["Multiple payment methods (cards/UPI/netbanking)", "✗", "✓ All Razorpay methods enabled", "New"],
+  ["Payment audit log", "✗", "✓ Per-transaction trail with SabPaisa reference", "New"],
+  ["Multiple payment methods (cards/UPI/netbanking)", "✗", "✓ All SabPaisa methods enabled", "New"],
   ["IUT / inter-branch transfers", "✗", "✓ Schema scaffolded (admin UI pending)", "New (partial)"],
   ["Bill generation for events", "✗", "✓ Schema scaffolded with admin module", "New (partial)"],
 ]));
@@ -433,7 +433,7 @@ sections.push(H2("3.2 Member Portal (5,000+ Members)"));
   "\"My Library\" — saved papers, journals, presentations with one-click bookmark/recall",
   "Member services grid with deep-links to ICAI UDIN, CPE portal, COP services (with login-wall notice)",
   "Searchable member directory with name / MRN / city / firm filters",
-  "Online member fee payment via Razorpay with GST receipts",
+  "Online member fee payment via SabPaisa with GST receipts",
   "Online event registration with capacity check + waitlist auto-promotion",
   "Auto-generated CPE certificate PDF (A4 landscape, deterministic cert numbers)",
   "Google Calendar add-to-calendar deep-link (one click)",
@@ -486,7 +486,7 @@ sections.push(H2("3.4 Events & CPE Programmes"));
   "\"Edit this occurrence vs. edit future\" scope for recurring series",
   "Capacity tracking with auto-waitlist when full",
   "Waitlist auto-promotion on cancellation (oldest waitlister gets the spot + notification)",
-  "Razorpay payment integration for paid events",
+  "SabPaisa payment integration for paid events",
   "GST per-event configuration (admin checkbox + percent input, 0–28% range)",
   "GST split persisted in payment metadata for reconciliation",
   "Auto-receipt email after payment",
@@ -508,12 +508,12 @@ sections.push(H2("3.4 Events & CPE Programmes"));
 // ── 3.5 Payments & Financial ──────────────────────────────────────────────
 sections.push(H2("3.5 Payments & Financial Integration"));
 [
-  "Razorpay live integration (cards / UPI / netbanking / wallets / EMI)",
+  "SabPaisa live integration (cards / UPI / netbanking / wallets)",
   "GST-compliant tax calculation (base fee + GST = total, all stored separately)",
   "Branch GSTIN management via site settings",
   "Auto-emailed payment receipt after success",
   "Payments admin with 30-day summary cards (success / refunded / failed / total)",
-  "Per-payment detail drawer with Razorpay reference, metadata JSON, refund history",
+  "Per-payment detail drawer with SabPaisa reference, metadata JSON, refund history",
   "Refund management with reconciliation log",
   "Payment audit log linked to event_registrations + users",
   "Multiple payment methods accepted automatically (no per-method config)",
@@ -546,7 +546,7 @@ sections.push(H2("3.6 Admin Console (31 admin pages, role-based access)"));
   "Bookings admin (FIFO inbox: Requested / Confirmed / Completed / Cancelled with live counts)",
   "Postgres EXCLUDE-gist overlap protection on bookings",
   "CABF (Benevolent Fund) admin: 5-state pipeline + monthly CSV export",
-  "Payments admin (Razorpay reconciliation, 30-day summary, refund history)",
+  "Payments admin (SabPaisa reconciliation, 30-day summary, refund history)",
   "Grievances inbox (tabbed by status, 48h SLA badge, count badges)",
   "Grievance routing admin (subject → email map CRUD)",
   "Approvals workflow (cross-module — papers, articles, etc.)",
@@ -794,7 +794,7 @@ sections.push(H3("4.5 Operational"));
 [
   "Room booking with FIFO admin inbox and PostgreSQL EXCLUDE-gist overlap protection.",
   "CABF 5-state pipeline with monthly CSV export.",
-  "Razorpay payments with GST split and refund management.",
+  "SabPaisa payments with GST split and refund management.",
   "Combined Grievance/Contact/Suggestion form with 48h SLA escalation, ticket numbering, and audit log.",
   "Employer self-service portal for posting jobs and articleships.",
   "Branch metrics dashboard (Chairman/Treasurer) with Recharts visualisations.",

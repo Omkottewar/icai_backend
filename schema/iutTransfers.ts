@@ -6,7 +6,7 @@ import { files } from "./files";
 //
 // Inter-Unit Transfers — internal movements of money between branch accounts
 // or between the branch and ICAI HO / WIRC. Distinct from `payments` (which
-// covers customer-facing Razorpay transactions) and `bills` (which covers
+// covers customer-facing gateway transactions) and `bills` (which covers
 // vendor outflows).
 //
 // Most-common use cases identified with the client:

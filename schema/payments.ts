@@ -16,16 +16,11 @@ export const payments = pgTable("payments", {
   purpose:              paymentPurposeEnum("purpose").notNull(),
   ref_type:             text("ref_type"),    // e.g. event_registration
   ref_id:               uuid("ref_id"),      // polymorphic back-ref (app must maintain)
-  // `provider` labels which gateway/channel handled this row. The active
-  // gateway for a new row is decided at /initiate time by the
-  // PAYMENT_PROVIDER env var (see backend/server/lib/paymentProvider.ts) —
-  // supported values today: 'razorpay', 'sabpaisa'. Historical rows carry
-  // 'upi_manual' (migrations 0084/0085) or 'legacy' (pre-provider column).
-  provider:             text("provider").notNull().default("razorpay"),
-  // Razorpay integration columns. `razorpay_order_id` is the Order we open
-  // when initiating payment; `razorpay_payment_id` is Razorpay's payment id
-  // (captured on the browser handler or server-to-server webhook);
-  // `razorpay_signature` is the HMAC we verified on the handler payload.
+  // `provider` labels which gateway/channel handled this row. New rows are
+  // always 'sabpaisa'; older rows may carry earlier channel labels.
+  provider:             text("provider").notNull().default("sabpaisa"),
+  // Columns from the previous gateway. No code writes them any more; they
+  // are kept only so historical rows keep their reference ids.
   razorpay_order_id:    text("razorpay_order_id").unique(),
   razorpay_payment_id:  text("razorpay_payment_id"),
   razorpay_signature:   text("razorpay_signature"),
