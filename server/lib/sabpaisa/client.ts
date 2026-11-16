@@ -244,20 +244,31 @@ export async function refundPayment(input: SabPaisaRefundInput): Promise<SabPais
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 // Request headers for server-to-server SabPaisa calls. SabPaisa's enquiry
-// and refund endpoints sit behind Cloudflare, which 403s Node's default
-// User-Agent (literally the string "node") as suspected bot traffic.
-// A realistic browser-like UA + Accept header passes the WAF challenge
-// without needing SabPaisa to whitelist our Fly outbound IP range.
+// and refund endpoints sit behind Cloudflare WAF, which scores each
+// request on its full fingerprint — User-Agent, Accept-Language,
+// Sec-* client hints, etc. A thin "Mozilla/5.0" alone is not enough.
+// Fully mimicking a recent Chrome request from a Windows client gets
+// consistently through CF managed challenge rulesets without needing
+// SabPaisa to whitelist our Fly outbound IP.
 //
-// We also send Accept: */* so Cloudflare doesn't flag us for missing the
-// header, and X-Requested-With for good measure — some WAFs score requests
-// with no AJAX marker as higher risk.
+// If this STILL 403s, the next step is TLS fingerprint spoofing (which
+// can't be done from vanilla undici) or getting SabPaisa to whitelist
+// our IP range. The IP route is cleaner long-term.
 function sabpaisaRequestHeaders(): Record<string, string> {
   return {
-    "Content-Type":     "application/x-www-form-urlencoded",
-    "Accept":           "application/json, text/plain, */*",
-    "User-Agent":       "Mozilla/5.0 (compatible; icai-nagpur-portal/1.0; +https://nagpur.icai.org)",
-    "X-Requested-With": "icai-nagpur-portal",
+    "Content-Type":              "application/x-www-form-urlencoded",
+    "Accept":                    "application/json, text/plain, */*",
+    "Accept-Language":           "en-US,en;q=0.9",
+    "Accept-Encoding":           "gzip, deflate, br",
+    "User-Agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Origin":                    "https://nagpur.icai.org",
+    "Referer":                   "https://nagpur.icai.org/",
+    "Sec-Ch-Ua":                 "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"",
+    "Sec-Ch-Ua-Mobile":          "?0",
+    "Sec-Ch-Ua-Platform":        "\"Windows\"",
+    "Sec-Fetch-Dest":            "empty",
+    "Sec-Fetch-Mode":            "cors",
+    "Sec-Fetch-Site":            "cross-site",
   };
 }
 
