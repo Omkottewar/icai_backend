@@ -41,6 +41,7 @@ import {
 } from "../lib/razorpay/client.js";
 import { razorpayConfig } from "../lib/razorpay/config.js";
 import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/razorpay/confirm.js";
+import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
 
 export const paymentsRouter = Router();
 
@@ -67,6 +68,45 @@ paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: A
     const payerEmail = String(metadata.payer_email ?? req.user!.email ?? "");
     const payerPhone = String(metadata.payer_phone ?? "");
 
+    // Row-provider-aware re-initiate. A SabPaisa row must retry via
+    // SabPaisa even if PAYMENT_PROVIDER has since flipped to razorpay —
+    // the original attempt's client_txn_id already exists on SabPaisa's
+    // side and the user expects to see the same gateway on retry.
+    if (payment.provider === "sabpaisa") {
+      let built;
+      try {
+        built = buildSabpaisaInit({
+          payment_id:   payment.id,
+          amountRupees: spPaiseToRupees(payment.amount_paise),
+          payerName,
+          payerEmail,
+          payerPhone,
+          notes: {
+            purpose: payment.purpose,
+            ref_id:  payment.ref_id ?? "",
+          },
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
+      }
+
+      await db.update(payments).set({
+        client_txn_id: built.clientTxnId,
+        status:        "pending",
+        updated_at:    new Date(),
+      }).where(eq(payments.id, payment.id));
+
+      return res.json({
+        provider:   "sabpaisa",
+        action:     built.redirect.action,
+        clientCode: built.redirect.clientCode,
+        encData:    built.redirect.encData,
+        amount_paise: payment.amount_paise,
+        currency:   "INR",
+      });
+    }
+
     let order;
     try {
       order = await createOrder({
@@ -91,6 +131,7 @@ paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: A
     }).where(eq(payments.id, payment.id));
 
     return res.json({
+      provider:     "razorpay",
       key_id:       razorpayConfig().keyId,
       order_id:     order.id,
       amount_paise: payment.amount_paise,
@@ -282,8 +323,12 @@ paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, n
       amount_paise: payments.amount_paise,
       purpose: payments.purpose,
       ref_id: payments.ref_id,
+      provider: payments.provider,
       razorpay_order_id:   payments.razorpay_order_id,
       razorpay_payment_id: payments.razorpay_payment_id,
+      client_txn_id:       payments.client_txn_id,
+      sabpaisa_txn_id:     payments.sabpaisa_txn_id,
+      sabpaisa_payment_mode: payments.sabpaisa_payment_mode,
       rejected_reason: payments.rejected_reason,
       metadata: payments.metadata,
       updated_at: payments.updated_at,

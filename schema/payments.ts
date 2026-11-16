@@ -16,8 +16,11 @@ export const payments = pgTable("payments", {
   purpose:              paymentPurposeEnum("purpose").notNull(),
   ref_type:             text("ref_type"),    // e.g. event_registration
   ref_id:               uuid("ref_id"),      // polymorphic back-ref (app must maintain)
-  // `provider` labels which gateway/channel handled this row. New paid
-  // flows go through Razorpay; `upi_manual` exists only on historical rows.
+  // `provider` labels which gateway/channel handled this row. The active
+  // gateway for a new row is decided at /initiate time by the
+  // PAYMENT_PROVIDER env var (see backend/server/lib/paymentProvider.ts) —
+  // supported values today: 'razorpay', 'sabpaisa'. Historical rows carry
+  // 'upi_manual' (migrations 0084/0085) or 'legacy' (pre-provider column).
   provider:             text("provider").notNull().default("razorpay"),
   // Razorpay integration columns. `razorpay_order_id` is the Order we open
   // when initiating payment; `razorpay_payment_id` is Razorpay's payment id
@@ -26,9 +29,25 @@ export const payments = pgTable("payments", {
   razorpay_order_id:    text("razorpay_order_id").unique(),
   razorpay_payment_id:  text("razorpay_payment_id"),
   razorpay_signature:   text("razorpay_signature"),
+  // SabPaisa integration columns (re-added in migration 0105 for dual-
+  // provider support). `client_txn_id` is OUR generated reference echoed
+  // back by SabPaisa on every callback/webhook so we can correlate without
+  // trusting their id; `sabpaisa_txn_id` is their internal id. All nullable
+  // because they're only populated once SabPaisa responds. Unique partial
+  // indexes on client_txn_id + sabpaisa_txn_id are enforced in-DB.
+  client_txn_id:         text("client_txn_id"),
+  sabpaisa_txn_id:       text("sabpaisa_txn_id"),
+  sabpaisa_status_code:  text("sabpaisa_status_code"),
+  sabpaisa_payment_mode: text("sabpaisa_payment_mode"),
+  sabpaisa_bank_name:    text("sabpaisa_bank_name"),
+  sabpaisa_bank_txn_id:  text("sabpaisa_bank_txn_id"),
+  sabpaisa_response:     jsonb("sabpaisa_response").notNull().default({}),
+  return_received_at:    timestamp("return_received_at",   { withTimezone: true }),
+  webhook_received_at:   timestamp("webhook_received_at",  { withTimezone: true }),
+  last_verified_at:      timestamp("last_verified_at",     { withTimezone: true }),
   // UPI QR verification fields — populated only on `provider = 'upi_manual'`
   // rows (migrations 0084/0085). Admin approve/reject still works on those
-  // historical rows via the pending-verification queue; new Razorpay rows
+  // historical rows via the pending-verification queue; new gateway rows
   // never land there.
   upi_utr:                text("upi_utr"),
   upi_screenshot_file_id: uuid("upi_screenshot_file_id").references(() => files.id, { onDelete: "set null" }),

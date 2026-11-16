@@ -10,6 +10,8 @@ import { streamCertificate } from "../lib/certificates.js";
 import { buildCalendar } from "../lib/ical.js";
 import { createOrder } from "../lib/razorpay/client.js";
 import { razorpayConfig } from "../lib/razorpay/config.js";
+import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
+import { activePaymentProvider } from "../lib/paymentProvider.js";
 import { createHmac } from "node:crypto";
 import { memberProfiles } from "../../schema/index.js";
 
@@ -230,13 +232,13 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
       });
     }
 
-    // ── Paid event: Razorpay Checkout modal ───────────────────────────
+    // ── Paid event: hand off to the active payment gateway ────────────
     // We DON'T create the registration row yet — that happens in
-    // razorpay/confirm.ts once Razorpay confirms payment via the
-    // signature-verify / webhook path. The payment row is the durable
-    // handle: user gets its id + the Razorpay order payload, the modal
-    // opens in-page, they pay, our handler fires /verify, we create the
-    // registration.
+    // confirm.ts once the gateway (Razorpay OR SabPaisa, per
+    // PAYMENT_PROVIDER env var) confirms payment via the verify/return
+    // path or the webhook. The payment row is the durable handle:
+    // frontend inspects the response for `razorpay`/`sabpaisa` keys and
+    // opens the matching flow (Checkout.js modal vs hosted-page auto-POST).
     //
     // GST (H.20): when gst_applicable is true, the fee shown to the user
     // is base + GST. We store both numbers in payment.metadata so the
@@ -249,12 +251,14 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
     const perSeatTotal = perSeatBase + perSeatGst;
     const totalPaise = perSeatTotal * totalSeats;
 
+    const provider = activePaymentProvider();
+
     const [payment] = await db.insert(payments).values({
       payer_user_id: user.id,
       amount_paise: totalPaise,
       currency: "INR",
       status: "pending",
-      provider: "razorpay",
+      provider,
       purpose: "event_registration",
       ref_type: "event",
       ref_id: event.id,
@@ -267,16 +271,74 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
         gst_paise: perSeatGst * totalSeats,
         seat_count: totalSeats,
         // Payer details stashed so /api/payments/initiate can re-build the
-        // Razorpay prefill without a user table re-fetch on re-initiate.
+        // gateway prefill without a user table re-fetch on re-initiate.
         payer_name:  user.name,
         payer_email: user.email,
         payer_phone: phone || user.phone || "",
-        // Attendee ids stashed so razorpay/confirm.ts can create one
+        // Attendee ids stashed so confirm.ts can create one
         // event_registrations row per attendee. NULL/empty means self-only.
         attendee_user_ids: attendeeUsers.map((a) => a.id),
       },
     }).returning();
 
+    // Common fields for both provider response shapes. The frontend
+    // discriminates on the presence of `razorpay` vs `sabpaisa` keys.
+    const commonResponse = {
+      paid: true,
+      payment_id: payment.id,
+      amount_paise: totalPaise,
+      base_paise: perSeatBase * totalSeats,
+      gst_paise: perSeatGst * totalSeats,
+      gst_applicable: event.gst_applicable,
+      gst_percent: gstRate,
+      currency: "INR",
+      seat_count: totalSeats,
+      per_seat_paise: perSeatTotal,
+      attendees: attendeeUsers,
+      provider,
+      event: { title: event.title, slug: event.slug },
+    };
+
+    if (provider === "sabpaisa") {
+      let built;
+      try {
+        built = buildSabpaisaInit({
+          payment_id:   payment.id,
+          amountRupees: spPaiseToRupees(totalPaise),
+          payerName:    user.name  ?? "",
+          payerEmail:   user.email ?? "",
+          payerPhone:   phone || user.phone || "",
+          notes: {
+            purpose:    "event_registration",
+            ref_id:     event.id,
+            event_slug: event.slug,
+          },
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
+      }
+
+      await db.update(payments).set({
+        client_txn_id: built.clientTxnId,
+        updated_at:    new Date(),
+      }).where(eq(payments.id, payment.id));
+
+      return res.status(200).json({
+        ...commonResponse,
+        // SabPaisa hosted-page payload — frontend builds a hidden form
+        // with these three fields and auto-submits to `action`.
+        sabpaisa: {
+          action:       built.redirect.action,
+          clientCode:   built.redirect.clientCode,
+          encData:      built.redirect.encData,
+          amount_paise: totalPaise,
+          currency:     "INR",
+        },
+      });
+    }
+
+    // Default branch: Razorpay Checkout modal.
     let order;
     try {
       order = await createOrder({
@@ -290,8 +352,6 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
         },
       });
     } catch (e) {
-      // Missing RAZORPAY_* env var or Razorpay API error → surface a
-      // clean 503 instead of a 500.
       const msg = e instanceof Error ? e.message : String(e);
       throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
     }
@@ -302,17 +362,7 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
     }).where(eq(payments.id, payment.id));
 
     return res.status(200).json({
-      paid: true,
-      payment_id: payment.id,
-      amount_paise: totalPaise,
-      base_paise: perSeatBase * totalSeats,
-      gst_paise: perSeatGst * totalSeats,
-      gst_applicable: event.gst_applicable,
-      gst_percent: gstRate,
-      currency: "INR",
-      seat_count: totalSeats,
-      per_seat_paise: perSeatTotal,
-      attendees: attendeeUsers,          // [{ id, name, email }, ...]
+      ...commonResponse,
       // Razorpay Checkout payload — frontend loads checkout.razorpay.com's
       // script and opens the modal with these fields.
       razorpay: {
@@ -326,7 +376,6 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
           contact: phone || user.phone || "",
         },
       },
-      event: { title: event.title, slug: event.slug },
     });
   } catch (err) { handleApiError(err, res, next); }
 });

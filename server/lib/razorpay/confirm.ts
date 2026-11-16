@@ -261,13 +261,21 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
     // doesn't need a second round-trip. Null name/email are tolerated by
     // the template's render step (unknown vars become empty string).
     const metadataForPayer = (payment.metadata ?? {}) as { payer_name?: string; payer_email?: string };
+    // gateway_txn_id for the treasurer's sold-out notification — surface
+    // whichever provider's id the row carries. The template uses the
+    // provider-neutral `{{gateway_txn_id}}` var (see migration 0103 step 5)
+    // so adding a new gateway later just means another branch here.
+    const gatewayTxnId =
+      payment.provider === "sabpaisa"
+        ? (payment.sabpaisa_txn_id ?? payment.client_txn_id ?? null)
+        : (payment.razorpay_payment_id ?? null);
     const payerSummary = willBeFull ? {
       payment_id:      payment.id,
       payer_user_id:   bookerId,
       payer_name:      metadataForPayer.payer_name ?? "",
       payer_email:     metadataForPayer.payer_email ?? "",
       amount_paise:    payment.amount_paise,
-      gateway_txn_id:  payment.razorpay_payment_id ?? null,
+      gateway_txn_id:  gatewayTxnId,
     } : null;
 
     return {

@@ -20,6 +20,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import { join } from "node:path";
 import { authRouter } from "./routes/auth.js";
+import { SESSION_COOKIE } from "./auth/jwt.js";
 import { onboardingRouter } from "./routes/onboarding.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { adminRouter } from "./routes/admin/index.js";
@@ -63,6 +64,7 @@ import { articleshipMatchesRouter } from "./routes/articleshipMatches.js";
 import { scholarshipsRouter } from "./routes/scholarships.js";
 import { speakerEventsRouter } from "./routes/speakerEvents.js";
 import { paymentsRouter } from "./routes/payments.js";
+import { sabpaisaPaymentsRouter } from "./routes/payments-sabpaisa.js";
 
 const app = express();
 
@@ -122,9 +124,16 @@ app.use("/uploads", express.static(join(process.cwd(), "uploads"), {
 function publicCache(maxAgeSec: number, swrSec = Math.max(300, maxAgeSec * 5)) {
   return (req: import("express").Request, res: import("express").Response, next: import("express").NextFunction) => {
     if (req.method !== "GET") return next();
+    // Never edge-cache a request that carries credentials — either the
+    // session cookie (web) or a Bearer token (mobile / API clients).
+    // NOTE: the old check used /\bsession=/, which never matched the real
+    // cookie name "icai_session" (\b doesn't fire between "_" and "s"), so
+    // signed-in responses were being marked public.
     const cookieHeader = req.headers.cookie ?? "";
-    const hasAuthCookie = /\bsession=/.test(cookieHeader) || /\baccess_token=/.test(cookieHeader);
-    if (hasAuthCookie) return next();
+    const hasAuthCookie =
+      new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=`).test(cookieHeader) ||
+      /(?:^|;\s*)access_token=/.test(cookieHeader);
+    if (hasAuthCookie || req.headers.authorization) return next();
     res.setHeader("Cache-Control", `public, max-age=0, s-maxage=${maxAgeSec}, stale-while-revalidate=${swrSec}`);
     res.setHeader("Vary", "Cookie, Accept-Encoding");
     next();
@@ -178,7 +187,21 @@ app.use("/api/checklist-tasks", checklistTasksRouter);
 // serves all five entities — endpoints are scoped under sub-paths like
 // /paper-presentations, /gallery-albums, /newsletters, /office-bearers,
 // /annual-reports. All are public + static-ish, perfect cache candidates.
-app.use("/api", publicCache(300), branchContentRouter);
+// publicCache is scoped to this router's own paths. Mounting it on bare
+// "/api" made it run for EVERY later /api route (admin, payments,
+// grievances…) because branchContentRouter falls through on no match.
+app.use(
+  [
+    "/api/annual-reports",
+    "/api/gallery-albums",
+    "/api/gallery-videos",
+    "/api/newsletters",
+    "/api/office-bearers",
+    "/api/paper-presentations",
+  ],
+  publicCache(300),
+);
+app.use("/api", branchContentRouter);
 // Section L (Resources) — papers, e-journal, topics, bookmarks, comments,
 // quizzes. Lives under /api/resources/... so it doesn't collide with the
 // older /paper-presentations endpoint. publicCache safely wraps mixed
@@ -193,8 +216,15 @@ app.use("/api/articleship-matches", articleshipMatchesRouter);
 app.use("/api/scholarships", publicCache(300), scholarshipsRouter);
 app.use("/api/my-speaker-events", speakerEventsRouter);
 // Razorpay checkout is modal-based (no form POST back to our server), so
-// the payments router only needs JSON — already parsed above with raw-body
-// capture for the webhook signature verifier.
+// the Razorpay router only needs JSON — already parsed above with raw-body
+// capture for the webhook signature verifier. SabPaisa's hosted-page flow
+// POSTs form-encoded callbacks back to us, so the SabPaisa router mounts
+// its own urlencoded parser on /return + /webhook (route-level) while
+// /initiate still reads JSON from our own frontend. Both routers live
+// side-by-side so switching the active provider via PAYMENT_PROVIDER is a
+// zero-code-change env flip; historical rows always route to their original
+// provider's handler regardless of the current flag.
+app.use("/api/payments/sabpaisa", sabpaisaPaymentsRouter);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/admin", adminRouter);
 

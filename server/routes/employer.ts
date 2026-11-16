@@ -13,6 +13,8 @@ import { storage } from "../lib/storage.js";
 import { JOB_POSTING_FEE_PAISE } from "../lib/jobPostingFees.js";
 import { createOrder } from "../lib/razorpay/client.js";
 import { razorpayConfig } from "../lib/razorpay/config.js";
+import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
+import { activePaymentProvider } from "../lib/paymentProvider.js";
 
 export const employerRouter = Router();
 
@@ -236,6 +238,8 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
     const parsed = parsePostingBody(req.body);
     const feePaise = JOB_POSTING_FEE_PAISE[parsed.type];
 
+    const provider = activePaymentProvider();
+
     // Both inserts happen in one txn so a crash between them doesn't leave
     // an orphaned posting with no payment or vice versa.
     const { posting, payment } = await db.transaction(async (tx) => {
@@ -252,7 +256,7 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
         amount_paise:  feePaise,
         currency:      "INR",
         status:        "pending",
-        provider:      "razorpay",
+        provider,
         purpose:       "job_posting",
         ref_type:      "job_posting",
         ref_id:        posting.id,
@@ -275,6 +279,49 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
       return { posting, payment };
     });
 
+    if (provider === "sabpaisa") {
+      let built;
+      try {
+        built = buildSabpaisaInit({
+          payment_id:   payment.id,
+          amountRupees: spPaiseToRupees(feePaise),
+          payerName:    req.user!.name  ?? "",
+          payerEmail:   req.user!.email ?? "",
+          payerPhone:   req.user!.phone ?? "",
+          notes: {
+            purpose:      "job_posting",
+            ref_id:       posting.id,
+            posting_type: posting.type,
+          },
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new ApiError(503, `Online payments are not configured yet (${msg}). Please contact the branch office.`);
+      }
+
+      await db.update(payments).set({
+        client_txn_id: built.clientTxnId,
+        updated_at:    new Date(),
+      }).where(eq(payments.id, payment.id));
+
+      return res.json({
+        item: posting,
+        payment: {
+          payment_id:   payment.id,
+          amount_paise: feePaise,
+          provider,
+          sabpaisa: {
+            action:       built.redirect.action,
+            clientCode:   built.redirect.clientCode,
+            encData:      built.redirect.encData,
+            amount_paise: feePaise,
+            currency:     "INR",
+          },
+        },
+      });
+    }
+
+    // Default branch: Razorpay Checkout modal.
     let order;
     try {
       order = await createOrder({
@@ -302,6 +349,7 @@ employerRouter.post("/postings", sameOrigin, async (req: EmployerRequest, res, n
       payment: {
         payment_id:   payment.id,
         amount_paise: feePaise,
+        provider,
         razorpay: {
           key_id:       razorpayConfig().keyId,
           order_id:     order.id,
@@ -343,12 +391,14 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
 
     const feePaise = posting.fee_paise > 0 ? posting.fee_paise : JOB_POSTING_FEE_PAISE[posting.type as "job" | "articleship" | "assignment"];
 
+    const provider = activePaymentProvider();
+
     const [payment] = await db.insert(payments).values({
       payer_user_id: req.user!.id,
       amount_paise:  feePaise,
       currency:      "INR",
       status:        "pending",
-      provider:      "razorpay",
+      provider,
       purpose:       "job_posting",
       ref_type:      "job_posting",
       ref_id:        posting.id,
@@ -363,6 +413,53 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
       },
     }).returning();
 
+    if (provider === "sabpaisa") {
+      let built;
+      try {
+        built = buildSabpaisaInit({
+          payment_id:   payment.id,
+          amountRupees: spPaiseToRupees(feePaise),
+          payerName:    req.user!.name  ?? "",
+          payerEmail:   req.user!.email ?? "",
+          payerPhone:   req.user!.phone ?? "",
+          notes: {
+            purpose:      "job_posting",
+            ref_id:       posting.id,
+            posting_type: posting.type,
+          },
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new ApiError(503, `Online payments are not configured yet (${msg}).`);
+      }
+
+      await db.update(payments).set({
+        client_txn_id: built.clientTxnId,
+        updated_at:    new Date(),
+      }).where(eq(payments.id, payment.id));
+
+      // Repoint the posting at the fresh payment so confirmation lands on
+      // the right row. We keep the old payment row (status probably 'failed'
+      // or still 'pending') for audit — don't delete it.
+      await db.update(jobPostings)
+        .set({ payment_id: payment.id, updated_at: new Date() })
+        .where(eq(jobPostings.id, posting.id));
+
+      return res.json({
+        payment_id:   payment.id,
+        amount_paise: feePaise,
+        provider,
+        sabpaisa: {
+          action:       built.redirect.action,
+          clientCode:   built.redirect.clientCode,
+          encData:      built.redirect.encData,
+          amount_paise: feePaise,
+          currency:     "INR",
+        },
+      });
+    }
+
+    // Default branch: Razorpay Checkout modal.
     let order;
     try {
       order = await createOrder({
@@ -385,9 +482,6 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
       updated_at: new Date(),
     }).where(eq(payments.id, payment.id));
 
-    // Repoint the posting at the fresh payment so confirmation lands on
-    // the right row. We keep the old payment row (status probably 'failed'
-    // or still 'pending') for audit — don't delete it.
     await db.update(jobPostings)
       .set({ payment_id: payment.id, updated_at: new Date() })
       .where(eq(jobPostings.id, posting.id));
@@ -395,6 +489,7 @@ employerRouter.post("/postings/:id/pay", sameOrigin, async (req: EmployerRequest
     res.json({
       payment_id:   payment.id,
       amount_paise: feePaise,
+      provider,
       razorpay: {
         key_id:       razorpayConfig().keyId,
         order_id:     order.id,
