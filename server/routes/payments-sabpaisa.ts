@@ -89,9 +89,10 @@ sabpaisaPaymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async
 type CallbackResult = { status: "success" | "failed" | "pending"; paymentId: string | null; note?: string };
 
 function readEncResponse(req: Request): string {
-  const fromBody  = (req.body as Record<string, unknown> | undefined)?.encResponse;
-  const fromQuery = (req.query as Record<string, unknown>)?.encResponse;
-  return String(fromBody ?? fromQuery ?? "").trim();
+  // SabPaisa names the field `encResponse`; older kits used `encData`.
+  const body  = (req.body ?? {}) as Record<string, unknown>;
+  const query = (req.query ?? {}) as Record<string, unknown>;
+  return String(body.encResponse ?? body.encData ?? query.encResponse ?? query.encData ?? "").trim();
 }
 
 async function handleSabPaisaResponse(encResponse: string, source: "return" | "webhook"): Promise<CallbackResult> {
@@ -121,7 +122,7 @@ async function handleSabPaisaResponse(encResponse: string, source: "return" | "w
   const isCurrentAttempt = !payment.client_txn_id || payment.client_txn_id === clientTxnId;
 
   let response: SabPaisaResponse = parsed;
-  let outcome = mapSabPaisaStatus(parsed.statusCode);
+  let outcome = mapSabPaisaStatus(parsed.statusCode, parsed.status);
 
   // Docs: 0999 (unknown) → confirm with Transaction Enquiry.
   if (outcome === "unknown" && clientTxnId) {

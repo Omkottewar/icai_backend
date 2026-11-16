@@ -43,6 +43,7 @@ export function buildInitRedirect(input: BuildInitInput): { redirect: SabPaisaIn
     ["callbackUrl",       cfg.callbackUrl],
     ["channelId",         "W"],
     ["mcc",               cfg.mcc],
+    ["payerAddress",      "ICAI Nagpur Branch"],
     ["transDate",         istTimestamp(new Date())],
     ["amountType",        "INR"],
     ["udf1",              clean(input.payment_id, 100)],
@@ -51,12 +52,16 @@ export function buildInitRedirect(input: BuildInitInput): { redirect: SabPaisaIn
     ["udf4",              clean(input.notes?.event_slug ?? input.notes?.posting_type ?? "", 100)],
   ];
 
-  const plaintext = fields.map(([k, v]) => `${k}=${v}`).join("&");
+  // AES-256 (docs): raw '&'-joined string. AES-128 keys: URL-encoded
+  // values, exactly as the integration that worked before.
+  const plaintext = cfg.scheme === "legacy-aes128"
+    ? fields.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&")
+    : fields.map(([k, v]) => `${k}=${v}`).join("&");
   return {
     redirect: {
       action:     cfg.initUrl,
       clientCode: cfg.clientCode,
-      encData:    sabpaisaEncrypt(plaintext, cfg.authKey, cfg.authIv),
+      encData:    sabpaisaEncrypt(plaintext, cfg.authKey, cfg.authIv, "checkout"),
     },
     clientTxnId,
   };
@@ -69,7 +74,7 @@ export function parseEncResponse(encResponse: string): SabPaisaResponse | null {
   try {
     const cfg = sabpaisaConfig();
     // Query-string delivery can turn '+' into ' '; harmless for hex.
-    return parseFields(sabpaisaDecrypt(encResponse.replace(/\s/g, ""), cfg.authKey, cfg.authIv));
+    return parseFields(sabpaisaDecrypt(encResponse, cfg.authKey, cfg.authIv));
   } catch {
     return null;
   }
@@ -80,7 +85,7 @@ export async function enquireTransaction(clientTxnId: string): Promise<{ outcome
   const cfg = sabpaisaConfig();
   const statusTransEncData = sabpaisaEncrypt(
     `clientCode=${cfg.clientCode}&clientTxnId=${clientTxnId}`,
-    cfg.authKey, cfg.authIv,
+    cfg.authKey, cfg.authIv, "api",
   );
 
   const res = await fetch(cfg.enquiryUrl, {
@@ -91,12 +96,13 @@ export async function enquireTransaction(clientTxnId: string): Promise<{ outcome
   const text = await res.text();
   if (!res.ok) throw new Error(`SabPaisa enquiry HTTP ${res.status}: ${text.slice(0, 300)}`);
 
-  let json: { statusResponseData?: string } = {};
+  let json: { statusResponseData?: string; data?: { statusResponseData?: string } } = {};
   try { json = JSON.parse(text); } catch { throw new Error(`SabPaisa enquiry: non-JSON response: ${text.slice(0, 300)}`); }
-  if (!json.statusResponseData) return { outcome: "unknown", response: null };
+  const enc = json.statusResponseData ?? json.data?.statusResponseData;
+  if (!enc) return { outcome: "unknown", response: null };
 
-  const response = parseFields(sabpaisaDecrypt(json.statusResponseData, cfg.authKey, cfg.authIv));
-  return { outcome: mapSabPaisaStatus(response.statusCode), response };
+  const response = parseFields(sabpaisaDecrypt(enc, cfg.authKey, cfg.authIv));
+  return { outcome: mapSabPaisaStatus(response.statusCode, response.status), response };
 }
 
 // ─── 4. Refund ────────────────────────────────────────────────────────────
@@ -126,7 +132,7 @@ export async function refundTransaction(input: SabPaisaRefundInput): Promise<Sab
   const res = await fetch(cfg.refundUrl, {
     method:  "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body:    JSON.stringify({ clientCode: cfg.clientCode, refundQuery: sabpaisaEncrypt(plain, cfg.authKey, cfg.authIv) }),
+    body:    JSON.stringify({ clientCode: cfg.clientCode, refundQuery: sabpaisaEncrypt(plain, cfg.authKey, cfg.authIv, "api") }),
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`SabPaisa refund HTTP ${res.status}: ${text.slice(0, 300)}`);
@@ -174,6 +180,10 @@ function mobile(s: string): string {
 }
 
 function parseFields(plaintext: string): SabPaisaResponse {
+  const trimmed = plaintext.trim();
+  if (trimmed.startsWith("{")) {
+    try { return normalise(JSON.parse(trimmed)); } catch { /* fall through */ }
+  }
   const out: SabPaisaResponse = {};
   for (const part of plaintext.split("&")) {
     if (!part) continue;
@@ -183,6 +193,12 @@ function parseFields(plaintext: string): SabPaisaResponse {
     try { v = decodeURIComponent(v.replace(/\+/g, " ")); } catch { /* keep raw */ }
     out[k] = v === "null" ? null : v;
   }
+  return normalise(out);
+}
+
+function normalise(o: Record<string, any>): SabPaisaResponse {
+  const out: SabPaisaResponse = {};
+  for (const [k, v] of Object.entries(o)) out[k] = v == null || v === "null" ? null : String(v);
   if (!out.sabpaisaTxnId && out.sabpaisaTxnld) out.sabpaisaTxnId = out.sabpaisaTxnld;
   return out;
 }

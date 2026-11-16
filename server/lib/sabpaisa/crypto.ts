@@ -1,72 +1,93 @@
-// SabPaisa encryption — "AES256HMACSHA384HEX", as published in SabPaisa's
-// developer docs (https://developer.sabpaisa.in) and their official
-// integration kits.
+// SabPaisa encryption. Two schemes, picked automatically from the key:
 //
-//   authKey  base64 → 32 raw bytes → AES-256-GCM key
-//   authIV   base64 → raw bytes    → HMAC-SHA384 key (despite the name it
-//                                   is NOT an IV — the GCM IV is random)
+// 1. Legacy AES-128-CBC — used when SABPAISA_AUTH_KEY is a 16-character
+//    string (the keys SabPaisa issued to NBWRI; this is what worked before
+//    the Razorpay switch).
+//      • checkout encData : base64(ciphertext) + ":" + base64(random IV)
+//      • API calls        : UPPERCASE hex, IV = SABPAISA_AUTH_IV (static)
+//      • responses        : either of the above, or base64 with the static IV
 //
-// Encrypt:
-//   iv          = 12 random bytes
-//   ct || tag   = AES-256-GCM(authKey, iv, plaintext)   (tag = 16 bytes)
-//   message     = iv || ct || tag
-//   hmac        = HMAC-SHA384(authIV, message)          (48 bytes)
-//   output      = UPPERCASE HEX of (hmac || message)
-//
-// Decrypt is the reverse; the HMAC is checked (constant time) before any
-// decryption, so a payload that wasn't produced with our keys is rejected.
+// 2. AES256HMACSHA384HEX — SabPaisa's current docs, used when
+//    SABPAISA_AUTH_KEY is base64 decoding to 32 bytes:
+//      authKey → AES-256-GCM key, authIV → HMAC-SHA384 key
+//      output  = HEX( HMAC(48) || IV(12) || ciphertext || tag(16) )
 
 import { createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
-const IV_SIZE = 12;
-const TAG_SIZE = 16;
-const HMAC_SIZE = 48;
+export type SabPaisaScheme = "legacy-aes128" | "aes256-hmac";
+export type EncryptPurpose = "checkout" | "api";
 
-export function decodeKey(b64: string, label: string): Buffer {
-  const clean = (b64 ?? "").trim();
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(clean)) {
-    throw new Error(`${label} must be the base64 string issued by SabPaisa`);
-  }
-  return Buffer.from(clean, "base64");
+export function schemeFor(authKey: string): SabPaisaScheme {
+  const k = (authKey ?? "").trim();
+  if (Buffer.byteLength(k, "utf8") === 16) return "legacy-aes128";
+  if (/^[A-Za-z0-9+/]+={0,2}$/.test(k) && Buffer.from(k, "base64").length === 32) return "aes256-hmac";
+  throw new Error("SABPAISA_AUTH_KEY must be SabPaisa's 16-character key (AES-128) or base64 AES-256 key (32 bytes)");
 }
 
-export function sabpaisaEncrypt(plaintext: string, authKey: string, authIv: string): string {
-  const aesKey = decodeKey(authKey, "SABPAISA_AUTH_KEY");
-  const hmacKey = decodeKey(authIv, "SABPAISA_AUTH_IV");
-  if (aesKey.length !== 32) throw new Error(`SABPAISA_AUTH_KEY must decode to 32 bytes for AES-256 (got ${aesKey.length})`);
+export function sabpaisaEncrypt(plaintext: string, authKey: string, authIv: string, purpose: EncryptPurpose = "checkout"): string {
+  if (schemeFor(authKey) === "legacy-aes128") {
+    const key = Buffer.from(authKey.trim(), "utf8");
+    if (purpose === "api") {
+      const c = createCipheriv("aes-128-cbc", key, staticIv(authIv));
+      return Buffer.concat([c.update(plaintext, "utf8"), c.final()]).toString("hex").toUpperCase();
+    }
+    const iv = randomBytes(16);
+    const c = createCipheriv("aes-128-cbc", key, iv);
+    const ct = Buffer.concat([c.update(plaintext, "utf8"), c.final()]);
+    return `${ct.toString("base64")}:${iv.toString("base64")}`;
+  }
 
-  const iv = randomBytes(IV_SIZE);
-  const cipher = createCipheriv("aes-256-gcm", aesKey, iv, { authTagLength: TAG_SIZE });
-  const ct = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const message = Buffer.concat([iv, ct, cipher.getAuthTag()]);
+  const aesKey = Buffer.from(authKey.trim(), "base64");
+  const hmacKey = Buffer.from(authIv.trim(), "base64");
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", aesKey, iv, { authTagLength: 16 });
+  const ct = Buffer.concat([c.update(plaintext, "utf8"), c.final()]);
+  const message = Buffer.concat([iv, ct, c.getAuthTag()]);
   const hmac = createHmac("sha384", hmacKey).update(message).digest();
   return Buffer.concat([hmac, message]).toString("hex").toUpperCase();
 }
 
-export function sabpaisaDecrypt(hexCipherText: string, authKey: string, authIv: string): string {
-  const aesKey = decodeKey(authKey, "SABPAISA_AUTH_KEY");
-  const hmacKey = decodeKey(authIv, "SABPAISA_AUTH_IV");
+export function sabpaisaDecrypt(payload: string, authKey: string, authIv: string): string {
+  const raw = (payload ?? "").trim();
+  if (!raw) throw new Error("SabPaisa payload is empty");
 
-  const hex = (hexCipherText ?? "").trim();
-  if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
-    throw new Error("SabPaisa payload is not hex");
-  }
-  const full = Buffer.from(hex, "hex");
-  if (full.length < HMAC_SIZE + IV_SIZE + TAG_SIZE) {
-    throw new Error("SabPaisa payload too short");
+  if (schemeFor(authKey) === "legacy-aes128") {
+    const key = Buffer.from(authKey.trim(), "utf8");
+    const s = raw.replace(/ /g, "+");
+    const colon = s.indexOf(":");
+    if (colon > 0) {
+      const iv = Buffer.from(s.slice(colon + 1), "base64");
+      if (iv.length !== 16) throw new Error("SabPaisa payload IV is not 16 bytes");
+      return aes128Decrypt(key, iv, Buffer.from(s.slice(0, colon), "base64"));
+    }
+    if (/^[0-9A-Fa-f]+$/.test(s) && s.length % 32 === 0) {
+      try { return aes128Decrypt(key, staticIv(authIv), Buffer.from(s, "hex")); } catch { /* try base64 */ }
+    }
+    return aes128Decrypt(key, staticIv(authIv), Buffer.from(s, "base64"));
   }
 
-  const hmacReceived = full.subarray(0, HMAC_SIZE);
-  const message = full.subarray(HMAC_SIZE);
-  const hmacExpected = createHmac("sha384", hmacKey).update(message).digest();
-  if (!timingSafeEqual(hmacReceived, hmacExpected)) {
+  const aesKey = Buffer.from(authKey.trim(), "base64");
+  const hmacKey = Buffer.from(authIv.trim(), "base64");
+  if (!/^[0-9A-Fa-f]+$/.test(raw) || raw.length % 2 !== 0) throw new Error("SabPaisa payload is not hex");
+  const full = Buffer.from(raw, "hex");
+  if (full.length < 48 + 12 + 16) throw new Error("SabPaisa payload too short");
+  const message = full.subarray(48);
+  const expected = createHmac("sha384", hmacKey).update(message).digest();
+  if (!timingSafeEqual(full.subarray(0, 48), expected)) {
     throw new Error("SabPaisa HMAC check failed — payload tampered or wrong keys");
   }
+  const d = createDecipheriv("aes-256-gcm", aesKey, message.subarray(0, 12), { authTagLength: 16 });
+  d.setAuthTag(message.subarray(message.length - 16));
+  return Buffer.concat([d.update(message.subarray(12, message.length - 16)), d.final()]).toString("utf8");
+}
 
-  const iv = message.subarray(0, IV_SIZE);
-  const tag = message.subarray(message.length - TAG_SIZE);
-  const ct = message.subarray(IV_SIZE, message.length - TAG_SIZE);
-  const decipher = createDecipheriv("aes-256-gcm", aesKey, iv, { authTagLength: TAG_SIZE });
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(ct), decipher.final()]).toString("utf8");
+function staticIv(authIv: string): Buffer {
+  const iv = Buffer.from((authIv ?? "").trim(), "utf8");
+  if (iv.length !== 16) throw new Error("SABPAISA_AUTH_IV must be 16 characters for the AES-128 keys");
+  return iv;
+}
+
+function aes128Decrypt(key: Buffer, iv: Buffer, ct: Buffer): string {
+  const d = createDecipheriv("aes-128-cbc", key, iv);
+  return Buffer.concat([d.update(ct), d.final()]).toString("utf8");
 }

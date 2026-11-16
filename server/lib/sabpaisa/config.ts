@@ -6,14 +6,16 @@
 //   SABPAISA_CLIENT_CODE   merchant client code issued by SabPaisa
 //   SABPAISA_USERNAME      transUserName issued by SabPaisa
 //   SABPAISA_PASSWORD      transUserPassword issued by SabPaisa
-//   SABPAISA_AUTH_KEY      base64 authKey (decodes to 32 bytes, AES-256-GCM)
-//   SABPAISA_AUTH_IV       base64 authIV (HMAC-SHA384 key)
-//   SABPAISA_MCC           merchant category code (mandatory in the docs)
+//   SABPAISA_AUTH_KEY      authKey — either the 16-character AES-128 key or the
+//                          base64 AES-256 key; crypto.ts picks the scheme
+//   SABPAISA_AUTH_IV       authIV that came with the key
+//   SABPAISA_MCC           merchant category code (defaults to 8220, the value
+//                          used when SabPaisa last worked for this branch)
 //   SABPAISA_CALLBACK_URL  where SabPaisa POSTs encResponse after payment.
 //                          Falls back to SABPAISA_RETURN_URL, then to
 //                          ${APP_URL}/api/payments/sabpaisa/return.
 
-import { decodeKey } from "./crypto.js";
+import { schemeFor, type SabPaisaScheme } from "./crypto.js";
 
 export type SabPaisaEnv = "staging" | "production";
 
@@ -38,6 +40,7 @@ export interface SabPaisaConfig {
   password:    string;
   authKey:     string;
   authIv:      string;
+  scheme:      SabPaisaScheme;
   mcc:         string;
   callbackUrl: string;
   initUrl:     string;
@@ -66,15 +69,12 @@ export function sabpaisaConfig(): SabPaisaConfig {
   const env = readEnv();
   const authKey = need("SABPAISA_AUTH_KEY");
   const authIv  = need("SABPAISA_AUTH_IV");
-  const keyBytes = decodeKey(authKey, "SABPAISA_AUTH_KEY").length;
-  if (keyBytes !== 32) {
-    throw new Error(`SABPAISA_AUTH_KEY must be SabPaisa's base64 AES-256 key (32 bytes once decoded, got ${keyBytes})`);
-  }
-  if (decodeKey(authIv, "SABPAISA_AUTH_IV").length === 0) {
-    throw new Error("SABPAISA_AUTH_IV is empty");
+  const scheme = schemeFor(authKey);
+  if (scheme === "legacy-aes128" && Buffer.byteLength(authIv, "utf8") !== 16) {
+    throw new Error("SABPAISA_AUTH_IV must be 16 characters for the AES-128 key");
   }
 
-  const mcc = need("SABPAISA_MCC");
+  const mcc = (process.env.SABPAISA_MCC ?? "").trim() || "8220";
   if (!/^\d+$/.test(mcc)) throw new Error("SABPAISA_MCC must be numeric");
 
   const appUrl = (process.env.APP_URL ?? "").trim().replace(/\/$/, "");
@@ -92,6 +92,7 @@ export function sabpaisaConfig(): SabPaisaConfig {
     password:   need("SABPAISA_PASSWORD"),
     authKey,
     authIv,
+    scheme,
     mcc,
     callbackUrl,
     ...URLS[env],
