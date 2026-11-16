@@ -63,9 +63,27 @@ export async function reconcileStuckPayments(): Promise<{ checked: number; confi
   let stillPending = 0;
   let errored = 0;
 
+  // SabPaisa's verify endpoint (txnenquiry.sabpaisa.in) sits behind a
+  // Cloudflare WAF that blocks non-whitelisted outbound IPs with HTTP 403.
+  // Fly's egress uses rotating shared NAT, so no stable IP to whitelist
+  // short of paying for a dedicated egress IP. Until SabPaisa whitelists
+  // us (or we switch to dedicated egress), server-to-server verify is
+  // not reachable from this deployment.
+  //
+  // Setting RECONCILE_SABPAISA=0 (default) skips SabPaisa rows cleanly —
+  // the webhook path still works, so stuck SabPaisa rows are rare.
+  // Flip to RECONCILE_SABPAISA=1 once the Cloudflare block is resolved.
+  const sabpaisaReconcileEnabled = (process.env.RECONCILE_SABPAISA ?? "").trim() === "1";
+
+  let sabpaisaSkippedThisTick = 0;
   for (const row of stuck) {
     try {
       if (row.provider === "sabpaisa") {
+        if (!sabpaisaReconcileEnabled) {
+          sabpaisaSkippedThisTick++;
+          stillPending++;
+          continue;
+        }
         if (!row.client_txn_id) {
           // Row labelled sabpaisa but with no client_txn_id — can't be
           // looked up. Rare: usually means init crashed between row
@@ -133,6 +151,13 @@ export async function reconcileStuckPayments(): Promise<{ checked: number; confi
       // eslint-disable-next-line no-console
       console.error(`[paymentReconciliationCron] row ${row.id} (${row.provider}) failed:`, err);
     }
+  }
+
+  if (sabpaisaSkippedThisTick > 0) {
+    // One log line per tick, not per row. Visible to ops but doesn't
+    // storm the log pipeline the way the 403 stack traces did.
+    // eslint-disable-next-line no-console
+    console.log(`[paymentReconciliationCron] skipped ${sabpaisaSkippedThisTick} SabPaisa row(s) — verify endpoint behind Cloudflare WAF; set RECONCILE_SABPAISA=1 once whitelisted`);
   }
 
   return { checked: stuck.length, confirmed, failed, stillPending, errored };
