@@ -239,7 +239,9 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         p.metadata->>'needs_refund'            AS refund_flag,
         COALESCE(p.sabpaisa_txn_id, p.razorpay_payment_id, p.upi_utr) AS gateway_ref,
         p.client_txn_id,
-        p.sabpaisa_payment_mode AS payment_mode,
+        COALESCE(p.sabpaisa_payment_mode,
+                 CASE WHEN p.provider = 'pay_at_venue'
+                      THEN 'Pay at venue' || COALESCE(' (' || (p.metadata->>'collected_mode') || ')', '') END) AS payment_mode,
         p.verified_at,
         vu.name                                AS verified_by,
         p.rejected_reason,

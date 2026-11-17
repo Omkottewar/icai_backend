@@ -17,6 +17,7 @@ import { db } from "../../../db/client.js";
 import { payments, events, eventRegistrations, jobPostings, userRoleAssignments, roles, users } from "../../../schema/index.js";
 import { notifyAsync } from "../notify.js";
 import { dispatchJobAlerts } from "../jobAlerts.js";
+import { settleVenueBookingPaidOnline } from "../payAtVenue.js";
 
 function paiseToRupees(p: number): string {
   return (p / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -340,6 +341,15 @@ export async function confirmPaymentAndFulfil(paymentId: string): Promise<Confir
       // registration-as-waitlisted work has already landed.
       // eslint-disable-next-line no-console
       console.error("[confirm] sold-out notification dispatch failed:", err);
+    });
+  }
+
+  // A "failed" online payment that later succeeds settles any seats the
+  // member had meanwhile booked as pay-at-venue.
+  if (!result.alreadyConfirmed) {
+    await settleVenueBookingPaidOnline(paymentId).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error("[confirm] settling pay-at-venue booking failed:", err);
     });
   }
 

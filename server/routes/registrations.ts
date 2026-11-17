@@ -385,6 +385,7 @@ registrationsRouter.get("/my-pending-payments", requireUser, async (req: AuthedR
           ${payments.status} = 'pending_verification'
           OR (
             ${payments.status} = 'pending'
+            AND ${payments.provider} <> 'pay_at_venue'
             AND ${payments.created_at} > now() - interval '15 minutes'
           )
         )`,

@@ -17,6 +17,7 @@ import { payments, events, jobPostings } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, optionalUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { verifyPaymentViewToken } from "../lib/memberGuest.js";
+import { bookPayAtVenue, getPayAtVenue } from "../lib/payAtVenue.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
 import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/payments/confirm.js";
 import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
@@ -138,7 +139,14 @@ paymentsRouter.get("/:id/status", optionalUser, async (req: AuthedRequest, res, 
       if (row) posting = row;
     }
 
-    res.json({ payment: p, event, posting });
+    // Offer "pay at venue" after a failed/cancelled online payment when the
+    // event allows it and the member hasn't booked another way since.
+    let pay_at_venue_allowed = false;
+    if (p.purpose === "event_registration" && p.status === "failed" && p.ref_id) {
+      try { pay_at_venue_allowed = await getPayAtVenue(p.ref_id); } catch { /* table not ready */ }
+    }
+
+    res.json({ payment: p, event, posting, pay_at_venue_allowed });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -160,5 +168,25 @@ paymentsRouter.post("/cancelled", requireUser, async (req: AuthedRequest, res, n
       await markPaymentFailed(payment.id, "User cancelled the payment");
     }
     return res.json({ ok: true });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/payments/:id/pay-at-venue ──────────────────────────────────
+// After a failed or cancelled online payment for an event: confirm the
+// seat(s) now and pay at the venue. Owner session or the ?t= view token
+// from the SabPaisa return redirect (members who didn't log in).
+paymentsRouter.post("/:id/pay-at-venue", bookingWriteLimiter, optionalUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const id = need(trim(req.params.id), "Payment ID");
+    if (!/^[0-9a-f-]{36}$/i.test(id)) throw new ApiError(404, "Payment not found");
+    const viaToken = verifyPaymentViewToken(String(req.query.t ?? req.body?.t ?? ""), id);
+    if (!viaToken) {
+      if (!req.user) throw new ApiError(401, "unauthenticated");
+      const [own] = await db.select({ id: payments.id }).from(payments)
+        .where(and(eq(payments.id, id), eq(payments.payer_user_id, req.user.id))).limit(1);
+      if (!own) throw new ApiError(404, "Payment not found");
+    }
+    const booked = await bookPayAtVenue(id);
+    res.json({ ok: true, ...booked });
   } catch (err) { handleApiError(err, res, next); }
 });

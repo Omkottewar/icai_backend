@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { and, asc, desc, eq, ilike, inArray, isNull, ne, sql } from "drizzle-orm";
+import { getPayAtVenue, setPayAtVenue } from "../../lib/payAtVenue.js";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "../../../db/client.js";
 import { events, eventRegistrations, committees, branches, files, checklistInstances, checklistInstanceApprovals, eventOverrideLog, users, payments } from "../../../schema/index.js";
@@ -243,8 +244,12 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
       .from(eventRegistrations)
       .where(and(eq(eventRegistrations.event_id, req.params.id), isNull(eventRegistrations.deleted_at)));
 
+    let allow_pay_at_venue = false;
+    try { allow_pay_at_venue = await getPayAtVenue(row.event.id); } catch { /* table not ready */ }
+
     res.json({
       ...row.event,
+      allow_pay_at_venue,
       committee_name: row.committee_name,
       branch_name: row.branch_name,
       banner_url: row.banner_path ? storage().url(row.banner_path) : null,
@@ -328,7 +333,8 @@ eventsAdminRouter.post("/", canManageEvents, async (req: AuthedRequest, res, nex
       })
       .returning();
 
-    res.status(201).json(row);
+    if (req.body.allow_pay_at_venue !== undefined) await setPayAtVenue(row.id, Boolean(req.body.allow_pay_at_venue));
+    res.status(201).json({ ...row, allow_pay_at_venue: Boolean(req.body.allow_pay_at_venue) });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -388,7 +394,8 @@ eventsAdminRouter.patch("/:id", canManageEvents, async (req, res, next) => {
     if (endsAt <= startsAt) throw new ApiError(400, "End time must be after start time");
 
     const [row] = await db.update(events).set(patch).where(eq(events.id, id)).returning();
-    res.json(row);
+    if (req.body.allow_pay_at_venue !== undefined) await setPayAtVenue(id, Boolean(req.body.allow_pay_at_venue));
+    res.json({ ...row, allow_pay_at_venue: await getPayAtVenue(id).catch(() => false) });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -856,6 +863,19 @@ eventsAdminRouter.post("/registrations/:id/approve-cancellation", canDecideCance
         }).where(eq(payments.id, payment.id));
         refundLine = "Your paid amount will be refunded to the original payment method by the branch treasurer within 5–7 business days.";
         refundLineShort = "Refund to source: 5–7 business days.";
+      } else if (payment && payment.provider === "pay_at_venue" && payment.status === "pending") {
+        // Unpaid pay-at-venue seat: reduce what's due, or close it when no
+        // seat on this booking is left.
+        const [{ left }] = await db.select({ left: sql<number>`count(*)::int` }).from(eventRegistrations)
+          .where(and(eq(eventRegistrations.payment_id, payment.id), isNull(eventRegistrations.deleted_at)));
+        const perSeat = Number((payment.metadata as any)?.per_seat_paise) || 0;
+        await db.update(payments).set(left > 0 && perSeat > 0
+          ? { amount_paise: perSeat * left, metadata: { ...(payment.metadata as object || {}), seat_count: left }, updated_at: new Date() }
+          : left > 0
+            ? { updated_at: new Date() }
+            : { status: "failed", rejected_reason: "Registration cancelled before paying at the venue", updated_at: new Date() },
+        ).where(eq(payments.id, payment.id));
+        refundLine = "Nothing was paid yet, so there is nothing to refund.";
       }
     }
 

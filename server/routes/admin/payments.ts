@@ -551,3 +551,30 @@ paymentsAdminRouter.post("/:id/reverify", async (req, res, next) => {
     return res.json({ ok: true, outcome: "pending", note: "SabPaisa has not resolved this payment yet. Try again in a minute." });
   } catch (err) { handleApiError(err, res, next); }
 });
+
+// ─── POST /api/admin/payments/:id/collect ─────────────────────────────────
+// Treasurer records a "pay at venue" amount as received at the event.
+// Body: { mode: 'cash' | 'upi' | 'card' | 'cheque', reference?: string }
+paymentsAdminRouter.post("/:id/collect", async (req: AuthedRequest, res, next) => {
+  try {
+    const id = trim(req.params.id);
+    const mode = trim(req.body?.mode).toLowerCase();
+    if (!["cash", "upi", "card", "cheque"].includes(mode)) throw new ApiError(400, "Choose how the amount was paid: cash, UPI, card or cheque.");
+    const reference = trim(req.body?.reference).slice(0, 120) || null;
+
+    const [payment] = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
+    if (!payment) throw new ApiError(404, "Payment not found");
+    if (payment.provider !== "pay_at_venue") throw new ApiError(400, "Only pay-at-venue payments can be marked as collected.");
+    if (payment.status !== "pending") throw new ApiError(400, `This payment is already '${payment.status}'.`);
+
+    const [row] = await db.update(payments).set({
+      status: "success",
+      verified_by: req.user!.id,
+      verified_at: new Date(),
+      metadata: { ...(payment.metadata as Record<string, unknown> ?? {}), collected_mode: mode, collected_reference: reference },
+      updated_at: new Date(),
+    }).where(and(eq(payments.id, id), eq(payments.status, "pending"))).returning();
+    if (!row) throw new ApiError(409, "This payment was just updated. Refresh and try again.");
+    res.json({ ok: true, payment: row });
+  } catch (err) { handleApiError(err, res, next); }
+});
