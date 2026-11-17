@@ -27,7 +27,7 @@ import { sameOrigin } from "../middleware/sameOrigin.js";
 import { loginLimiter, signupLimiter, forgotPasswordLimiter } from "../middleware/rateLimit.js";
 import { validatePassword } from "../auth/password.js";
 import { db } from "../../db/client.js";
-import { roles, userRoleAssignments, icaiMemberMaster, siteSettings, users } from "../../schema/index.js";
+import { roles, userRoleAssignments, icaiMemberMaster, siteSettings, users, memberProfiles } from "../../schema/index.js";
 
 export const authRouter = Router();
 
@@ -529,8 +529,12 @@ authRouter.get("/me", requireUser, async (req: AuthedRequest, res, next) => {
         ),
       );
 
+    const [mp] = await db.select({ mrn: memberProfiles.mrn }).from(memberProfiles)
+      .where(and(eq(memberProfiles.user_id, id), isNull(memberProfiles.deleted_at))).limit(1);
+
     res.json({
       id, name, email, phone, primary_role, locale, avatar_id, branch_id,
+      mrn: mp?.mrn ?? null,
       roles: assignments,
     });
   } catch (err) {

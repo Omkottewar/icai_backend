@@ -26,6 +26,7 @@ import { dashboardRouter } from "./routes/dashboard.js";
 import { adminRouter } from "./routes/admin/index.js";
 import { publicEventsRouter } from "./routes/events.js";
 import { registrationsRouter } from "./routes/registrations.js";
+import { memberVerifyRouter } from "./routes/memberVerify.js";
 import { publicCommitteesRouter } from "./routes/committees.js";
 import { checklistTemplatesRouter } from "./routes/checklistTemplates.js";
 import { checklistInstancesRouter } from "./routes/checklistInstances.js";
@@ -138,6 +139,7 @@ app.use("/api/dashboard", dashboardRouter);
 // registrationsRouter mounts before publicEventsRouter because it has literal
 // paths like /my-registrations that would otherwise be swallowed by the
 // public router's GET /:slug.
+app.use("/api/member-verify", memberVerifyRouter);
 app.use("/api/events", registrationsRouter);
 // eventChatRouter mounts before publicEventsRouter so the literal /:id/chat
 // paths aren't swallowed by the public router's catch-all /:slug.

@@ -31,6 +31,7 @@ import {
 import { sabpaisaConfig } from "../lib/sabpaisa/config.js";
 import { mapSabPaisaStatus, describeSabPaisa, type SabPaisaResponse } from "../lib/sabpaisa/types.js";
 import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/payments/confirm.js";
+import { signPaymentViewToken } from "../lib/memberGuest.js";
 
 export const sabpaisaPaymentsRouter = Router();
 
@@ -177,7 +178,11 @@ async function returnHandler(req: Request, res: import("express").Response) {
   const appUrl = (process.env.APP_URL ?? "").replace(/\/$/, "");
   const go = (r: CallbackResult) => {
     const qs = new URLSearchParams({ status: r.status });
-    if (r.paymentId) qs.set("payment_id", r.paymentId);
+    if (r.paymentId) {
+      qs.set("payment_id", r.paymentId);
+      // Lets members who paid without logging in open the result page.
+      qs.set("t", signPaymentViewToken(r.paymentId));
+    }
     if (r.note) qs.set("note", r.note);
     return res.redirect(302, `${appUrl}/payments/result?${qs.toString()}`);
   };

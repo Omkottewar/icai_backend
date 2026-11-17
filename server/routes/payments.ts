@@ -15,7 +15,8 @@ import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { payments, events, jobPostings } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
-import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
+import { requireUser, optionalUser, type AuthedRequest } from "../middleware/requireUser.js";
+import { verifyPaymentViewToken } from "../lib/memberGuest.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
 import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/payments/confirm.js";
 import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
@@ -87,9 +88,13 @@ paymentsRouter.post("/initiate", bookingWriteLimiter, requireUser, async (req: A
 // Lightweight status poller. SPA uses this on /payments/result so the
 // success page can confirm the row flipped before showing the confirmation
 // banner.
-paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, next) => {
+paymentsRouter.get("/:id/status", optionalUser, async (req: AuthedRequest, res, next) => {
   try {
     const id = need(trim(req.params.id), "Payment ID");
+    // Members who paid without logging in carry a view token (?t=) from the
+    // SabPaisa return redirect; everyone else must own the payment.
+    const viaToken = verifyPaymentViewToken(String(req.query.t ?? ""), id);
+    if (!viaToken && !req.user) throw new ApiError(401, "unauthenticated");
     // Scope to current user — otherwise any logged-in caller who learns a
     // payment id (easy: it's in the /payments/result URL after modal close)
     // could read someone else's transaction, including whether it
@@ -108,10 +113,10 @@ paymentsRouter.get("/:id/status", requireUser, async (req: AuthedRequest, res, n
       rejected_reason: payments.rejected_reason,
       metadata: payments.metadata,
       updated_at: payments.updated_at,
-    }).from(payments).where(and(
-      eq(payments.id, id),
-      eq(payments.payer_user_id, req.user!.id),
-    )).limit(1);
+    }).from(payments).where(viaToken
+      ? eq(payments.id, id)
+      : and(eq(payments.id, id), eq(payments.payer_user_id, req.user!.id)),
+    ).limit(1);
     if (!p) throw new ApiError(404, "Payment not found");
     if (p.id !== id) throw new ApiError(404, "Payment not found");
 

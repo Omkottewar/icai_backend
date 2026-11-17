@@ -34,6 +34,7 @@ export * from "./dashboardLayouts";
 export * from "./branchContent";
 export * from "./grievances";
 export * from "./icaiDirectory";
+export * from "./memberOtps";
 export * from "./pragyaan";
 export * from "./studentSuggestions";
 export * from "./jobsExtended";

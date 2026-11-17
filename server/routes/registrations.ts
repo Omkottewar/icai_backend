@@ -4,6 +4,7 @@ import { db } from "../../db/client.js";
 import { events, eventRegistrations, users, payments, roles, userRoleAssignments } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
+import { requireUserOrGuest, type GuestAwareRequest } from "../lib/memberGuest.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
 import { notifyAsync } from "../lib/notify.js";
 import { streamCertificate } from "../lib/certificates.js";
@@ -69,7 +70,7 @@ registrationsRouter.get("/my-registrations", requireUser, async (req: AuthedRequ
 //                   browser POSTs to SabPaisa. The event_registrations row
 //                   is created later by payments/confirm.ts once SabPaisa
 //                   confirms via the callback / Transaction Enquiry.
-registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, async (req: AuthedRequest, res, next) => {
+registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUserOrGuest, async (req: GuestAwareRequest, res, next) => {
   try {
     const user = req.user!;
     const slug = need(trim(req.params.slug), "Event slug");
@@ -81,7 +82,8 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUser, as
     // booked_by_user_id set to the booker so their dashboard shows the
     // attribution. Attendee list is validated below and stashed in
     // payment.metadata so admin approve can recover it.
-    const rawAttendees = Array.isArray(req.body?.attendee_user_ids) ? req.body.attendee_user_ids : [];
+    // Members registering by MRN without logging in book only their own seat.
+    const rawAttendees = !req.isGuest && Array.isArray(req.body?.attendee_user_ids) ? req.body.attendee_user_ids : [];
     const attendeeIds: string[] = [];
     const seen = new Set<string>();
     for (const raw of rawAttendees) {
