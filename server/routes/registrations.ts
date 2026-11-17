@@ -4,7 +4,7 @@ import { db } from "../../db/client.js";
 import { events, eventRegistrations, users, payments, roles, userRoleAssignments } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
-import { requireUserOrGuest, type GuestAwareRequest } from "../lib/memberGuest.js";
+import { requireUserOrGuest, signPaymentViewToken, type GuestAwareRequest } from "../lib/memberGuest.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
 import { notifyAsync } from "../lib/notify.js";
 import { streamCertificate } from "../lib/certificates.js";
@@ -281,6 +281,9 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUserOrGu
     const commonResponse = {
       paid: true,
       payment_id: payment.id,
+      // Lets the result page read/cancel this payment for members who
+      // registered without logging in.
+      view_token: signPaymentViewToken(payment.id),
       amount_paise: totalPaise,
       base_paise: perSeatBase * totalSeats,
       gst_paise: perSeatGst * totalSeats,

@@ -7,6 +7,8 @@
 //
 //   GET  /api/payments/:id/status (authed) — status poller for /payments/result
 //   POST /api/payments/cancelled  (authed) — user backed out before paying
+//   POST /api/payments/:id/abandon (owner or ?t=) — user came back from the
+//     SabPaisa page without paying (browser Back)
 //
 // The SabPaisa callback lives in routes/payments-sabpaisa.ts.
 
@@ -18,6 +20,7 @@ import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, optionalUser, type AuthedRequest } from "../middleware/requireUser.js";
 import { verifyPaymentViewToken } from "../lib/memberGuest.js";
 import { bookPayAtVenue, getPayAtVenue } from "../lib/payAtVenue.js";
+import { enquireTransaction, amountMatches } from "../lib/sabpaisa/client.js";
 import { bookingWriteLimiter } from "../middleware/rateLimit.js";
 import { confirmPaymentAndFulfil, markPaymentFailed } from "../lib/payments/confirm.js";
 import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
@@ -188,5 +191,46 @@ paymentsRouter.post("/:id/pay-at-venue", bookingWriteLimiter, optionalUser, asyn
     }
     const booked = await bookPayAtVenue(id);
     res.json({ ok: true, ...booked });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── POST /api/payments/:id/abandon ───────────────────────────────────────
+// The member pressed Back on SabPaisa's page and landed on the result page
+// without a callback. Ask SabPaisa first (they may have paid just before
+// leaving); otherwise mark the attempt cancelled so they can retry or pick
+// pay-at-venue. The reconciliation job re-checks abandoned rows for 48 h in
+// case a payment completes after all.
+paymentsRouter.post("/:id/abandon", optionalUser, async (req: AuthedRequest, res, next) => {
+  try {
+    const id = need(trim(req.params.id), "Payment ID");
+    if (!/^[0-9a-f-]{36}$/i.test(id)) throw new ApiError(404, "Payment not found");
+    const viaToken = verifyPaymentViewToken(String(req.query.t ?? req.body?.t ?? ""), id);
+    const [payment] = await db.select().from(payments).where(eq(payments.id, id)).limit(1);
+    if (!payment) throw new ApiError(404, "Payment not found");
+    if (!viaToken && payment.payer_user_id !== req.user?.id) throw new ApiError(404, "Payment not found");
+
+    if (payment.status !== "created" && payment.status !== "pending") {
+      return res.json({ status: payment.status });
+    }
+
+    if (payment.provider === "sabpaisa" && payment.client_txn_id) {
+      try {
+        const enq = await Promise.race([
+          enquireTransaction(payment.client_txn_id),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 8000)),
+        ]);
+        if (enq.outcome === "success" && enq.response && amountMatches(enq.response, payment.amount_paise)) {
+          await confirmPaymentAndFulfil(payment.id);
+          return res.json({ status: "success" });
+        }
+      } catch { /* SabPaisa unreachable — treat as not paid; the cron re-checks */ }
+    }
+
+    await db.update(payments).set({
+      metadata: { ...((payment.metadata ?? {}) as Record<string, unknown>), abandoned_at: new Date().toISOString() },
+      updated_at: new Date(),
+    }).where(eq(payments.id, payment.id));
+    await markPaymentFailed(payment.id, "Payment not completed — the payment page was closed");
+    res.json({ status: "failed" });
   } catch (err) { handleApiError(err, res, next); }
 });

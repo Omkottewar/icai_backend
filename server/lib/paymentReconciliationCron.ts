@@ -34,9 +34,17 @@ export async function reconcileStuckPayments(): Promise<{ checked: number; confi
     })
     .from(payments)
     .where(and(
-      eq(payments.status, "pending"),
       isNull(payments.deleted_at),
-      sql`${payments.created_at} < now() - interval '${sql.raw(String(STALE_AFTER_MINUTES))} minutes'`,
+      sql`(
+        (${payments.status} = 'pending'
+          AND ${payments.created_at} < now() - interval '${sql.raw(String(STALE_AFTER_MINUTES))} minutes')
+        OR
+        -- Member left the SabPaisa page via Back: re-check for 48 h in case
+        -- the payment went through after all.
+        (${payments.status} = 'failed'
+          AND ${payments.metadata}->>'abandoned_at' IS NOT NULL
+          AND ${payments.created_at} > now() - interval '48 hours')
+      )`,
       eq(payments.provider, "sabpaisa"),
       sql`${payments.client_txn_id} IS NOT NULL`,
     ))
