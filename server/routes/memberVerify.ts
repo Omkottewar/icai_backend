@@ -1,10 +1,10 @@
 // Event registration by membership number (MRN), members only.
 //
 // Not logged in:
-//   POST /api/member-verify/lookup     { mrn, recaptcha_token }
+//   POST /api/member-verify/lookup     { mrn }
 //        MRN known → email a 6-digit code to the email we hold, return masked
 //        details { known: true, otp_id, masked }. Unknown → { known: false }.
-//   POST /api/member-verify/start-new  { mrn, name, email, phone, recaptcha_token }
+//   POST /api/member-verify/start-new  { mrn, name, email, phone }
 //        MRN unknown → email a code to the email the member typed.
 //   POST /api/member-verify/verify     { otp_id, code }
 //        Correct code → { guest_token, profile }. The guest token goes in the
@@ -25,7 +25,6 @@ import { db } from "../../db/client.js";
 import { users, memberProfiles, icaiMemberMaster, memberOtps, oauthLinks, eventRegistrations, payments } from "../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../lib/apiError.js";
 import { requireUser, type AuthedRequest } from "../middleware/requireUser.js";
-import { verifyRecaptcha } from "../lib/recaptcha.js";
 import { sendEmail } from "../lib/email.js";
 import { signGuestToken, verifyGuestToken } from "../lib/memberGuest.js";
 
@@ -93,15 +92,6 @@ function validEmail(e: string): boolean {
 }
 function hashCode(otpId: string, code: string): string {
   return createHash("sha256").update(`${otpId}:${code}:${process.env.JWT_SECRET ?? ""}`).digest("hex");
-}
-
-async function checkCaptcha(req: AuthedRequest, action: string) {
-  const r = await verifyRecaptcha(
-    typeof req.body?.recaptcha_token === "string" ? req.body.recaptcha_token : undefined,
-    action,
-    (req.ip ?? req.socket.remoteAddress) || undefined,
-  );
-  if (!r.ok) throw new ApiError(400, "Could not verify you are human. Please refresh and try again.");
 }
 
 // Find who holds an MRN today: a portal user, the ICAI directory, or nobody.
@@ -217,7 +207,6 @@ async function ensureMemberUser(mrn: string, p: { name: string; email: string; p
 
 memberVerifyRouter.post("/lookup", lookupLimiter, async (req: AuthedRequest, res: Response, next) => {
   try {
-    await checkCaptcha(req, "member_lookup");
     const mrn = normaliseMrn(req.body?.mrn);
     const found = await findMrn(mrn);
     if (!found) return res.json({ known: false, mrn });
@@ -241,7 +230,6 @@ memberVerifyRouter.post("/lookup", lookupLimiter, async (req: AuthedRequest, res
 
 memberVerifyRouter.post("/start-new", lookupLimiter, async (req: AuthedRequest, res: Response, next) => {
   try {
-    await checkCaptcha(req, "member_start_new");
     const mrn = normaliseMrn(req.body?.mrn);
     const name = need(trim(req.body?.name), "Name").slice(0, 120);
     const email = need(trim(req.body?.email), "Email").toLowerCase();

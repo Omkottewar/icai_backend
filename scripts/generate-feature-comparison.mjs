@@ -296,7 +296,7 @@ sections.push(comparisonTable([
 sections.push(H2("E. Communication & Support"));
 sections.push(comparisonTable([
   ["Contact form", "✗ (info only)", "✓ Combined Contact/Grievance/Suggestion form", "New"],
-  ["Grievance submission", "✗", "✓ Ticket-numbered (GRV-YYYY-NNNNNN), reCAPTCHA-protected", "New"],
+  ["Grievance submission", "✗", "✓ Ticket-numbered (GRV-YYYY-NNNNNN), rate-limited", "New"],
   ["Grievance tracking", "✗", "✓ Public lookup by ticket + email", "New"],
   ["Grievance 48h SLA escalation", "✗", "✓ Automated hourly cron with email escalation", "New"],
   ["Grievance subject routing", "✗", "✓ Admin-editable subject→email map", "New"],
@@ -359,7 +359,7 @@ sections.push(comparisonTable([
   ["Progressive Web App (installable)", "✗", "✓ Add to home screen on iOS/Android/desktop", "New"],
   ["Offline support", "✗", "✓ Workbox precaching + custom service worker", "New"],
   ["Mobile responsive design", "✗ Fixed-width layout", "✓ Fluid responsive, optimised for phone-first", "New"],
-  ["Modern security (HTTPS / CSP / reCAPTCHA)", "~ HTTPS only", "✓ HTTPS + reCAPTCHA v3 + JWT + cookie-based session", "Upgraded"],
+  ["Modern security (HTTPS / CSP / rate limits)", "~ HTTPS only", "✓ HTTPS + rate limiting + JWT + cookie-based session", "Upgraded"],
   ["Mobile push notifications", "✗", "✓ Web Push API (iOS supported when PWA installed)", "New"],
   ["Accessibility (WCAG 2.1 AA)", "✗", "✓ Baseline compliance with ongoing audit", "New"],
   ["DPDP / cookie consent", "✗", "✓ Banner with policy-version replay", "New"],
@@ -415,7 +415,7 @@ sections.push(H2("3.1 Public Visitor Experience (no login required)"));
   "Investor awareness content page",
   "CA 2.0 Vision content page",
   "Career counselling information page",
-  "Grievance / contact / suggestion combined submission form (reCAPTCHA-protected)",
+  "Grievance / contact / suggestion combined submission form (rate-limited)",
   "Grievance status tracking via ticket number + email",
   "Cookie consent banner with policy-version replay (DPDP Act 2023 compliant)",
   "Mobile-responsive design with optimized phone-first layouts",
@@ -637,7 +637,7 @@ sections.push(H2("3.9 Communication Infrastructure"));
 sections.push(H2("3.10 Security & Compliance"));
 [
   "DPDP Act 2023 compliant with cookie consent banner (policy versioning, 365-day re-prompt)",
-  "reCAPTCHA v3 on grievance form + signup (server-side score + action verification)",
+  "Rate limiting on grievance form, signup and member verification",
   "Rate limiting (express-rate-limit) on signup, grievance submit, suggestion submit",
   "HTTPS-only with HSTS preload",
   "Session cookies with httpOnly + sameSite + secure flags",
@@ -740,7 +740,7 @@ const gaps = [
   "No GST handling on payments — when payments do happen offline, GST split is manual.",
   "No DPDP Act 2023 compliance — no cookie banner, no consent records.",
   "No accessibility compliance — fails WCAG basics; locks out members with screen readers or motor impairments.",
-  "No protection against form spam — no reCAPTCHA or rate limiting visible on any form.",
+  "No protection against form spam — no rate limiting visible on any form.",
   "No structured event archive — past events are a list with PDFs, not searchable/filterable.",
   "No member benevolent fund (CABF) handling — referenced via PDF only.",
   "No reusable photo gallery system — galleries are flat thumbnail grids per event with no admin UI.",
@@ -872,7 +872,7 @@ sections.push(H2("7.1 What's already shipped"));
   "F9: iCal subscription feed",
   "F10: Recurring events (RRULE)",
   "F11: WCAG 2.1 AA baseline",
-  "F12: MRN-gated signup, GST, reCAPTCHA, cookie consent",
+  "F12: MRN-gated signup, GST, cookie consent",
   "F14: Pragyaan auto-ingestion (15-min)",
   "F15: Events Month-calendar view",
   "F15.1: Google Calendar add-to-calendar deep-link",
@@ -904,7 +904,6 @@ sections.push(H2("7.3 Client-input launch blockers"));
 sections.push(P("These require business decisions or credentials from the branch, not engineering work:"));
 [
   "Production VAPID keypair for Web Push",
-  "Production reCAPTCHA v3 keys (currently using test keys)",
   "Brevo SMTP credentials [Resolved — now using Resend with verified icainagpur.in domain]",
   "Supabase Storage bucket promoted to production tier",
   "Branch GSTIN for payment receipts",
@@ -947,7 +946,7 @@ sections.push(H1("8. Feature Delivery Timeline (FEATURES_DELIVERED.md)"));
 sections.push(P("Auditable log of every feature shipped, from first scaffolding to today. Sourced from FEATURES_DELIVERED.md at the project root. Each entry was built, tested, and logged with a what-was-required → what-was-built → known-gaps section."));
 
 const timeline = [
-  ["F1",  "2026-06-12", "Contact / Grievance / Suggestion form", "Ticket-numbered (GRV-YYYY-NNNNNN), 48h SLA escalation, reCAPTCHA-protected, subject-routed admin-editable email map, newsletter digest endpoint."],
+  ["F1",  "2026-06-12", "Contact / Grievance / Suggestion form", "Ticket-numbered (GRV-YYYY-NNNNNN), 48h SLA escalation, rate-limited, subject-routed admin-editable email map, newsletter digest endpoint."],
   ["F2",  "2026-06-15", "PWA web push notifications", "Service worker (Workbox), VAPID-keyed, per-device subscription rows, iOS Safari supported when PWA installed. Per-user opt-out + 'notify_push' flag."],
   ["F3",  "2026-06-19", "Shimmer skeleton UI + initial-load speedup", "Route-level code-splitting (87 KB gzipped initial bundle vs. monolithic before), shimmer everywhere 'Loading…' used to render."],
   ["F4",  "2026-06-19", "Members dashboard — production rebuild", "Identity card with MRN/FCA/COP pills, CPE deadline alert, 4 stat tiles, suggested events, saved library, announcements, real ICAI services."],
@@ -958,7 +957,7 @@ const timeline = [
   ["F9",  "2026-06-23", "iCal sync — per-event + per-user subscription", "Hand-rolled RFC-5545 generator, /api/events/:slug/ical + /api/events/my-calendar.ics with HMAC token."],
   ["F10", "2026-06-23", "Recurring events — RRULE expansion", "DAILY/WEEKLY/MONTHLY expander, edit-this-or-future scope, materialises up to 52 occurrences per call."],
   ["F11", "2026-06-23", "WCAG 2.1 AA baseline pass", "Skip-to-content, :focus-visible rings, role=dialog + aria-modal on new admin modals, aria-labels on icon-only buttons."],
-  ["F12", "2026-06-24", "Launch-prep bundle (7 blockers closed)", "VAPID, cookie banner, GST flag, reCAPTCHA, Brevo SMTP, Supabase Storage, ICAI MRN gating against icai_member_master."],
+  ["F12", "2026-06-24", "Launch-prep bundle (7 blockers closed)", "VAPID, cookie banner, GST flag, Brevo SMTP, Supabase Storage, ICAI MRN gating against icai_member_master."],
   ["F13", "2026-06-24", "Pragyaan starter-chip coverage (FAQ slots)", "4 admin-editable faq_* site-content slots seeded + ingested so every starter chip has grounded content."],
   ["F14", "2026-06-24", "Pragyaan corpus expansion", "kb_sources grew 256 → 317. Added committees (18), e-journal issues (28), ICAI link cards (11) to buildPublicDocs()."],
   ["F15", "2026-06-24", "Events page — List / Month calendar toggle", "Self-contained 6-week grid, committee-coloured chips, day-detail panel, today-highlight, mobile dot-mode."],
