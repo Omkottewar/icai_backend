@@ -5,6 +5,7 @@ import { db } from "../../db/client.js";
 import { events, committees, files } from "../../schema/index.js";
 import { handleApiError, ApiError, trim } from "../lib/apiError.js";
 import { storage } from "../lib/storage.js";
+import { getEventOptionsMap, DEFAULT_EVENT_OPTIONS } from "../lib/eventOptions.js";
 
 // We need to join `files` twice in the same query (once for the event banner,
 // once for the speaker photo). Drizzle requires a table alias to disambiguate.
@@ -12,6 +13,13 @@ const bannerFiles  = alias(files, "banner_files");
 const speakerFiles = alias(files, "speaker_files");
 
 export const publicEventsRouter = Router();
+
+// Only what the event page needs: whether non-members may register and
+// their fee (null = same as members).
+function publicOptions(o?: { allow_non_members: boolean; non_member_fee_paise: number | null }) {
+  const v = o ?? DEFAULT_EVENT_OPTIONS;
+  return { allow_non_members: v.allow_non_members, non_member_fee_paise: v.non_member_fee_paise };
+}
 
 // â”€â”€â”€ GET /api/events â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Public, no auth. Returns published, non-deleted, future events with the
@@ -82,9 +90,13 @@ publicEventsRouter.get("/", async (req, res, next) => {
       // sits at the top — feels like a chronological feed.
       .orderBy(wantsPast ? desc(events.starts_at) : asc(events.starts_at));
 
+    // Member / non-member pricing options (lib/eventOptions.ts).
+    const optsById = await getEventOptionsMap(rows.map((r) => r.id)).catch(() => new Map());
+
     res.json({
       rows: rows.map((r) => ({
         ...r,
+        ...publicOptions(optsById.get(r.id)),
         banner_url: r.banner_path ? storage().url(r.banner_path) : null,
         speaker_photo_url: r.speaker_photo_path ? storage().url(r.speaker_photo_path) : null,
       })),
@@ -132,8 +144,11 @@ publicEventsRouter.get("/:slug", async (req, res, next) => {
 
     if (!row || row.status !== "published") throw new ApiError(404, "Event not found");
 
+    const opts = (await getEventOptionsMap([row.id]).catch(() => new Map())).get(row.id);
+
     res.json({
       ...row,
+      ...publicOptions(opts),
       banner_url: row.banner_path ? storage().url(row.banner_path) : null,
       speaker_photo_url: row.speaker_photo_path ? storage().url(row.speaker_photo_path) : null,
     });

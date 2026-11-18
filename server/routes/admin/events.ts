@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { and, asc, desc, eq, ilike, inArray, isNull, ne, sql } from "drizzle-orm";
-import { getPayAtVenue, setPayAtVenue } from "../../lib/payAtVenue.js";
+import { getEventOptions, setEventOptions, type EventOptions } from "../../lib/eventOptions.js";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "../../../db/client.js";
 import { events, eventRegistrations, committees, branches, files, checklistInstances, checklistInstanceApprovals, eventOverrideLog, users, payments } from "../../../schema/index.js";
@@ -53,6 +53,24 @@ async function uniqueSlug(base: string, excludeId?: string): Promise<string> {
     i++;
     if (i > 50) throw new ApiError(500, "Could not generate a unique slug");
   }
+}
+
+// Event options kept in event_payment_options (see lib/eventOptions.ts).
+// Only fields present in the body are changed.
+function optionsPatch(body: any): Partial<EventOptions> {
+  const patch: Partial<EventOptions> = {};
+  if (body?.allow_pay_at_venue !== undefined) patch.pay_at_venue = Boolean(body.allow_pay_at_venue);
+  if (body?.allow_non_members !== undefined) patch.allow_non_members = Boolean(body.allow_non_members);
+  if (body?.non_member_fee_paise !== undefined) {
+    const v = body.non_member_fee_paise;
+    if (v === null || v === "") patch.non_member_fee_paise = null;
+    else {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 0) throw new ApiError(400, "Non-member fee must be a whole number of paise, 0 or more");
+      patch.non_member_fee_paise = n;
+    }
+  }
+  return patch;
 }
 
 function pickAudience(v: unknown) {
@@ -244,12 +262,14 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
       .from(eventRegistrations)
       .where(and(eq(eventRegistrations.event_id, req.params.id), isNull(eventRegistrations.deleted_at)));
 
-    let allow_pay_at_venue = false;
-    try { allow_pay_at_venue = await getPayAtVenue(row.event.id); } catch { /* table not ready */ }
+    let opts: EventOptions = { pay_at_venue: false, allow_non_members: false, non_member_fee_paise: null };
+    try { opts = await getEventOptions(row.event.id); } catch { /* table not ready */ }
 
     res.json({
       ...row.event,
-      allow_pay_at_venue,
+      allow_pay_at_venue: opts.pay_at_venue,
+      allow_non_members: opts.allow_non_members,
+      non_member_fee_paise: opts.non_member_fee_paise,
       committee_name: row.committee_name,
       branch_name: row.branch_name,
       banner_url: row.banner_path ? storage().url(row.banner_path) : null,
@@ -333,8 +353,8 @@ eventsAdminRouter.post("/", canManageEvents, async (req: AuthedRequest, res, nex
       })
       .returning();
 
-    if (req.body.allow_pay_at_venue !== undefined) await setPayAtVenue(row.id, Boolean(req.body.allow_pay_at_venue));
-    res.status(201).json({ ...row, allow_pay_at_venue: Boolean(req.body.allow_pay_at_venue) });
+    const created = await setEventOptions(row.id, optionsPatch(req.body));
+    res.status(201).json({ ...row, allow_pay_at_venue: created.pay_at_venue, allow_non_members: created.allow_non_members, non_member_fee_paise: created.non_member_fee_paise });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -394,8 +414,8 @@ eventsAdminRouter.patch("/:id", canManageEvents, async (req, res, next) => {
     if (endsAt <= startsAt) throw new ApiError(400, "End time must be after start time");
 
     const [row] = await db.update(events).set(patch).where(eq(events.id, id)).returning();
-    if (req.body.allow_pay_at_venue !== undefined) await setPayAtVenue(id, Boolean(req.body.allow_pay_at_venue));
-    res.json({ ...row, allow_pay_at_venue: await getPayAtVenue(id).catch(() => false) });
+    const o = await setEventOptions(id, optionsPatch(req.body));
+    res.json({ ...row, allow_pay_at_venue: o.pay_at_venue, allow_non_members: o.allow_non_members, non_member_fee_paise: o.non_member_fee_paise });
   } catch (err) { handleApiError(err, res, next); }
 });
 

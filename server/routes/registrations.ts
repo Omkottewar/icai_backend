@@ -12,6 +12,8 @@ import { buildCalendar } from "../lib/ical.js";
 import { buildInitRedirect as buildSabpaisaInit, paiseToRupees as spPaiseToRupees } from "../lib/sabpaisa/client.js";
 import { createHmac } from "node:crypto";
 import { memberProfiles } from "../../schema/index.js";
+import { getEventOptions } from "../lib/eventOptions.js";
+import { isNonMemberRole } from "../lib/memberStatus.js";
 
 // IST formatter used in notification copy. The events themselves store UTC;
 // users expect to see local time.
@@ -123,7 +125,7 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUserOrGu
     // attendee must (a) exist and not be soft-deleted, and (b) not already
     // be registered for this event. Failing early with a clear message is
     // better than silently dropping them at admin-approve time.
-    let attendeeUsers: Array<{ id: string; name: string; email: string }> = [];
+    let attendeeUsers: Array<{ id: string; name: string; email: string; primary_role: string }> = [];
     if (attendeeIds.length > 0) {
       if (event.fee_paise === 0) {
         // Group bookings on free events don't make sense — each user can
@@ -132,7 +134,7 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUserOrGu
         throw new ApiError(400, "Group booking is only available for paid events. Ask each attendee to register themselves.");
       }
       const rows = await db
-        .select({ id: users.id, name: users.name, email: users.email })
+        .select({ id: users.id, name: users.name, email: users.email, primary_role: users.primary_role })
         .from(users)
         .where(and(inArray(users.id, attendeeIds), isNull(users.deleted_at)));
       if (rows.length !== attendeeIds.length) {
@@ -155,13 +157,30 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUserOrGu
 
     const totalSeats = 1 + attendeeUsers.length;
 
+    // Member vs non-member pricing. The SERVER decides who is a member: a
+    // verified membership number (member_profiles row) — never the form.
+    const opts = await getEventOptions(event.id);
+    const seatHolderIds = [user.id, ...attendeeUsers.map((a) => a.id)];
+    const withMrn = new Set((await db.select({ user_id: memberProfiles.user_id }).from(memberProfiles)
+      .where(and(inArray(memberProfiles.user_id, seatHolderIds), isNull(memberProfiles.deleted_at)))).map((r) => r.user_id));
+    const roleOf = new Map<string, string>([[user.id, user.primary_role], ...attendeeUsers.map((a) => [a.id, a.primary_role] as [string, string])]);
+    const nonMemberIds = seatHolderIds.filter((id) => !withMrn.has(id) && isNonMemberRole(roleOf.get(id)));
+    if (nonMemberIds.length > 0 && !opts.allow_non_members) {
+      throw new ApiError(403, nonMemberIds.includes(user.id)
+        ? "This event is open to ICAI members only."
+        : `${attendeeUsers.find((a) => a.id === nonMemberIds[0])?.name ?? "One of your attendees"} is not an ICAI member, and this event is for members only.`);
+    }
+    const baseFor = (id: string) =>
+      nonMemberIds.includes(id) && opts.non_member_fee_paise != null ? opts.non_member_fee_paise : event.fee_paise;
+    const totalBase = seatHolderIds.reduce((sum, id) => sum + baseFor(id), 0);
+
     // Capacity full → fall through to a waitlist registration on the free
     // path. We still reject paid registrations against a full event to
     // avoid charging for a non-confirmed seat — the UI should call
     // /:slug/waitlist below instead in that case.
     const seatsLeft = event.capacity !== null ? event.capacity - event.registered_count : Infinity;
     const isFull = event.capacity !== null && seatsLeft <= 0;
-    if (event.fee_paise > 0 && seatsLeft < totalSeats) {
+    if (totalBase > 0 && seatsLeft < totalSeats) {
       throw new ApiError(400, isFull
         ? "This event is full. Use 'Join waitlist' instead."
         : `Only ${seatsLeft} seat${seatsLeft === 1 ? '' : 's'} left — reduce the number of attendees or try 'Join waitlist'.`);
@@ -176,7 +195,7 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUserOrGu
     }
 
     // â”€â”€ Free event: create the registration row right now â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    if (event.fee_paise === 0) {
+    if (totalBase === 0) {
       const row = await db.transaction(async (tx) => {
         // Lock the event row FOR UPDATE so concurrent registrations
         // serialise on capacity. Postgres default isolation is READ
@@ -241,11 +260,14 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUserOrGu
     // invoice generator can recover the split deterministically. For group
     // bookings the total is (base + GST) × seats — same GST rate applied
     // per seat, matching how branch invoices already work.
-    const perSeatBase = event.fee_paise;
     const gstRate = event.gst_applicable ? Number(event.gst_percent ?? 0) : 0;
-    const perSeatGst = Math.round(perSeatBase * gstRate / 100);
-    const perSeatTotal = perSeatBase + perSeatGst;
-    const totalPaise = perSeatTotal * totalSeats;
+    const gstOn = (base: number) => Math.round(base * gstRate / 100);
+    // Price per seat holder (incl. GST) — members and non-members can differ.
+    const seatPrices: Record<string, number> = {};
+    for (const id of seatHolderIds) seatPrices[id] = baseFor(id) + gstOn(baseFor(id));
+    const totalGst = seatHolderIds.reduce((sum, id) => sum + gstOn(baseFor(id)), 0);
+    const totalPaise = totalBase + totalGst;
+    const perSeatTotal = seatPrices[user.id];
 
     const provider = "sabpaisa" as const;
 
@@ -261,11 +283,14 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUserOrGu
       metadata: {
         event_slug: event.slug,
         event_title: event.title,
-        base_paise: perSeatBase * totalSeats,
+        base_paise: totalBase,
         gst_applicable: event.gst_applicable,
         gst_percent: gstRate,
-        gst_paise: perSeatGst * totalSeats,
+        gst_paise: totalGst,
         seat_count: totalSeats,
+        per_seat_paise: perSeatTotal,
+        seat_prices: seatPrices,
+        non_member_seats: nonMemberIds.length,
         // Payer details stashed so /api/payments/initiate can re-build the
         // gateway prefill without a user table re-fetch on re-initiate.
         payer_name:  user.name,
@@ -285,8 +310,9 @@ registrationsRouter.post("/:slug/register", bookingWriteLimiter, requireUserOrGu
       // registered without logging in.
       view_token: signPaymentViewToken(payment.id),
       amount_paise: totalPaise,
-      base_paise: perSeatBase * totalSeats,
-      gst_paise: perSeatGst * totalSeats,
+      base_paise: totalBase,
+      gst_paise: totalGst,
+      is_non_member: nonMemberIds.includes(user.id),
       gst_applicable: event.gst_applicable,
       gst_percent: gstRate,
       currency: "INR",

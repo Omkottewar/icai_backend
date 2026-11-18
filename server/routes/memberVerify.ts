@@ -113,7 +113,7 @@ async function findMrn(mrn: string) {
 }
 
 async function issueCode(args: {
-  purpose: "existing" | "directory" | "new" | "link";
+  purpose: "existing" | "directory" | "new" | "link" | "nonmember";
   mrn: string; email: string; name: string;
   user_id?: string | null; linking_user_id?: string | null;
   pending?: Record<string, unknown>;
@@ -170,11 +170,14 @@ async function consumeCode(otpId: string, code: string) {
 }
 
 function profileOf(u: { name: string; email: string; phone: string | null }, mrn: string) {
-  return { name: u.name, email: u.email, phone: u.phone ?? "", mrn };
+  return { name: u.name, email: u.email, phone: u.phone ?? "", mrn, is_member: Boolean(mrn) };
 }
 
 // Create (or reuse by email) the portal user that holds this MRN.
-async function ensureMemberUser(mrn: string, p: { name: string; email: string; phone?: string | null }) {
+// inDirectory=false marks an MRN we couldn't find in the imported ICAI
+// member list (users.signup_mrn_in_directory) — admins check these and
+// cancel the registration if the MRN turns out to be wrong.
+async function ensureMemberUser(mrn: string, p: { name: string; email: string; phone?: string | null }, inDirectory: boolean) {
   return db.transaction(async (tx) => {
     const email = p.email.toLowerCase();
     let [user] = await tx.select().from(users).where(sql`lower(${users.email}) = ${email}`).limit(1);
@@ -184,7 +187,11 @@ async function ensureMemberUser(mrn: string, p: { name: string; email: string; p
       if (mp && mp.mrn.replace(/^0+/, "") !== mrn.replace(/^0+/, "")) {
         throw new ApiError(409, "This email is already linked to a different membership number. Please contact the branch office.");
       }
-      if (!mp) await tx.insert(memberProfiles).values({ user_id: user.id, mrn });
+      if (!mp) {
+        await tx.insert(memberProfiles).values({ user_id: user.id, mrn });
+        [user] = await tx.update(users).set({ signup_mrn: mrn, signup_mrn_in_directory: inDirectory, updated_at: new Date() })
+          .where(eq(users.id, user.id)).returning();
+      }
       if (p.phone && !user.phone) {
         [user] = await tx.update(users).set({ phone: p.phone, updated_at: new Date() }).where(eq(users.id, user.id)).returning();
       }
@@ -193,7 +200,7 @@ async function ensureMemberUser(mrn: string, p: { name: string; email: string; p
     [user] = await tx.insert(users).values({
       name: p.name, email, phone: p.phone || null,
       primary_role: "member", status: "active",
-      signup_mrn: mrn,
+      signup_mrn: mrn, signup_mrn_in_directory: inDirectory,
     }).returning();
     await tx.insert(memberProfiles).values({ user_id: user.id, mrn });
     return user;
@@ -248,13 +255,19 @@ memberVerifyRouter.post("/verify", lookupLimiter, async (req: AuthedRequest, res
     const otp = await consumeCode(need(trim(req.body?.otp_id), "Code ID"), need(trim(req.body?.code), "Code"));
     if (otp.purpose === "link") throw new ApiError(400, "Invalid code.");
 
+    if (otp.purpose === "nonmember") {
+      const p = otp.pending as { name?: string; email?: string; phone?: string };
+      const u = await ensureNonMemberUser({ name: p.name || "Guest", email: p.email || otp.email, phone: p.phone });
+      return res.json({ guest_token: signGuestToken(u.id, ""), profile: profileOf(u, "") });
+    }
+
     let user;
     if (otp.purpose === "existing" && otp.user_id) {
       [user] = await db.select().from(users).where(and(eq(users.id, otp.user_id), isNull(users.deleted_at))).limit(1);
       if (!user) throw new ApiError(404, "Member record not found. Please start again.");
     } else {
       const p = otp.pending as { name?: string; email?: string; phone?: string };
-      user = await ensureMemberUser(otp.mrn, { name: p.name || "Member", email: p.email || otp.email, phone: p.phone });
+      user = await ensureMemberUser(otp.mrn, { name: p.name || "Member", email: p.email || otp.email, phone: p.phone }, otp.purpose === "directory");
     }
 
     const [mp] = await db.select({ mrn: memberProfiles.mrn }).from(memberProfiles).where(eq(memberProfiles.user_id, user.id)).limit(1);
@@ -278,6 +291,49 @@ memberVerifyRouter.patch("/profile", async (req: AuthedRequest, res: Response, n
     res.json({ profile: profileOf(u, claims.mrn) });
   } catch (err) { handleApiError(err, res, next); }
 });
+
+// ─── Non-members (no ICAI membership number) ──────────────────────────────
+
+memberVerifyRouter.post("/non-member/start", lookupLimiter, async (req: AuthedRequest, res: Response, next) => {
+  try {
+    const name = need(trim(req.body?.name), "Name").slice(0, 120);
+    const email = need(trim(req.body?.email), "Email").toLowerCase();
+    const phone = need(trim(req.body?.phone), "Phone");
+    if (!validEmail(email)) throw new ApiError(400, "Please enter a valid email address.");
+    if (!/^\+?\d[\d\s-]{7,}$/.test(phone)) throw new ApiError(400, "Please enter a valid phone number.");
+
+    const [existing] = await db.select({ id: users.id }).from(users).where(sql`lower(${users.email}) = ${email}`).limit(1);
+    if (existing) {
+      const [mp] = await db.select({ mrn: memberProfiles.mrn }).from(memberProfiles)
+        .where(and(eq(memberProfiles.user_id, existing.id), isNull(memberProfiles.deleted_at))).limit(1);
+      if (mp) throw new ApiError(409, "This email belongs to an ICAI member. Please go back and choose \"ICAI member\".");
+    }
+
+    const otp_id = await issueCode({ purpose: "nonmember", mrn: `nm:${email}`, email, name, pending: { name, email, phone } });
+    res.json({ otp_id, masked: { email: maskEmail(email) } });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// Create (or reuse by email) a non-member account (role 'guest').
+async function ensureNonMemberUser(p: { name: string; email: string; phone?: string | null }) {
+  const email = p.email.toLowerCase();
+  const [existing] = await db.select().from(users).where(sql`lower(${users.email}) = ${email}`).limit(1);
+  if (existing) {
+    if (existing.deleted_at) throw new ApiError(409, "This email belongs to a closed account. Please contact the branch office.");
+    const [mp] = await db.select({ mrn: memberProfiles.mrn }).from(memberProfiles)
+      .where(and(eq(memberProfiles.user_id, existing.id), isNull(memberProfiles.deleted_at))).limit(1);
+    if (mp) throw new ApiError(409, "This email belongs to an ICAI member. Please register as a member.");
+    if (p.phone && p.phone !== existing.phone) {
+      const [u] = await db.update(users).set({ phone: p.phone, updated_at: new Date() }).where(eq(users.id, existing.id)).returning();
+      return u;
+    }
+    return existing;
+  }
+  const [created] = await db.insert(users).values({
+    name: p.name, email, phone: p.phone || null, primary_role: "guest", status: "active",
+  }).returning();
+  return created;
+}
 
 // ─── Logged in: link an MRN to the account ────────────────────────────────
 

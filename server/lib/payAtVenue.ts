@@ -5,38 +5,21 @@
 // row (provider 'pay_at_venue', status 'pending') records the amount due.
 // The treasurer marks it paid at the event (admin payments page).
 //
-// The per-event switch lives in its own small table so the `events` table
-// doesn't change; it is created on first use (also in migration 0108).
+// The per-event switch lives in lib/eventOptions.ts.
 
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { events, eventRegistrations, payments } from "../../schema/index.js";
 import { ApiError } from "./apiError.js";
 import { notifyAsync } from "./notify.js";
-
-let ready: Promise<void> | null = null;
-function ensureTable(): Promise<void> {
-  ready ??= db.execute(sql.raw(`
-    CREATE TABLE IF NOT EXISTS "event_payment_options" (
-      "event_id" uuid PRIMARY KEY REFERENCES "events"("id") ON DELETE CASCADE,
-      "pay_at_venue" boolean NOT NULL DEFAULT false,
-      "updated_at" timestamptz NOT NULL DEFAULT now()
-    );
-  `)).then(() => undefined).catch((e) => { ready = null; throw e; });
-  return ready;
-}
+import { getEventOptions, setEventOptions } from "./eventOptions.js";
 
 export async function getPayAtVenue(eventId: string): Promise<boolean> {
-  await ensureTable();
-  const rows = (await db.execute(sql`SELECT pay_at_venue FROM event_payment_options WHERE event_id = ${eventId}`)) as unknown as Array<{ pay_at_venue: boolean }>;
-  return Boolean(rows[0]?.pay_at_venue);
+  return (await getEventOptions(eventId)).pay_at_venue;
 }
 
 export async function setPayAtVenue(eventId: string, on: boolean): Promise<void> {
-  await ensureTable();
-  await db.execute(sql`
-    INSERT INTO event_payment_options (event_id, pay_at_venue, updated_at) VALUES (${eventId}, ${on}, now())
-    ON CONFLICT (event_id) DO UPDATE SET pay_at_venue = EXCLUDED.pay_at_venue, updated_at = now()`);
+  await setEventOptions(eventId, { pay_at_venue: on });
 }
 
 // Book the seats of a failed online payment as "pay at venue".
@@ -81,8 +64,11 @@ export async function bookPayAtVenue(failedPaymentId: string): Promise<{ payment
 
     // Price the seats actually booked (an attendee may have registered
     // separately in the meantime).
+    // seat_prices: per-person price (members and non-members can pay
+    // different fees in one group booking).
     const perSeat = Number(meta.per_seat_paise) || Math.round(failed.amount_paise / Math.max(1, holders.length));
-    const amount = perSeat * toCreate.length;
+    const seatPrices = (meta.seat_prices ?? {}) as Record<string, number>;
+    const amount = toCreate.reduce((sum, h) => sum + (Number(seatPrices[h.user_id]) || perSeat), 0);
 
     const [venuePayment] = await tx.insert(payments).values({
       payer_user_id: bookerId,

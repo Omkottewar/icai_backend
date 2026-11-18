@@ -8,6 +8,16 @@ import { buildCsv, sendCsv } from "../../lib/csv.js";
 export const registrationsAdminRouter = Router();
 
 const STATUSES = ["registered", "waitlisted", "cancelled", "attended", "no_show"] as const;
+
+// Member / non-member columns. A member has a membership number (MRN) on
+// member_profiles; mrn_in_directory=false means the MRN was typed by the
+// member and wasn't found in the imported ICAI member list — admins check
+// these and cancel the registration if the MRN is wrong.
+const mrnSql = sql<string | null>`(SELECT mp.mrn FROM member_profiles mp WHERE mp.user_id = ${eventRegistrations.user_id} AND mp.deleted_at IS NULL LIMIT 1)`;
+const memberTypeSql = sql<string>`CASE
+  WHEN EXISTS (SELECT 1 FROM member_profiles mp WHERE mp.user_id = ${eventRegistrations.user_id} AND mp.deleted_at IS NULL) THEN 'member'
+  WHEN ${users.primary_role} IN ('guest', 'employer', 'employee') THEN 'non_member'
+  ELSE 'other' END`;
 const MODES    = ["in_person", "online", "hybrid"] as const;
 
 // Shared filter builder — used by the list and CSV export endpoints so
@@ -26,6 +36,7 @@ function buildRegistrationFilters(query: Record<string, unknown>) {
   const fromDate     = trim(query.from);
   const toDate       = trim(query.to);
   const when         = trim(query.when);                // 'upcoming' | 'past'
+  const member_type  = trim(query.member_type);         // 'member' | 'non_member' | 'mrn_unverified'
 
   const conds: any[] = [isNull(eventRegistrations.deleted_at)];
 
@@ -54,6 +65,8 @@ function buildRegistrationFilters(query: Record<string, unknown>) {
   if (toDate)   conds.push(sql`${events.starts_at} <  (${toDate}::date + INTERVAL '1 day')`);
   if (when === "upcoming") conds.push(sql`${events.starts_at} >= now()`);
   else if (when === "past") conds.push(sql`${events.starts_at} <  now()`);
+  if (member_type === "member" || member_type === "non_member") conds.push(sql`${memberTypeSql} = ${member_type}`);
+  else if (member_type === "mrn_unverified") conds.push(sql`${memberTypeSql} = 'member' AND ${users.signup_mrn_in_directory} = false`);
 
   return conds;
 }
@@ -110,6 +123,9 @@ registrationsAdminRouter.get("/", async (req, res, next) => {
         user_id: eventRegistrations.user_id,
         user_name: users.name,
         user_email: users.email,
+        member_type: memberTypeSql,
+        mrn: mrnSql,
+        mrn_in_directory: users.signup_mrn_in_directory,
         status: eventRegistrations.status,
         registered_at: eventRegistrations.registered_at,
         attended_at: eventRegistrations.attended_at,
@@ -172,6 +188,9 @@ registrationsAdminRouter.get("/export.csv", async (req, res, next) => {
       .select({
         user_name:            users.name,
         user_email:           users.email,
+        member_type:          memberTypeSql,
+        mrn:                  mrnSql,
+        mrn_in_directory:     users.signup_mrn_in_directory,
         event_title:          events.title,
         event_starts_at:      events.starts_at,
         event_committee_name: committees.name,
@@ -190,12 +209,15 @@ registrationsAdminRouter.get("/export.csv", async (req, res, next) => {
       .limit(20_000);
 
     const csv = buildCsv(
-      ["User", "Email", "Event", "Event date", "Committee", "Venue", "Mode",
+      ["User", "Email", "Member / Non-member", "MRN", "MRN check", "Event", "Event date", "Committee", "Venue", "Mode",
        "Status", "Registered at", "Attended at"],
       rows,
       (r) => [
         r.user_name,
         r.user_email,
+        r.member_type === "member" ? "Member" : r.member_type === "non_member" ? "Non-member" : "",
+        r.mrn ?? "",
+        r.member_type === "member" && r.mrn_in_directory === false ? "Not in ICAI list — please verify" : "",
         r.event_title,
         r.event_starts_at,
         r.event_committee_name,

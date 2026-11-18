@@ -269,6 +269,10 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         e.starts_at                 AS event_date,
         a.name                      AS attendee,
         mp.mrn,
+        CASE WHEN mp.user_id IS NOT NULL THEN
+               CASE WHEN a.signup_mrn_in_directory = false THEN 'Member (MRN not in ICAI list)' ELSE 'Member' END
+             WHEN a.primary_role IN ('guest', 'employer', 'employee') THEN 'Non-member'
+             ELSE '' END            AS member_type,
         a.email                     AS attendee_email,
         b.name                      AS booked_by,
         CASE WHEN er.deleted_at IS NOT NULL THEN 'cancelled' ELSE er.status::text END AS seat_status,
@@ -432,6 +436,7 @@ reportsAdminRouter.get("/payments-full.xlsx", async (req, res, next) => {
         { header: "Event date",     key: "event_date",          kind: "date" },
         { header: "Attendee",       key: "attendee",            kind: "text", width: 24 },
         { header: "MRN",            key: "mrn",                 kind: "text", width: 12 },
+        { header: "Member / Non-member", key: "member_type",    kind: "text", width: 26 },
         { header: "Email",          key: "attendee_email",      kind: "text", width: 28 },
         { header: "Booked / paid by", key: "booked_by",         kind: "text", width: 24 },
         { header: "Seat status",    key: "seat_status",         kind: "text", width: 14 },
