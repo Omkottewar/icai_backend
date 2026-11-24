@@ -1,8 +1,11 @@
 import { Router } from "express";
-import { and, asc, desc, eq, ne } from "drizzle-orm";
+import { and, asc, desc, eq, ne, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
 import { paperPresentations } from "../../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { storage } from "../../lib/storage.js";
+
+const fileUrl = (path: string | null) => (path ? storage().url(path) : null);
 
 export const paperPresentationsAdminRouter = Router();
 
@@ -58,6 +61,8 @@ function parseBody(input: any) {
                   : 0,
     is_winner,
     award_year,
+    // Only touched when sent, so older admin forms don't wipe the slide preview.
+    ...(input.cover_file_id !== undefined ? { cover_file_id: trim(input.cover_file_id) || null } : {}),
   };
 }
 
@@ -94,9 +99,13 @@ async function unsetPreviousWinnerForYear(year: number, exceptId: string | null)
 
 paperPresentationsAdminRouter.get("/", async (_req, res, next) => {
   try {
-    const rows = await db.select().from(paperPresentations)
+    const rows = await db.select({
+      p: paperPresentations,
+      pdf_path:   sql<string | null>`(SELECT storage_path FROM files WHERE id = ${paperPresentations.pdf_file_id})`,
+      cover_path: sql<string | null>`(SELECT storage_path FROM files WHERE id = ${paperPresentations.cover_file_id})`,
+    }).from(paperPresentations)
       .orderBy(asc(paperPresentations.sort_order), desc(paperPresentations.presented_on));
-    res.json({ items: rows });
+    res.json({ items: rows.map((r) => ({ ...r.p, pdf_url: fileUrl(r.pdf_path), cover_url: fileUrl(r.cover_path) })) });
   } catch (err) { next(err); }
 });
 

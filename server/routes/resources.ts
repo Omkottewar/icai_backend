@@ -94,6 +94,8 @@ resourcesRouter.get("/papers", async (req, res, next) => {
     const topicCodes = trim(req.query.topic).split(",").map((s) => s.trim()).filter(Boolean);
     const year       = Number(req.query.year);
     const committee  = trim(req.query.committee_id);
+    // ?tag=Audit,GST — the committee tag shown on each card (OR semantics).
+    const tags       = trim(req.query.tag).split(",").map((s) => s.trim()).filter(Boolean);
     const sort       = trim(req.query.sort) === "popular" ? "popular" : "recent";
     const page       = Math.max(1, Number(req.query.page) || 1);
     const pageSize   = Math.min(60, Math.max(6, Number(req.query.pageSize) || 24));
@@ -114,6 +116,7 @@ resourcesRouter.get("/papers", async (req, res, next) => {
       conds.push(sql`EXTRACT(YEAR FROM ${paperPresentations.presented_on}) = ${year}`);
     }
     if (committee) conds.push(eq(paperPresentations.committee_id, committee));
+    if (tags.length > 0) conds.push(inArray(paperPresentations.committee_tag, tags));
     // Topic filter is the trickiest — we need to limit papers whose id
     // appears in paper_topics with any of the requested topic codes.
     // Resolve codes → ids first so the IN clause is bounded.
@@ -142,7 +145,8 @@ resourcesRouter.get("/papers", async (req, res, next) => {
 
     const orderBy = sort === "popular"
       ? [desc(paperPresentations.view_count), desc(paperPresentations.published_at)]
-      : [desc(paperPresentations.published_at), desc(paperPresentations.presented_on)];
+      // Newest presentation date first; undated ones after, by upload time.
+      : [sql`${paperPresentations.presented_on} DESC NULLS LAST`, desc(paperPresentations.published_at)];
 
     const rows = await db
       .select({
@@ -216,6 +220,30 @@ resourcesRouter.get("/papers", async (req, res, next) => {
       })),
       total, page, pageSize,
     });
+  } catch (err) { handleApiError(err, res, next); }
+});
+
+// ─── Papers — filter options ─────────────────────────────────────────────
+// Topic (committee tag) counts and the years that actually have papers, so
+// the listing only offers filters that return something.
+// MUST be registered before /papers/:slug.
+resourcesRouter.get("/papers/facets", async (_req, res, next) => {
+  try {
+    const visible = and(eq(paperPresentations.status, "published"), eq(paperPresentations.hidden, false));
+    const tagRows = await db
+      .select({ tag: paperPresentations.committee_tag, count: sql<number>`count(*)::int` })
+      .from(paperPresentations)
+      .where(and(visible, sql`${paperPresentations.committee_tag} IS NOT NULL AND ${paperPresentations.committee_tag} <> ''`))
+      .groupBy(paperPresentations.committee_tag)
+      .orderBy(desc(sql`count(*)`));
+    const yearRows = await db
+      .select({ year: sql<number>`EXTRACT(YEAR FROM ${paperPresentations.presented_on})::int` })
+      .from(paperPresentations)
+      .where(and(visible, sql`${paperPresentations.presented_on} IS NOT NULL`))
+      .groupBy(sql`1`)
+      .orderBy(desc(sql`1`));
+    const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(paperPresentations).where(visible);
+    res.json({ tags: tagRows, years: yearRows.map((r) => r.year), total });
   } catch (err) { handleApiError(err, res, next); }
 });
 
