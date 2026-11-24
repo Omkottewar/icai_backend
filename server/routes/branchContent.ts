@@ -419,7 +419,9 @@ branchContentRouter.get("/office-bearers", async (req, res, next) => {
 
     const conds = [eq(officeBearers.hidden, false)];
     if (view === "current")  conds.push(eq(officeBearers.is_current, true));
-    if (view === "chairmen") conds.push(eq(officeBearers.role_code, "chairman"));
+    // Past chairmen only — the sitting chairman (is_current) is shown in the
+    // Managing Committee, not in the archive.
+    if (view === "chairmen") conds.push(eq(officeBearers.role_code, "chairman"), eq(officeBearers.is_current, false));
 
     const rows = await db.select({
       id:           officeBearers.id,
