@@ -6,6 +6,11 @@ import { events, committees, files } from "../../schema/index.js";
 import { handleApiError, ApiError, trim } from "../lib/apiError.js";
 import { storage } from "../lib/storage.js";
 import { getEventOptionsMap, DEFAULT_EVENT_OPTIONS } from "../lib/eventOptions.js";
+import { getExtraSpeakersMap, type ExtraSpeaker } from "../lib/eventSpeakers.js";
+
+// Public shape of an extra speaker (no internal file id).
+const publicSpeakers = (list?: ExtraSpeaker[]) =>
+  (list ?? []).map((s) => ({ name: s.name, bio: s.bio, photo_url: s.photo_url ?? null }));
 
 // We need to join `files` twice in the same query (once for the event banner,
 // once for the speaker photo). Drizzle requires a table alias to disambiguate.
@@ -92,6 +97,7 @@ publicEventsRouter.get("/", async (req, res, next) => {
 
     // Member / non-member pricing options (lib/eventOptions.ts).
     const optsById = await getEventOptionsMap(rows.map((r) => r.id)).catch(() => new Map());
+    const speakersById = await getExtraSpeakersMap(rows.map((r) => r.id)).catch(() => new Map<string, ExtraSpeaker[]>());
 
     res.json({
       rows: rows.map((r) => ({
@@ -99,6 +105,7 @@ publicEventsRouter.get("/", async (req, res, next) => {
         ...publicOptions(optsById.get(r.id)),
         banner_url: r.banner_path ? storage().url(r.banner_path) : null,
         speaker_photo_url: r.speaker_photo_path ? storage().url(r.speaker_photo_path) : null,
+        extra_speakers: publicSpeakers(speakersById.get(r.id)),
       })),
     });
   } catch (err) { handleApiError(err, res, next); }
@@ -145,12 +152,14 @@ publicEventsRouter.get("/:slug", async (req, res, next) => {
     if (!row || row.status !== "published") throw new ApiError(404, "Event not found");
 
     const opts = (await getEventOptionsMap([row.id]).catch(() => new Map())).get(row.id);
+    const extra = (await getExtraSpeakersMap([row.id]).catch(() => new Map<string, ExtraSpeaker[]>())).get(row.id);
 
     res.json({
       ...row,
       ...publicOptions(opts),
       banner_url: row.banner_path ? storage().url(row.banner_path) : null,
       speaker_photo_url: row.speaker_photo_path ? storage().url(row.speaker_photo_path) : null,
+      extra_speakers: publicSpeakers(extra),
     });
   } catch (err) { handleApiError(err, res, next); }
 });

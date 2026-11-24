@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { and, asc, desc, eq, ilike, inArray, isNull, ne, sql } from "drizzle-orm";
 import { getEventOptions, setEventOptions, type EventOptions } from "../../lib/eventOptions.js";
+import { getExtraSpeakers, parseExtraSpeakers, setExtraSpeakers, type ExtraSpeaker } from "../../lib/eventSpeakers.js";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "../../../db/client.js";
 import { events, eventRegistrations, committees, branches, files, checklistInstances, checklistInstanceApprovals, eventOverrideLog, users, payments } from "../../../schema/index.js";
@@ -264,6 +265,8 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
 
     let opts: EventOptions = { pay_at_venue: false, allow_non_members: false, non_member_fee_paise: null };
     try { opts = await getEventOptions(row.event.id); } catch { /* table not ready */ }
+    let extraSpeakers: ExtraSpeaker[] = [];
+    try { extraSpeakers = await getExtraSpeakers(row.event.id); } catch { /* table not ready */ }
 
     res.json({
       ...row.event,
@@ -274,6 +277,7 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
       branch_name: row.branch_name,
       banner_url: row.banner_path ? storage().url(row.banner_path) : null,
       speaker_photo_url: row.speaker_photo_path ? storage().url(row.speaker_photo_path) : null,
+      extra_speakers: extraSpeakers,
       registrations_total: regs,
     });
   } catch (err) { handleApiError(err, res, next); }
@@ -284,6 +288,7 @@ eventsAdminRouter.get("/:id", async (req, res, next) => {
 eventsAdminRouter.post("/", canManageEvents, async (req: AuthedRequest, res, next) => {
   try {
     const title = need(trim(req.body.title), "Title");
+    const extraSpeakers = parseExtraSpeakers(req.body.extra_speakers) ?? [];
     const committee_id = need(trim(req.body.committee_id), "Committee");
     const starts_at = parseDate(req.body.starts_at, "Start time");
     const ends_at = parseDate(req.body.ends_at, "End time");
@@ -354,7 +359,8 @@ eventsAdminRouter.post("/", canManageEvents, async (req: AuthedRequest, res, nex
       .returning();
 
     const created = await setEventOptions(row.id, optionsPatch(req.body));
-    res.status(201).json({ ...row, allow_pay_at_venue: created.pay_at_venue, allow_non_members: created.allow_non_members, non_member_fee_paise: created.non_member_fee_paise });
+    const extra_speakers = await setExtraSpeakers(row.id, extraSpeakers);
+    res.status(201).json({ ...row, allow_pay_at_venue: created.pay_at_venue, allow_non_members: created.allow_non_members, non_member_fee_paise: created.non_member_fee_paise, extra_speakers });
   } catch (err) { handleApiError(err, res, next); }
 });
 
@@ -413,9 +419,11 @@ eventsAdminRouter.patch("/:id", canManageEvents, async (req, res, next) => {
     const endsAt = patch.ends_at ?? existing.ends_at;
     if (endsAt <= startsAt) throw new ApiError(400, "End time must be after start time");
 
+    const extraSpeakers = parseExtraSpeakers(req.body.extra_speakers);
     const [row] = await db.update(events).set(patch).where(eq(events.id, id)).returning();
     const o = await setEventOptions(id, optionsPatch(req.body));
-    res.json({ ...row, allow_pay_at_venue: o.pay_at_venue, allow_non_members: o.allow_non_members, non_member_fee_paise: o.non_member_fee_paise });
+    const extra_speakers = extraSpeakers ? await setExtraSpeakers(id, extraSpeakers) : await getExtraSpeakers(id);
+    res.json({ ...row, allow_pay_at_venue: o.pay_at_venue, allow_non_members: o.allow_non_members, non_member_fee_paise: o.non_member_fee_paise, extra_speakers });
   } catch (err) { handleApiError(err, res, next); }
 });
 
