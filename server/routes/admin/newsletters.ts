@@ -1,8 +1,9 @@
 import { Router } from "express";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { db } from "../../../db/client.js";
 import { branchNewsletters } from "../../../schema/index.js";
 import { ApiError, handleApiError, need, trim } from "../../lib/apiError.js";
+import { storage } from "../../lib/storage.js";
 
 export const newslettersAdminRouter = Router();
 
@@ -34,9 +35,13 @@ function parseBody(input: any) {
 
 newslettersAdminRouter.get("/", async (_req, res, next) => {
   try {
-    const rows = await db.select().from(branchNewsletters)
+    const rows = await db.select({
+      n: branchNewsletters,
+      pdf_path: sql<string | null>`(SELECT storage_path FROM files WHERE id = ${branchNewsletters.pdf_file_id})`,
+    }).from(branchNewsletters)
       .orderBy(desc(branchNewsletters.issue_year), desc(branchNewsletters.issue_month));
-    res.json({ items: rows });
+    // pdf_url lets the admin page make cover pictures from page 1.
+    res.json({ items: rows.map((r) => ({ ...r.n, pdf_url: r.pdf_path ? storage().url(r.pdf_path) : null })) });
   } catch (err) { next(err); }
 });
 
