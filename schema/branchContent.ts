@@ -341,6 +341,8 @@ export const branchNewsletters = pgTable(
     title:         text("title").notNull(),
     issue_month:   integer("issue_month").notNull(),
     issue_year:    integer("issue_year").notNull(),
+    series:        text("series").notNull().default("branch"),   // 'branch' | 'wicasa' (mig 0111)
+    part:          integer("part").notNull().default(0),          // 0 = single monthly issue
     pdf_file_id:   uuid("pdf_file_id").references(() => files.id, { onDelete: "set null" }),
     cover_file_id: uuid("cover_file_id").references(() => files.id, { onDelete: "set null" }),
     editor_note:   text("editor_note"),
@@ -350,7 +352,7 @@ export const branchNewsletters = pgTable(
     updated_at:    timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("branch_newsletters_issue_uq").on(t.issue_year, t.issue_month),
+    uniqueIndex("branch_newsletters_series_issue_uq").on(t.series, t.issue_year, t.issue_month, t.part),
   ],
 );
 

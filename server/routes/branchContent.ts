@@ -15,6 +15,7 @@ import {
 } from "../../schema/index.js";
 import { ApiError, handleApiError, trim } from "../lib/apiError.js";
 import { storage } from "../lib/storage.js";
+import { ensureNewsletterSeries } from "../lib/newsletterSeries.js";
 
 // One public router for everything you find under "Resources", "Gallery",
 // and the bottom of the About page. All endpoints filter hidden=false; the
@@ -380,6 +381,7 @@ branchContentRouter.get("/gallery-videos", async (req, res, next) => {
 // ─── Newsletters ─────────────────────────────────────────────────────────────
 branchContentRouter.get("/newsletters", async (_req, res, next) => {
   try {
+    await ensureNewsletterSeries();
     const coverFiles = aliasedTable(files, "cover_files");
 
     const rows = await db.select({
@@ -387,6 +389,8 @@ branchContentRouter.get("/newsletters", async (_req, res, next) => {
       title:       branchNewsletters.title,
       issue_month: branchNewsletters.issue_month,
       issue_year:  branchNewsletters.issue_year,
+      series:      branchNewsletters.series,
+      part:        branchNewsletters.part,
       editor_note: branchNewsletters.editor_note,
       published_at: branchNewsletters.published_at,
       pdf_path:    files.storage_path,
@@ -396,7 +400,7 @@ branchContentRouter.get("/newsletters", async (_req, res, next) => {
       .leftJoin(files, eq(files.id, branchNewsletters.pdf_file_id))
       .leftJoin(coverFiles, eq(coverFiles.id, branchNewsletters.cover_file_id))
       .where(eq(branchNewsletters.hidden, false))
-      .orderBy(desc(branchNewsletters.issue_year), desc(branchNewsletters.issue_month));
+      .orderBy(desc(branchNewsletters.issue_year), desc(branchNewsletters.issue_month), desc(branchNewsletters.part));
 
     res.json({
       items: rows.map((r) => ({
